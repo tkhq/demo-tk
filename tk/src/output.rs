@@ -1,5 +1,3 @@
-//! User-facing output primitives for tk.
-
 use crate::errors::{Classification, ErrorCode, classify, error_details, render_error_chain};
 use anstyle::{AnsiColor, Color, Style};
 use anyhow::Result;
@@ -171,7 +169,6 @@ pub struct ErrorMessage {
     code: ErrorCode,
     #[serde(rename = "httpStatus", skip_serializing_if = "Option::is_none")]
     http_status: Option<u16>,
-    /// Command-specific recovery details for machine consumers.
     #[serde(skip_serializing_if = "Option::is_none")]
     details: Option<serde_json::Value>,
     message: String,

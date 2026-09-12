@@ -5,7 +5,6 @@ use std::fmt::{self, Display, Formatter};
 use crate::outcome::Outcome;
 use crate::output::StdCtx;
 
-/// Arguments for the `tk ssh public-key` subcommand.
 #[derive(Debug, ClapArgs)]
 #[command(about, long_about = None)]
 pub struct Args {}

@@ -14,14 +14,12 @@ use crate::output::MissingRequiredInput;
 
 pub(crate) const MAX_SECRET_BYTES: usize = 1024 * 1024;
 
-/// A secret reference, either by ID or by name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SecretRef {
     Id(Uuid),
     Name(String),
 }
 
-/// Parses a non-blank name of at most 256 bytes.
 pub(crate) fn parse_label(raw: &str) -> Result<String, String> {
     if raw.trim().is_empty() {
         return Err("secret name must not be blank".into());
@@ -32,7 +30,6 @@ pub(crate) fn parse_label(raw: &str) -> Result<String, String> {
     Ok(raw.to_owned())
 }
 
-/// Parses a new secret's name, which must not be a UUID.
 pub(crate) fn parse_name(raw: &str) -> Result<String, String> {
     if Uuid::parse_str(raw).is_ok() {
         return Err("secret name must not be a UUID".into());
@@ -50,7 +47,6 @@ pub(crate) fn parse_key_value(raw: &str) -> Result<KeyValue, String> {
     }
 }
 
-/// Rejects duplicate keys in repeatable flags.
 pub(crate) fn unique_key_values(pairs: Vec<KeyValue>, flag: &str) -> Result<Vec<KeyValue>> {
     let mut seen = std::collections::BTreeSet::new();
     for pair in &pairs {
@@ -63,7 +59,6 @@ pub(crate) fn unique_key_values(pairs: Vec<KeyValue>, flag: &str) -> Result<Vec<
     Ok(pairs)
 }
 
-/// Reads from a file, stdin, or a hidden prompt.
 pub(crate) fn read_value(
     from_file: Option<&Path>,
     non_interactive: bool,
@@ -91,7 +86,6 @@ pub(crate) fn read_value(
     normalize(value.as_bytes().to_vec())
 }
 
-/// Normalizes a non-empty UTF-8 value up to 1 MiB.
 pub(crate) fn normalize(bytes: Vec<u8>) -> Result<Zeroizing<String>> {
     let mut bytes = Zeroizing::new(bytes);
     if bytes.len() > MAX_SECRET_BYTES {
@@ -117,10 +111,8 @@ pub(crate) fn normalize(bytes: Vec<u8>) -> Result<Zeroizing<String>> {
     Ok(value)
 }
 
-/// Turnkey's development signer quorum public key.
 const TURNKEY_DEV_SIGNER_QUORUM_PUBLIC_KEY: &str = "046101205064b86e23b9619dad4a887a3cb31ac4cb2cb8256556fdf315c7d42d9cece7bbc7b5ebc70a34b2faa4d1f0dffad0c2706b08f0065e0cb0534140b66564048cf9ed5f579298cc1571823a3222b82d80c529c551f6070fbe712ae1a9e8d1a23b7006e306d27190358dfcd9c44624918a00f23c920a33cb14f5b026eafc865d";
 
-/// Returns the trusted quorum key for an API base URL.
 pub(crate) fn quorum_for(api_base_url: &str) -> Result<QuorumPublicKey> {
     match api_base_url.trim_end_matches('/') {
         "https://api.turnkey.com" => Ok(QuorumPublicKey::production_signer()),

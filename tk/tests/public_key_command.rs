@@ -1,3 +1,5 @@
+//! Tests for `tk public-key`.
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;

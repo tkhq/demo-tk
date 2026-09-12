@@ -71,7 +71,6 @@ struct Binding {
 }
 
 impl Binding {
-    /// Creates a binding with a normalized API base URL.
     fn of(auth: &ResolvedAuth) -> Self {
         Self {
             organization_id: auth.org_id.clone(),
@@ -81,7 +80,6 @@ impl Binding {
     }
 }
 
-/// Persisted state for an export awaiting approval.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PendingExport {
@@ -96,7 +94,6 @@ struct PendingExport {
 }
 
 impl PendingExport {
-    /// Returns the state path for this identity and secret.
     fn path(state: &Path, binding: &Binding, secret_id: Uuid) -> PathBuf {
         state
             .join("secrets/pending")
@@ -165,7 +162,6 @@ impl PendingExport {
         })
     }
 
-    /// Rebuilds the recipient and verifies its target key.
     fn recipient(&self, quorum: &QuorumPublicKey) -> Result<ExportClient> {
         let ikm = Zeroizing::new(
             hex::decode(&*self.key_material)
@@ -199,9 +195,6 @@ pub(super) async fn run(
     out: Option<PathBuf>,
     context: Vec<KeyValue>,
 ) -> Result<SecretOutput> {
-    // Both resolved before anything is submitted: an unknown API base URL
-    // fails without stamping a request for that host, and an export never
-    // starts without somewhere to keep the key that decrypts it.
     let quorum = quorum_for(&auth.api_base_url)?;
     let state_dir = state_dir()?;
     export(&state_dir, quorum, auth, secret, out, context).await
@@ -222,11 +215,8 @@ async fn export(
     };
     let path = PendingExport::path(state_dir, &binding, secret_id);
 
-    // Continue the export this identity left awaiting approval.
     if let Some(state) = PendingExport::load(&path, &binding).await? {
         let fetched = get_activity(&auth, &state.activity_id).await?;
-        // A rejected or failed export is over: clear the state so the next run
-        // starts fresh. A failed removal must not hide why the export ended.
         let record = match observed(COMMAND, export_data(secret_id, fetched)) {
             Ok(record) => record,
             Err(error) => {
@@ -239,8 +229,6 @@ async fn export(
         if record.is_pending() {
             return Ok(pending(record));
         }
-        // Terminal, so a decrypt failure repeats on every later run: name the
-        // state file the user has to delete to escape it.
         let value =
             decrypt(state.recipient(&quorum)?, &record, &auth.org_id).with_context(|| {
                 format!(
@@ -248,16 +236,11 @@ async fn export(
                     path.display()
                 )
             })?;
-        // Removed only once the value has reached the user, so a failed
-        // delivery can still be retried against the same activity.
         let delivered = deliver(record, value, out).await?;
         remove(&path).await?;
         return Ok(delivered);
     }
 
-    // Start a new export. The recipient key stays in memory until the API
-    // names an activity that still needs approval, so a request the API
-    // rejected or never answered leaves nothing behind to reconcile.
     let mut ikm = Zeroizing::new([0u8; 32]);
     OsRng.fill_bytes(&mut *ikm);
     let recipient = ExportClient::dangerous_from_bytes(*ikm, &quorum);
@@ -303,8 +286,6 @@ async fn export(
             key_material: Zeroizing::new(hex::encode(ikm.as_slice())),
             activity_id: activity_id.clone(),
         };
-        // The activity now exists and only this key can decrypt it, so a
-        // failure here is unrecoverable: say which activity to abandon.
         state.create(&path).await.with_context(|| {
             format!(
                 "save the recovery key for export activity {activity_id}; that export cannot be finished, so reject it and run a new export"
@@ -312,7 +293,6 @@ async fn export(
         })?;
         return Ok(pending(record));
     }
-    // Approved on submission, so the key was never needed beyond this process.
     let value = decrypt(recipient, &record, &auth.org_id)?;
     deliver(record, value, out).await
 }
@@ -406,7 +386,6 @@ async fn deliver(
     }
 }
 
-/// Resolves a unique secret name across all list pages.
 async fn resolve_name(auth: &ResolvedAuth, name: &str) -> Result<Uuid> {
     let mut matches = Vec::new();
     let mut after = String::new();

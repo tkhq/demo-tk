@@ -1,3 +1,5 @@
+//! Foreground SSH agent bound to a Unix socket.
+
 use std::io::ErrorKind;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};

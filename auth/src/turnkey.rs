@@ -1,3 +1,5 @@
+//! Turnkey-backed signing client helpers.
+
 use anyhow::{Context, Result, anyhow};
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 use turnkey_client::generated::immutable::common::v1::HashFunction;
@@ -15,6 +17,7 @@ pub struct TurnkeySigner {
 }
 
 impl TurnkeySigner {
+    /// Builds a signer from resolved auth configuration.
     pub fn new(config: Config) -> Result<Self> {
         let api_key =
             TurnkeyP256ApiKey::from_strings(&config.api_private_key, Some(&config.api_public_key))
@@ -29,6 +32,7 @@ impl TurnkeySigner {
         Ok(Self { client, config })
     }
 
+    /// Fetches the configured private key's raw public key bytes.
     pub async fn get_public_key(&self) -> Result<Vec<u8>> {
         let private_key_id = self.required_private_key_id()?;
         let response = self

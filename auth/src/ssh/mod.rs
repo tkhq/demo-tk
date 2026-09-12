@@ -1,15 +1,12 @@
+//! SSH wire-format helpers for public keys and signatures.
+
 use anyhow::{Context, Result, anyhow};
 use base64::Engine;
 use sha2::{Digest, Sha512};
 
-/// SSH agent protocol constants, framing helpers, and reference links.
 pub mod agent;
-
-/// SSH agent protocol constants, framing helpers, and reference links.
-pub mod protocol;
-
-/// Git signing invocation parsing.
 pub mod git;
+pub mod protocol;
 
 const SSH_ED25519_ALGORITHM: &str = "ssh-ed25519";
 const SSHSIG_PREAMBLE: &[u8] = b"SSHSIG";

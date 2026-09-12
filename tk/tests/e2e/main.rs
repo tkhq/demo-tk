@@ -14,6 +14,9 @@
 //! it when the test ends, so tests are isolated from each other and run in
 //! parallel. The parent organization only ever sees sub-organization creation
 //! and deletion.
+
+// The runner reports retry progress on stderr; that is this suite's output contract.
+#![allow(clippy::print_stderr)]
 mod config;
 mod run;
 

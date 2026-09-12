@@ -8,6 +8,9 @@ description = "Turnkey backed auth library for SSH, Git signing, and related wor
 repository = "https://github.com/tkhq/rust-sdk"
 homepage = "https://turnkey.com"
 
+[lints]
+workspace = true
+
 [dependencies]
 thiserror = { workspace = true }
 anyhow = { workspace = true }

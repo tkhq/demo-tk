@@ -1,3 +1,5 @@
+//! Tests for `tk auth`.
+
 use assert_cmd::Command;
 use serde_json::{Value, json};
 use std::{fs, path::Path};

@@ -1,3 +1,5 @@
+//! Auth configuration resolution and persistence helpers.
+
 use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
 use std::os::unix::fs::PermissionsExt;
@@ -36,7 +38,7 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-/// Partially resolved auth configuration with missing required fields preserved as `None`.
+/// Effective config, with missing required fields left `None`.
 pub struct ResolvedConfig {
     /// Resolved Turnkey organization identifier, if present.
     pub organization_id: Option<String>,
@@ -66,21 +68,21 @@ pub enum ConfigKey {
 }
 
 impl Config {
-    /// Resolves the complete auth configuration from the current process environment and config file.
+    /// Resolves a complete config from the process environment and config file.
     pub async fn resolve() -> Result<Self> {
         ResolvedConfig::resolve()
             .await
             .and_then(ResolvedConfig::into_complete)
     }
 
-    /// Resolves the complete auth configuration from an explicit config path and environment map.
+    /// Resolves a complete config from an explicit path and environment map.
     pub fn resolve_from_map(path: &Path, env: &BTreeMap<String, String>) -> Result<Self> {
         ResolvedConfig::resolve_from_map(path, env).and_then(ResolvedConfig::into_complete)
     }
 }
 
 impl ResolvedConfig {
-    /// Resolves the effective auth configuration, preserving unset required values as `None`.
+    /// Resolves the effective config, leaving unset required values `None`.
     pub async fn resolve() -> Result<Self> {
         let path = global_config_path()?;
         let env = std::env::vars().collect::<BTreeMap<_, _>>();

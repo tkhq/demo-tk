@@ -175,12 +175,10 @@ fn registry_path(options: &AuthOptions) -> Result<PathBuf> {
     }
 }
 
-/// Returns the directory for tk-managed state.
 pub(crate) fn state_dir() -> Result<PathBuf> {
     Ok(home()?.join(".config/turnkey/tk"))
 }
 
-/// Removes files older than `max_age`, ignoring a missing directory.
 pub(crate) async fn sweep_stale(dir: &Path, max_age: Duration) -> std::io::Result<usize> {
     let cutoff = SystemTime::now()
         .checked_sub(max_age)

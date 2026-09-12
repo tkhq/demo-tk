@@ -1,3 +1,5 @@
+//! Tests for public-key rendering.
+
 use turnkey_auth::ssh::encode_public_key_line;
 
 #[test]

@@ -29,8 +29,6 @@ pub(super) async fn run(
         .into_iter()
         .map(|KeyValue { key, value }| (key, value))
         .collect();
-    // The SDK helper takes an owned String. Move the value out of the
-    // zeroizing buffer rather than copy it.
     let plaintext = std::mem::take(&mut *value);
     let ActivityResult {
         result: secret_id,

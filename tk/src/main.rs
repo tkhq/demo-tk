@@ -1,5 +1,4 @@
-//! Entry point; all output goes through the shell, never print macros.
-#![deny(clippy::print_stdout, clippy::print_stderr)]
+//! `tk` command-line entry point.
 
 mod auth;
 mod cli;
