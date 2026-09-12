@@ -20,7 +20,8 @@ use turnkey_client::generated::GetWhoamiRequest;
 use uuid::Uuid;
 
 use crate::{
-    errors::{InvalidInput, Malformed},
+    errors::{InvalidInput, Malformed, OrganizationMismatch},
+    gpg::registry::{GpgKeyEntry, GpgKeyTable, SelectError, SigningKeyName, StoredGpgKey},
     operations::OperationOutput,
 };
 
@@ -102,6 +103,10 @@ struct Registry {
     active_profile: Option<String>,
     #[serde(default)]
     profiles: BTreeMap<String, Profile>,
+    /// `OpenPGP` keys by fingerprint, shared by every profile because a key
+    /// belongs to an organization.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    gpg_keys: BTreeMap<String, StoredGpgKey>,
 }
 
 impl Default for Registry {
@@ -110,6 +115,7 @@ impl Default for Registry {
             version: 1,
             active_profile: None,
             profiles: BTreeMap::new(),
+            gpg_keys: BTreeMap::new(),
         }
     }
 }
@@ -442,58 +448,136 @@ const ENV_BUNDLE: [&str; 3] = [
 ];
 
 pub async fn resolve(options: &AuthOptions) -> Result<ResolvedAuth> {
-    if options.profile.is_none() {
-        let bundle = ENV_BUNDLE.map(std::env::var_os);
-        if bundle.iter().any(Option::is_some) {
-            let [org, public, private] = bundle;
-            let (Some(org), Some(public), Some(private)) = (org, public, private) else {
-                return Err(InvalidInput(
-                    "partial credential environment: organization ID, public key, and private key are all required".into(),
-                )
-                .into());
-            };
-            let [org, public, private] = [org, public, private].map(|value| {
-                // The Err payload is the credential bytes, which must not enter the error chain.
-                #[allow(clippy::map_err_ignore)]
-                value.into_string().map_err(|_| {
-                    InvalidInput("credential environment value is not valid Unicode".into())
-                })
-            });
-            let (org, public, private) = (org?, public?, private?);
-            if org.is_empty() || public.is_empty() || private.is_empty() {
-                return Err(
-                    InvalidInput("credential environment fields must not be empty".into()).into(),
-                );
-            }
-            let org = match options.organization_id {
-                Some(org) => org,
-                None => Uuid::parse_str(&org).map_err(|error| {
-                    Malformed::new("invalid environment organization ID", error)
-                })?,
-            };
-            return Ok(ResolvedAuth {
-                org_id: org,
-                api_base_url: endpoint(options, DEFAULT_URL.into())?,
-                stamper: parse_key(&private, &public)?,
-                source: CredentialSource::Environment,
-            });
-        }
+    if let Some(auth) = resolve_environment(options)? {
+        return Ok(auth);
     }
     let path = registry_path(options)?;
     let registry = load(&path).await?;
-    let Some(name) = options
+    let name = options
         .profile
-        .as_ref()
-        .or(registry.active_profile.as_ref())
-    else {
-        return Err(InvalidInput("no selected identity; use --profile or tk login".into()).into());
-    };
-    let profile = registry.profiles.get(name).ok_or_else(|| {
+        .clone()
+        .or(registry.active_profile.clone())
+        .ok_or_else(|| InvalidInput("no selected identity; use --profile or tk login".into()))?;
+    let profile = registry.profiles.get(&name).ok_or_else(|| {
         InvalidInput(format!(
             "profile {name} does not exist in {}",
             path.display()
         ))
     })?;
+    resolve_profile(options, name, profile).await
+}
+
+/// Credentials for `organization_id`, the owner of a key about to be used.
+/// An explicit identity (the environment bundle, `--profile`, `TK_PROFILE`,
+/// or `--organization-id`) must belong to that organization. Without one,
+/// the registry's profiles for the organization are searched: the only one,
+/// or the active profile when several qualify.
+pub async fn resolve_for_organization(
+    options: &AuthOptions,
+    organization_id: Uuid,
+) -> Result<ResolvedAuth> {
+    let mismatch = |actual, identity| OrganizationMismatch {
+        expected: organization_id,
+        actual,
+        identity,
+    };
+    if let Some(actual) = options.organization_id
+        && actual != organization_id
+    {
+        return Err(mismatch(actual, "--organization-id").into());
+    }
+    // An explicit profile or the environment bundle resolves as any other
+    // command does and is then checked against the organization.
+    let explicit = match options.profile {
+        Some(_) => Some(resolve(options).await?),
+        None => resolve_environment(options)?,
+    };
+    if let Some(auth) = explicit {
+        if auth.org_id != organization_id {
+            let identity = match auth.source {
+                CredentialSource::Environment => "environment",
+                CredentialSource::Profile(_) => "profile",
+            };
+            return Err(mismatch(auth.org_id, identity).into());
+        }
+        return Ok(auth);
+    }
+    let path = registry_path(options)?;
+    let registry = load(&path).await?;
+    let candidates: Vec<(&String, &Profile)> = registry
+        .profiles
+        .iter()
+        .filter(|(_, profile)| profile.organization_id == organization_id)
+        .collect();
+    let (name, profile) = match candidates.as_slice() {
+        [] => {
+            return Err(InvalidInput(format!(
+                "no profile holds a credential for organization {organization_id}; run tk login <name> --organization-id {organization_id} --api-key-file <path>"
+            ))
+            .into());
+        }
+        [one] => *one,
+        several => several
+            .iter()
+            .copied()
+            .find(|(name, _)| Some(*name) == registry.active_profile.as_ref())
+            .ok_or_else(|| {
+                let names: Vec<&str> = several.iter().map(|(name, _)| name.as_str()).collect();
+                InvalidInput(format!(
+                    "profiles {} all hold a credential for organization {organization_id}; select one with --profile, TK_PROFILE, or tk profile use",
+                    names.join(", ")
+                ))
+            })?,
+    };
+    resolve_profile(options, name.clone(), profile).await
+}
+
+/// The `TURNKEY_*` bundle, which an explicit `--profile` disables. `None`
+/// when no bundle variable is set.
+fn resolve_environment(options: &AuthOptions) -> Result<Option<ResolvedAuth>> {
+    if options.profile.is_some() {
+        return Ok(None);
+    }
+    let bundle = ENV_BUNDLE.map(std::env::var_os);
+    if bundle.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    let [org, public, private] = bundle;
+    let (Some(org), Some(public), Some(private)) = (org, public, private) else {
+        return Err(InvalidInput(
+            "partial credential environment: organization ID, public key, and private key are all required".into(),
+        )
+        .into());
+    };
+    let [org, public, private] = [org, public, private].map(|value| {
+        // The Err payload is the credential bytes, which must not enter the error chain.
+        #[allow(clippy::map_err_ignore)]
+        value
+            .into_string()
+            .map_err(|_| InvalidInput("credential environment value is not valid Unicode".into()))
+    });
+    let (org, public, private) = (org?, public?, private?);
+    if org.is_empty() || public.is_empty() || private.is_empty() {
+        return Err(InvalidInput("credential environment fields must not be empty".into()).into());
+    }
+    let org = match options.organization_id {
+        Some(org) => org,
+        None => Uuid::parse_str(&org)
+            .map_err(|error| Malformed::new("invalid environment organization ID", error))?,
+    };
+    Ok(Some(ResolvedAuth {
+        org_id: org,
+        api_base_url: endpoint(options, DEFAULT_URL.into())?,
+        stamper: parse_key(&private, &public)?,
+        source: CredentialSource::Environment,
+    }))
+}
+
+async fn resolve_profile(
+    options: &AuthOptions,
+    name: String,
+    profile: &Profile,
+) -> Result<ResolvedAuth> {
     Ok(ResolvedAuth {
         org_id: options.organization_id.unwrap_or(profile.organization_id),
         api_base_url: endpoint(options, profile.api_base_url.clone())?,
@@ -504,6 +588,40 @@ pub async fn resolve(options: &AuthOptions) -> Result<ResolvedAuth> {
 
 fn profile_missing(name: &str) -> InvalidInput {
     InvalidInput(format!("profile {name} does not exist"))
+}
+
+/// Reading the table needs no credential.
+pub async fn load_gpg_keys(options: &AuthOptions) -> Result<GpgKeyTable> {
+    let path = registry_path(options)?;
+    let registry = load(&path).await?;
+    GpgKeyTable::from_stored(registry.gpg_keys, &path)
+}
+
+pub async fn register_gpg_key(options: &AuthOptions, entry: GpgKeyEntry) -> Result<()> {
+    let path = registry_path(options)?;
+    let _lock = registry_lock(&path).await?;
+    let mut registry = load(&path).await?;
+    let mut table = GpgKeyTable::from_stored(registry.gpg_keys, &path)?;
+    table.insert(entry);
+    registry.gpg_keys = table.into_stored();
+    save(&path, &registry).await
+}
+
+pub async fn remove_gpg_key(
+    options: &AuthOptions,
+    name: SigningKeyName,
+) -> Result<Result<GpgKeyEntry, SelectError>> {
+    let path = registry_path(options)?;
+    let _lock = registry_lock(&path).await?;
+    let mut registry = load(&path).await?;
+    let mut table = GpgKeyTable::from_stored(registry.gpg_keys, &path)?;
+    let removed = match table.remove(name) {
+        Ok(entry) => entry,
+        Err(error) => return Ok(Err(error)),
+    };
+    registry.gpg_keys = table.into_stored();
+    save(&path, &registry).await?;
+    Ok(Ok(removed))
 }
 
 pub async fn run_auth(command: AuthCommand, options: &AuthOptions) -> Result<OperationOutput> {

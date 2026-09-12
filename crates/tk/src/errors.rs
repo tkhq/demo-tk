@@ -27,6 +27,25 @@ impl Malformed {
     }
 }
 
+/// `identity` names the source of the selection.
+#[derive(Debug, thiserror::Error)]
+#[error("the selected identity ({identity}) belongs to organization {actual}, not {expected}")]
+pub struct OrganizationMismatch {
+    pub expected: uuid::Uuid,
+    pub actual: uuid::Uuid,
+    pub identity: &'static str,
+}
+
+#[cfg(test)]
+pub(crate) fn assert_malformed_response(error: &anyhow::Error, chain: &[&str]) {
+    let activity = error
+        .downcast_ref::<ActivityError>()
+        .expect("the error should be an ActivityError");
+    assert_eq!(activity.kind(), ActivityErrorKind::MalformedResponse);
+    let rendered: Vec<String> = error.chain().map(ToString::to_string).collect();
+    assert_eq!(rendered, chain);
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("HTTP response was not successful: {status} ({body})")]
 pub struct UnexpectedHttpStatus {
@@ -145,6 +164,9 @@ pub fn classify(error: &anyhow::Error) -> Classification {
             return Classification::new(ErrorCode::InvalidInput, None);
         }
         if cause.downcast_ref::<Malformed>().is_some() {
+            return Classification::new(ErrorCode::InvalidInput, None);
+        }
+        if cause.downcast_ref::<OrganizationMismatch>().is_some() {
             return Classification::new(ErrorCode::InvalidInput, None);
         }
         if cause.downcast_ref::<MissingResource>().is_some() {

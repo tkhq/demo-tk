@@ -14,11 +14,12 @@ use tempfile::TempDir;
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 use uuid::Uuid;
 
-const SCRUBBED: [&str; 11] = [
+const SCRUBBED: [&str; 12] = [
     "HOME",
     "TK_CONFIG",
     "TK_PROFILE",
     "TK_NON_INTERACTIVE",
+    "TK_GPG_PROGRAM",
     "TURNKEY_TK_CONFIG_PATH",
     "TURNKEY_ORGANIZATION_ID",
     "TURNKEY_API_PUBLIC_KEY",
@@ -68,6 +69,15 @@ pub(crate) struct AdminLogin {
     pub(crate) name: String,
     pub(crate) key_file: PathBuf,
     pub(crate) record: Value,
+}
+
+pub(crate) fn bare_cli(home: &Path) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_tk"));
+    for name in SCRUBBED {
+        cmd.env_remove(name);
+    }
+    cmd.env("HOME", home);
+    cmd
 }
 
 pub(crate) fn result<'v>(record: &'v Value, key: &str) -> &'v Value {
@@ -182,13 +192,9 @@ impl Run {
         &self.config.public_key
     }
 
-    fn cli_at(&self, base: &str) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_tk"));
-        for name in SCRUBBED {
-            cmd.env_remove(name);
-        }
-        cmd.env("HOME", self.home.path())
-            .arg("--message-format=json")
+    pub(crate) fn cli_at(&self, base: &str) -> Command {
+        let mut cmd = bare_cli(self.home.path());
+        cmd.arg("--message-format=json")
             .arg("--api-base-url")
             .arg(base);
         cmd
@@ -252,7 +258,7 @@ impl Run {
         )
     }
 
-    fn redact(&self, bytes: &[u8]) -> String {
+    pub(crate) fn redact(&self, bytes: &[u8]) -> String {
         let mut text = String::from_utf8_lossy(bytes).into_owned();
         for secret in self.secrets.borrow().iter() {
             text = text.replace(secret, "<redacted>");
@@ -472,7 +478,7 @@ impl Run {
         (user_id, key)
     }
     // The admin key in `tk api-key generate` format.
-    fn admin_key_file(&self) -> PathBuf {
+    pub(crate) fn admin_key_file(&self) -> PathBuf {
         let path = self.home.path().join("admin-key.json");
         let mut file = OpenOptions::new()
             .write(true)
