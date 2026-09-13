@@ -6,4 +6,4 @@ pub mod errors;
 pub mod git_sign;
 pub mod public_key;
 pub mod ssh;
-pub mod turnkey;
+pub(crate) mod turnkey;

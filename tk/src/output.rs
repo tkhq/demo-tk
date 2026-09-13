@@ -1,12 +1,13 @@
 use crate::errors::{Classification, ErrorCode, classify, error_details, render_error_chain};
 use anstyle::{AnsiColor, Color, Style};
-use anyhow::Result;
+use anyhow::{Error, Result};
 use clap::ValueEnum;
 use serde::Serialize;
+use serde_json::Value;
 use std::fmt::{self, Display, Formatter};
 use std::io::{self, IsTerminal, Stderr, Stdout, Write};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Copy, Debug, ValueEnum)]
 pub enum MessageFormat {
     /// Human-readable text.
     Human,
@@ -20,7 +21,7 @@ impl MessageFormat {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
+#[derive(Clone, Debug, ValueEnum)]
 pub enum ColorChoice {
     /// Color when stderr is a terminal.
     Auto,
@@ -101,22 +102,18 @@ impl<W, W2> Shell<W, W2> {
 pub struct Human<'a, W: Write, W2: Write>(&'a mut Shell<W, W2>);
 
 impl<W: Write, W2: Write> Human<'_, W, W2> {
-    pub fn line(&mut self, message: impl Display) -> Result<()> {
-        if matches!(self.0.message_format, MessageFormat::Human) {
-            writeln!(self.0.stdout, "{message}")?;
-        }
+    fn line(&mut self, message: impl Display) -> Result<()> {
+        writeln!(self.0.stdout, "{message}")?;
         Ok(())
     }
 
-    pub fn error(&mut self, error: &anyhow::Error) -> Result<()> {
-        if matches!(self.0.message_format, MessageFormat::Human) {
-            let style = self.0.style(AnsiColor::Red);
-            writeln!(
-                self.0.stderr,
-                "{style}error{style:#}: {}",
-                render_error_chain(error)
-            )?;
-        }
+    pub fn error(&mut self, error: &Error) -> Result<()> {
+        let style = self.0.style(AnsiColor::Red);
+        writeln!(
+            self.0.stderr,
+            "{style}error{style:#}: {}",
+            render_error_chain(error)
+        )?;
         Ok(())
     }
 }
@@ -152,14 +149,12 @@ impl<W: Write, W2: Write> Ctx<W, W2> {
      --non-interactive / TK_NON_INTERACTIVE=true)"
 )]
 pub struct MissingRequiredInput {
-    flag_hint: String,
+    flag_hint: &'static str,
 }
 
 impl MissingRequiredInput {
-    pub fn new(flag_hint: &str) -> Self {
-        Self {
-            flag_hint: flag_hint.to_string(),
-        }
+    pub fn new(flag_hint: &'static str) -> Self {
+        Self { flag_hint }
     }
 }
 
@@ -170,7 +165,7 @@ pub struct ErrorMessage {
     #[serde(rename = "httpStatus", skip_serializing_if = "Option::is_none")]
     http_status: Option<u16>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    details: Option<serde_json::Value>,
+    details: Option<Value>,
     message: String,
 }
 
@@ -178,7 +173,7 @@ impl ErrorMessage {
     pub(crate) const RUNTIME_REASON: &'static str = "command_error";
     pub(crate) const MISSING_INPUT_REASON: &'static str = "missing_required_input";
 
-    pub fn from_error(error: &anyhow::Error) -> Self {
+    pub fn from_error(error: &Error) -> Self {
         if error.downcast_ref::<MissingRequiredInput>().is_some() {
             return Self {
                 reason: Self::MISSING_INPUT_REASON,
@@ -219,9 +214,10 @@ impl Display for ErrorMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::anyhow;
     use serde::Serialize;
 
-    pub type TestShell = Shell<Vec<u8>, Vec<u8>>;
+    type TestShell = Shell<Vec<u8>, Vec<u8>>;
 
     impl<W: Default, W2: Default> Default for Shell<W, W2> {
         fn default() -> Self {
@@ -235,21 +231,21 @@ mod tests {
     }
 
     impl TestShell {
-        pub fn with_json_formatter() -> Self {
+        fn with_json_formatter() -> Self {
             Self {
                 message_format: MessageFormat::Json,
                 ..Default::default()
             }
         }
 
-        pub fn with_human_formatter() -> Self {
+        fn with_human_formatter() -> Self {
             Self {
                 message_format: MessageFormat::Human,
                 ..Default::default()
             }
         }
 
-        pub fn into_stdout(self) -> Vec<u8> {
+        fn into_stdout(self) -> Vec<u8> {
             self.stdout
         }
     }
@@ -317,10 +313,7 @@ mod tests {
         assert_eq!(output, concat!(r#"{"value":"ok"}"#, "\n"));
     }
 
-    use anyhow::anyhow;
-    use serde_json::Value;
-
-    fn emit_error_json(error: &anyhow::Error) -> Value {
+    fn emit_error_json(error: &Error) -> Value {
         let mut shell = TestShell::with_json_formatter();
         shell.emit(&ErrorMessage::from_error(error)).unwrap();
         let line = String::from_utf8(shell.into_stdout()).unwrap();
@@ -330,16 +323,18 @@ mod tests {
 
     #[test]
     fn missing_required_input_keeps_its_reason_and_code() {
-        let error = anyhow::Error::new(MissingRequiredInput::new("--socket"))
-            .context("resolving required inputs");
+        let error =
+            Error::new(MissingRequiredInput::new("--socket")).context("resolving required inputs");
         let json = emit_error_json(&error);
 
         assert_eq!(json["reason"], "missing_required_input");
         assert_eq!(json["code"], "missing_required_input");
         assert!(json.get("httpStatus").is_none());
-        let message = json["message"].as_str().unwrap();
-        assert!(message.contains("resolving required inputs"));
-        assert!(message.contains("--socket is required in non-interactive mode"));
+        assert_eq!(
+            json["message"],
+            "resolving required inputs: --socket is required in non-interactive mode (set \
+             --socket or run in a TTY without --non-interactive / TK_NON_INTERACTIVE=true)"
+        );
     }
 
     #[test]
@@ -357,10 +352,7 @@ mod tests {
             .context("middle context")
             .context("top context");
         let json = emit_error_json(&error);
-        let message = json["message"].as_str().unwrap();
-        assert!(message.contains("top context"));
-        assert!(message.contains("middle context"));
-        assert!(message.contains("base failure"));
+        assert_eq!(json["message"], "top context: middle context: base failure");
     }
 
     #[test]

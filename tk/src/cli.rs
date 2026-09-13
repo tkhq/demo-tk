@@ -6,16 +6,18 @@ use crate::output::{ColorChoice, Ctx, ErrorMessage, MessageFormat, Shell, StdCtx
 use crate::resources::{ApiKeyCommand, PolicyCommand, PreparedResource, UserCommand};
 use crate::secrets::{PreparedSecret, SecretCommand};
 use crate::wallets::{PreparedWalletCommand, SignCommand, WalletCommand};
+use anyhow::Result;
 use clap::{ArgAction, Args, Parser, Subcommand, builder::FalseyValueParser, error::ErrorKind};
 use serde::Serialize;
+use std::env;
 use std::ffi::OsString;
 use std::fmt::Display;
-use std::io::Write;
+use std::io::{self, Write};
 use std::process::ExitCode;
 use tracing::debug;
 use turnkey_auth::config::DEFAULT_CONFIG_DIR_DISPLAY;
 
-pub(crate) const LONG_ABOUT: &str = r#"CLI for Turnkey backed auth workflows.
+const LONG_ABOUT: &str = r#"CLI for Turnkey backed auth workflows.
 
 Interactive behavior:
     By default, commands may prompt when stdin is a TTY. Use --non-interactive
@@ -116,11 +118,11 @@ impl Cli {
         let options = &self.auth;
         let result = match self.command {
             Commands::Config(args) => {
-                let result = commands::config::run(&mut ctx, args).await;
+                let result = commands::config::run(args).await;
                 return emit(&mut ctx, result);
             }
             Commands::Ssh(args) => {
-                let result = commands::ssh::run(&mut ctx, args).await;
+                let result = commands::ssh::run(args).await;
                 return emit(&mut ctx, result);
             }
             Commands::ApiKey {
@@ -172,21 +174,21 @@ impl Cli {
 }
 
 async fn run_prepared<P, M>(
-    prepared: anyhow::Result<P>,
+    prepared: Result<P>,
     options: &AuthOptions,
-    run: impl AsyncFnOnce(P, ResolvedAuth) -> anyhow::Result<M>,
-) -> anyhow::Result<M> {
+    run: impl AsyncFnOnce(P, ResolvedAuth) -> Result<M>,
+) -> Result<M> {
     let prepared = prepared?;
     let auth = auth::resolve(options).await?;
     run(prepared, auth).await
 }
 
-fn emit<M: Serialize + Display>(ctx: &mut StdCtx, result: anyhow::Result<M>) -> ExitCode {
+fn emit<M: Serialize + Display>(ctx: &mut StdCtx, result: Result<M>) -> ExitCode {
     match result {
         Ok(message) => match ctx.shell().emit(&message) {
             Ok(()) => ExitCode::SUCCESS,
             Err(emit_error) => {
-                let mut stderr = std::io::stderr();
+                let mut stderr = io::stderr();
                 let _ = writeln!(stderr, "error: failed to write CLI output: {emit_error}");
                 ExitCode::FAILURE
             }
@@ -201,7 +203,7 @@ fn emit<M: Serialize + Display>(ctx: &mut StdCtx, result: anyhow::Result<M>) -> 
                 shell.human().error(&error)
             };
             if let Err(emit_error) = emit_result {
-                let mut stderr = std::io::stderr();
+                let mut stderr = io::stderr();
                 let _ = writeln!(stderr, "error: failed to write CLI error: {emit_error}");
             }
             ExitCode::FAILURE
@@ -214,13 +216,14 @@ const USAGE_ERROR_EXIT_CODE: u8 = 2;
 fn handle_parse_error(error: clap::Error) -> ExitCode {
     match error.kind() {
         ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => error.exit(),
-        _ if args_request_json_output(std::env::args_os()) => {
+        _ if args_request_json_output(env::args_os()) => {
             let message = error.render().to_string().trim_end().to_string();
             let error_message = ErrorMessage::usage_error(message);
 
-            let msg = serde_json::to_string(&error_message).unwrap_or_else(|e| e.to_string());
+            let msg =
+                serde_json::to_string(&error_message).expect("usage error message serializes");
 
-            let _ = writeln!(std::io::stdout(), "{msg}");
+            let _ = writeln!(io::stdout(), "{msg}");
             ExitCode::from(USAGE_ERROR_EXIT_CODE)
         }
         _ => error.exit(),
@@ -329,8 +332,7 @@ impl Commands {
 
 fn after_help() -> String {
     format!(
-        "\
-API identity (login, whoami, request, activity, user, policy, api-key, wallet, sign):
+        r#"API identity (login, whoami, request, activity, user, policy, api-key, wallet, sign):
   Resolved from exactly one source: the TURNKEY_ORGANIZATION_ID,
   TURNKEY_API_PUBLIC_KEY, TURNKEY_API_PRIVATE_KEY environment bundle; else the
   profile named by --profile or TK_PROFILE (an explicit profile always wins);
@@ -346,13 +348,44 @@ Config file (config, ssh):
 SSH agent:
   tk ssh agent start
   export SSH_AUTH_SOCK={DEFAULT_CONFIG_DIR_DISPLAY}/ssh-agent.sock
-",
+"#,
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::errors::ErrorCode;
+    use std::collections::BTreeSet;
+    use strum::IntoEnumIterator;
+
+    #[test]
+    fn help_documents_every_error_code() {
+        let declared: BTreeSet<String> = ErrorCode::iter()
+            .map(|code| {
+                serde_json::to_value(code)
+                    .expect("every error code must serialize")
+                    .as_str()
+                    .expect("every error code must serialize as a JSON string")
+                    .to_string()
+            })
+            .collect();
+        let documented: BTreeSet<String> = LONG_ABOUT
+            .lines()
+            .filter_map(|line| {
+                let rest = line.strip_prefix("        ")?;
+                if rest.starts_with(' ') {
+                    return None;
+                }
+                let (token, _) = rest.split_once("  ")?;
+                token
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c == '_')
+                    .then(|| token.to_string())
+            })
+            .collect();
+        assert_eq!(documented, declared);
+    }
 
     #[test]
     fn json_output_request_is_detected_in_both_spellings() {

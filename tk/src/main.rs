@@ -14,7 +14,8 @@ mod secrets;
 mod wallets;
 
 use crate::cli::Cli;
-use std::io::Write;
+use std::env;
+use std::io::{self, Write};
 use std::process::ExitCode;
 use tracing::debug;
 
@@ -23,7 +24,7 @@ async fn main() -> ExitCode {
     logging::init();
     debug!(version = env!("CARGO_PKG_VERSION"), "starting tk");
 
-    let raw_args = std::env::args().skip(1).collect::<Vec<_>>();
+    let raw_args = env::args().skip(1).collect::<Vec<_>>();
 
     // Git invokes `tk -Y ...` through gpg.ssh.program with ssh-keygen style
     // arguments. This path bypasses clap and the output shell entirely: its
@@ -32,7 +33,7 @@ async fn main() -> ExitCode {
         return match turnkey_auth::git_sign::run_git_sign(&raw_args).await {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                let _ = writeln!(std::io::stderr(), "error: {error:#}");
+                let _ = writeln!(io::stderr(), "error: {error:#}");
                 ExitCode::FAILURE
             }
         };

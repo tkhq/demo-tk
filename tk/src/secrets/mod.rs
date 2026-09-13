@@ -6,6 +6,7 @@ use anyhow::Result;
 use clap::{Args, Subcommand};
 use serde::{Serialize, Serializer};
 use std::fmt::{self, Display, Formatter};
+use std::fs;
 use std::path::PathBuf;
 use turnkey_client::generated::immutable::models::v1::KeyValue;
 use uuid::Uuid;
@@ -14,7 +15,7 @@ use zeroize::Zeroizing;
 use crate::auth::ResolvedAuth;
 use crate::errors::InvalidInput;
 use crate::operations::OperationOutput;
-use input::{SecretRef, parse_key_value, parse_label, parse_name, read_value, unique_key_values};
+use input::{SecretName, SecretRef, UniqueKeyValues, parse_key_value, read_value};
 
 #[derive(Debug, Subcommand)]
 pub enum SecretCommand {
@@ -30,8 +31,8 @@ pub enum SecretCommand {
     /// Encrypt and import a new named secret.
     Import {
         /// Name of the new secret.
-        #[arg(value_parser = parse_name)]
-        name: String,
+        #[arg(value_parser = SecretName::parse_new)]
+        name: SecretName,
         /// File holding the secret value.
         #[arg(long)]
         from_file: Option<PathBuf>,
@@ -57,8 +58,8 @@ pub enum SecretCommand {
 #[group(required = true, multiple = false)]
 pub struct SecretSelector {
     /// Name of the secret.
-    #[arg(long, value_parser = parse_label)]
-    name: Option<String>,
+    #[arg(long, value_parser = SecretName::parse)]
+    name: Option<SecretName>,
     /// ID of the secret.
     #[arg(long)]
     id: Option<Uuid>,
@@ -87,14 +88,14 @@ pub enum PreparedSecret {
         cursor: Option<Uuid>,
     },
     Import {
-        name: String,
+        name: SecretName,
         value: Zeroizing<String>,
-        properties: Vec<KeyValue>,
+        properties: UniqueKeyValues,
     },
     Export {
         secret: SecretRef,
         out: Option<PathBuf>,
-        context: Vec<KeyValue>,
+        context: UniqueKeyValues,
     },
 }
 
@@ -108,7 +109,7 @@ impl SecretCommand {
                 from_file,
                 properties,
             } => {
-                let properties = unique_key_values(properties, "--property")?;
+                let properties = UniqueKeyValues::parse(properties, "--property")?;
                 let value = read_value(from_file.as_deref(), non_interactive)?;
                 PreparedSecret::Import {
                     name,
@@ -122,7 +123,7 @@ impl SecretCommand {
                 context,
             } => {
                 if let Some(path) = &out
-                    && std::fs::symlink_metadata(path).is_ok()
+                    && fs::symlink_metadata(path).is_ok()
                 {
                     return Err(
                         InvalidInput(format!("refusing to overwrite {}", path.display())).into(),
@@ -131,7 +132,7 @@ impl SecretCommand {
                 PreparedSecret::Export {
                     secret: secret.into(),
                     out,
-                    context: unique_key_values(context, "--context")?,
+                    context: UniqueKeyValues::parse(context, "--context")?,
                 }
             }
         })
@@ -141,15 +142,6 @@ impl SecretCommand {
 pub struct SecretOutput {
     record: OperationOutput,
     plain: Option<Zeroizing<String>>,
-}
-
-impl SecretOutput {
-    pub(super) fn with_value(record: OperationOutput, value: Zeroizing<String>) -> Self {
-        Self {
-            record,
-            plain: Some(value),
-        }
-    }
 }
 
 impl From<OperationOutput> for SecretOutput {
@@ -200,6 +192,7 @@ impl PreparedSecret {
 mod tests {
     use super::*;
     use clap::Parser;
+    use clap::error::ErrorKind;
 
     #[derive(Debug, Parser)]
     struct Cli {
@@ -220,7 +213,7 @@ mod tests {
         let id = Uuid::new_v4();
         assert_eq!(
             parse(&["export", "--name", "api-token"]).unwrap(),
-            SecretRef::Name("api-token".into())
+            SecretRef::Name(SecretName::parse("api-token").unwrap())
         );
         assert_eq!(
             parse(&["export", "--id", &id.to_string()]).unwrap(),
@@ -228,21 +221,21 @@ mod tests {
         );
         assert_eq!(
             parse(&["export"]).unwrap_err().kind(),
-            clap::error::ErrorKind::MissingRequiredArgument
+            ErrorKind::MissingRequiredArgument
         );
         assert_eq!(
             parse(&["export", "--name", "api-token", "--id", &id.to_string()])
                 .unwrap_err()
                 .kind(),
-            clap::error::ErrorKind::ArgumentConflict
+            ErrorKind::ArgumentConflict
         );
         assert_eq!(
             parse(&["export", "--id", "api-token"]).unwrap_err().kind(),
-            clap::error::ErrorKind::ValueValidation
+            ErrorKind::ValueValidation
         );
         assert_eq!(
             parse(&["export", "api-token"]).unwrap_err().kind(),
-            clap::error::ErrorKind::UnknownArgument
+            ErrorKind::UnknownArgument
         );
     }
 }
