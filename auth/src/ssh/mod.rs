@@ -141,14 +141,12 @@ fn parse_public_key_blob(blob: &[u8]) -> Result<(String, Vec<u8>)> {
 }
 
 fn read_ssh_bytes(cursor: &mut &[u8]) -> Result<Vec<u8>> {
-    if cursor.len() < 4 {
+    let Some((length, rest)) = cursor.split_first_chunk::<4>() else {
         return Err(anyhow!("truncated SSH string length"));
-    }
+    };
+    *cursor = rest;
 
-    let length = u32::from_be_bytes(cursor[..4].try_into().expect("length slice should be 4"));
-    *cursor = &cursor[4..];
-
-    let length = length as usize;
+    let length = u32::from_be_bytes(*length) as usize;
     if cursor.len() < length {
         return Err(anyhow!("truncated SSH string body"));
     }

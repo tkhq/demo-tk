@@ -1,4 +1,6 @@
 //! Tests for top-level CLI parsing.
+// Test helpers may panic.
+#![allow(clippy::unwrap_used)]
 
 use std::path::{Path, PathBuf};
 

@@ -1,3 +1,5 @@
+// Asserts on the classified error code.
+#![allow(clippy::disallowed_types)]
 use super::*;
 use crate::errors::{Classification, ErrorCode, classify};
 use clap::Parser;
@@ -34,7 +36,7 @@ fn get_activity(id: &str, status: &str) -> Mock {
     json("query/get_activity", activity(id, status))
 }
 
-fn activity_error(error: &anyhow::Error) -> &ActivityError {
+fn activity_error(error: &Error) -> &ActivityError {
     error.downcast_ref::<ActivityError>().unwrap()
 }
 
@@ -236,7 +238,11 @@ async fn mutation_timeout_is_unknown_and_does_not_leak_body() {
         ActivityErrorKind::SubmissionUnknown
     );
     assert!(!format!("{error:#}").contains("secret-marker"));
-    assert!(error.chain().any(|cause| cause.is::<reqwest::Error>()));
+    assert!(
+        error
+            .chain()
+            .any(<dyn std::error::Error>::is::<reqwest::Error>)
+    );
     server.verify().await;
 }
 

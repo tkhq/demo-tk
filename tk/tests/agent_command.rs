@@ -1,4 +1,6 @@
 //! Tests for `tk agent`.
+// Test helpers may panic.
+#![allow(clippy::unwrap_used, clippy::panic)]
 
 mod common;
 
@@ -440,12 +442,11 @@ impl AgentFixture {
                 return child;
             }
 
-            if !child.is_running().await {
-                panic!(
-                    "tk ssh agent exited before binding socket: pid {} is not running",
-                    child.pid()
-                );
-            }
+            assert!(
+                child.is_running().await,
+                "tk ssh agent exited before binding socket: pid {} is not running",
+                child.pid()
+            );
 
             sleep(Duration::from_millis(20)).await;
         }

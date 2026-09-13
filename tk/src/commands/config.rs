@@ -73,6 +73,8 @@ pub struct ConfigListed {
 
 impl Display for ConfigListed {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        // fmt::Error carries no payload.
+        #[allow(clippy::map_err_ignore)]
         let rendered = serde_json::to_string_pretty(&self.config).map_err(|_| fmt::Error)?;
         f.write_str(&rendered)
     }

@@ -65,9 +65,7 @@ Default guidance for coding-agent runs in this repository.
   API response result.
 - In `tracing` calls, use field shorthand when the variable name matches the
   field name — `%value` for `Display`, `?value` for `Debug` — rather than
-  `value = %value`. Prefer `#[instrument]` on functions over manually built
-  spans: it captures arguments, propagates async context, and keeps the
-  function body clean. Use `#[instrument(skip(arg))]` for noisy or sensitive
+  `value = %value`. Use `#[instrument(skip(arg))]` for noisy or sensitive
   arguments and `#[instrument(level = "debug", ret, err)]` when return or
   error logging helps.
 
@@ -144,9 +142,10 @@ Default guidance for coding-agent runs in this repository.
   CLI command in reusable helpers.
 - Preserve typed errors through `anyhow` chains so machine classification can
   downcast them. Add operation and identifier context with `.context()` or
-  `.with_context()`; do not stringify an error with `anyhow!("{error}")`,
-  `bail!("{error}")`, or a formatting-only `map_err`, because that discards its
-  type and source chain.
+  `.with_context()`; do not stringify an error with `anyhow!("{error}")` or
+  `bail!("{error}")`, because that discards its type and source chain.
+  Classify new upstream error variants explicitly rather than adding a
+  wildcard fallback.
 - Use `MissingResource::new` only when a lookup request succeeded but its
   decoded response omitted the expected resource, such as an optional payload
   being `None`. This means callers should verify or re-resolve the identifier
@@ -155,9 +154,6 @@ Default guidance for coding-agent runs in this repository.
   identifier, for example `MissingResource::new("deployment", deployment_id)`.
   Do not use `MissingResource` for unsuccessful HTTP responses; propagate the
   typed `TurnkeyClientError` so its status and response body remain available.
-- Do not assign `ErrorCode` values in command code. Preserve or introduce a
-  typed error and let `crate::errors::classify` own the mapping. Classify new
-  upstream error variants explicitly rather than adding a wildcard fallback.
 - Do not render runtime errors at call sites. Pass the `anyhow::Error` to the
   output boundary so human and JSON modes use the same chain rendering,
   truncation, classification, and HTTP-status behavior.

@@ -1,4 +1,6 @@
 //! Tests for shared operation helpers.
+// Test helpers may panic.
+#![allow(clippy::unwrap_used)]
 
 use std::fs;
 

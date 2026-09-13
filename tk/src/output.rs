@@ -1,3 +1,5 @@
+// The output layer renders classified error codes.
+#![allow(clippy::disallowed_types)]
 use crate::errors::{Classification, ErrorCode, classify, error_details, render_error_chain};
 use anstyle::{AnsiColor, Color, Style};
 use anyhow::{Error, Result};

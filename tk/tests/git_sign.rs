@@ -1,4 +1,6 @@
 //! Tests for Git SSH signing.
+// Test helpers may panic.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 mod common;
 

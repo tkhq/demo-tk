@@ -137,34 +137,30 @@ fn encode_string(bytes: &[u8], mut output: Vec<u8>) -> Vec<u8> {
 }
 
 fn parse_agent_frame(frame: &[u8]) -> Result<(u8, &[u8])> {
-    if frame.len() < 4 {
+    let Some((length, payload)) = frame.split_first_chunk::<4>() else {
         return Err(anyhow!("truncated SSH agent frame length"));
-    }
-
-    let length = u32::from_be_bytes(frame[..4].try_into().expect("length slice should be 4"));
-    let length = length as usize;
-    if frame.len() < 4 + length {
+    };
+    let length = u32::from_be_bytes(*length) as usize;
+    if payload.len() < length {
         return Err(anyhow!("truncated SSH agent frame payload"));
     }
-    if frame.len() != 4 + length {
+    if payload.len() != length {
         return Err(anyhow!("unexpected trailing bytes in SSH agent frame"));
     }
-    if length == 0 {
+    let Some((kind, body)) = payload.split_first() else {
         return Err(anyhow!("truncated SSH agent frame payload"));
-    }
+    };
 
-    Ok((frame[4], &frame[5..]))
+    Ok((*kind, body))
 }
 
 fn read_ssh_bytes(cursor: &mut &[u8]) -> Result<Vec<u8>> {
-    if cursor.len() < 4 {
+    let Some((length, rest)) = cursor.split_first_chunk::<4>() else {
         return Err(anyhow!("truncated SSH string length"));
-    }
+    };
+    *cursor = rest;
 
-    let length = u32::from_be_bytes(cursor[..4].try_into().expect("length slice should be 4"));
-    *cursor = &cursor[4..];
-
-    let length = length as usize;
+    let length = u32::from_be_bytes(*length) as usize;
     if cursor.len() < length {
         return Err(anyhow!("truncated SSH string body"));
     }
@@ -175,11 +171,9 @@ fn read_ssh_bytes(cursor: &mut &[u8]) -> Result<Vec<u8>> {
 }
 
 fn read_u32(cursor: &mut &[u8]) -> Result<u32> {
-    if cursor.len() < 4 {
+    let Some((value, rest)) = cursor.split_first_chunk::<4>() else {
         return Err(anyhow!("truncated SSH agent unsigned 32-bit integer"));
-    }
-
-    let value = u32::from_be_bytes(cursor[..4].try_into().expect("length slice should be 4"));
-    *cursor = &cursor[4..];
-    Ok(value)
+    };
+    *cursor = rest;
+    Ok(u32::from_be_bytes(*value))
 }

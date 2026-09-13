@@ -50,7 +50,7 @@ the function under test with no behavior stated. Rename to the behavior asserted
 
 ## Weak assertion
 
-`assert!(result.is_ok())` or `assert!(value.is_some())` where the inner value is
+`assert!(value.is_some())` or `assert!(value.is_none())` where the inner value is
 available and could be compared. Replace with an equality on the value.
 
 ## Duplicated test setup
@@ -66,12 +66,4 @@ what the user can change.
 
 ## Leftover scaffolding
 
-`dbg!`, `println!` or `eprintln!` in library code, commented-out code, an
-`#[allow(...)]` silencing a lint the branch introduced, an unused `use`. Delete it.
-
-## Redundant conversion
-
-`.to_string().as_str()`, `String::from(x).into()`, `.clone()` on a `Copy` type,
-`.iter().map(|x| x.clone())` instead of `.cloned()`, `.as_ref().map(|s| s.as_str())`
-instead of `.as_deref()`, `format!("{x}")` instead of `x.to_string()`. Use the
-direct form.
+Commented-out code. Delete it.
