@@ -1,9 +1,6 @@
 //! Tests for `tk auth`.
-// Test helpers may panic.
-#![allow(clippy::unwrap_used)]
 
 use assert_cmd::Command;
-use predicates::prelude::*;
 use serde_json::{Value, json};
 use std::{fs, path::Path};
 use tempfile::TempDir;
@@ -72,14 +69,6 @@ api_key_file = "{}/agent.json"
 
 fn output(command: &mut Command) -> Value {
     let result = command.assert().success();
-    serde_json::from_slice(&result.get_output().stdout).unwrap()
-}
-
-fn failure(command: &mut Command, code: i32) -> Value {
-    let result = command
-        .assert()
-        .code(code)
-        .stderr(predicate::str::is_empty());
     serde_json::from_slice(&result.get_output().stdout).unwrap()
 }
 #[test]
@@ -166,13 +155,13 @@ async fn login_verifies_identity_and_selects_the_new_profile() {
     let whoami = output(command(&temp).arg("whoami"));
     assert_eq!(whoami["data"], identity);
 
-    let parsed = failure(
-        command(&temp)
-            .env("TK_PROFILE", "ambient")
-            .args(["--organization-id", ORG, "login", "other", "--api-key-file"])
-            .arg(&key_path),
-        1,
-    );
+    let result = command(&temp)
+        .env("TK_PROFILE", "ambient")
+        .args(["--organization-id", ORG, "login", "other", "--api-key-file"])
+        .arg(&key_path)
+        .assert()
+        .code(1);
+    let parsed: Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
     assert_eq!(parsed["code"], "invalid_input");
 }
 
@@ -193,20 +182,20 @@ async fn typed_client_does_not_follow_redirects() {
         .expect(0)
         .mount(&server)
         .await;
-    let parsed = failure(
-        command(&temp)
-            .args([
-                "--organization-id",
-                ORG,
-                "--api-base-url",
-                &server.uri(),
-                "login",
-                "admin",
-                "--api-key-file",
-            ])
-            .arg(&key_path),
-        1,
-    );
+    let result = command(&temp)
+        .args([
+            "--organization-id",
+            ORG,
+            "--api-base-url",
+            &server.uri(),
+            "login",
+            "admin",
+            "--api-key-file",
+        ])
+        .arg(&key_path)
+        .assert()
+        .code(1);
+    let parsed: Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
     assert_eq!(parsed["code"], "api_error");
     server.verify().await;
 }
@@ -222,16 +211,18 @@ async fn typed_client_http_status_is_classified_end_to_end() {
         .expect(1)
         .mount(&server)
         .await;
-    let parsed = failure(
-        command(&temp).args([
+    let result = command(&temp)
+        .args([
             "--api-base-url",
             &server.uri(),
             "user",
             "get",
             "00000000-0000-4000-8000-000000000002",
-        ]),
-        1,
-    );
+        ])
+        .assert()
+        .code(1);
+    assert!(result.get_output().stderr.is_empty());
+    let parsed: Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
     assert_eq!(parsed["reason"], "command_error");
     assert_eq!(parsed["code"], "not_found");
     assert_eq!(parsed["httpStatus"], 404);
@@ -241,14 +232,15 @@ async fn typed_client_http_status_is_classified_end_to_end() {
 #[test]
 fn invalid_key_length_is_an_error_without_panic() {
     let temp = TempDir::new().unwrap();
-    let parsed = failure(
-        command(&temp)
-            .env("TURNKEY_ORGANIZATION_ID", ORG)
-            .env("TURNKEY_API_PUBLIC_KEY", "00")
-            .env("TURNKEY_API_PRIVATE_KEY", "01")
-            .args(["auth", "status"]),
-        1,
-    );
+    let result = command(&temp)
+        .env("TURNKEY_ORGANIZATION_ID", ORG)
+        .env("TURNKEY_API_PUBLIC_KEY", "00")
+        .env("TURNKEY_API_PRIVATE_KEY", "01")
+        .args(["auth", "status"])
+        .assert()
+        .code(1);
+    assert!(result.get_output().stderr.is_empty());
+    let parsed: Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
     assert_eq!(parsed["reason"], "command_error");
     assert_eq!(parsed["code"], "invalid_input");
     assert!(!parsed["message"].as_str().unwrap().contains("'0'"));
@@ -267,12 +259,12 @@ fn stale_lock_file_from_a_dead_process_does_not_block() {
 fn empty_environment_bundle_does_not_fall_back_to_saved_admin() {
     let temp = TempDir::new().unwrap();
     registry(&temp);
-    let parsed = failure(
-        command(&temp)
-            .env("TURNKEY_API_PRIVATE_KEY", "")
-            .args(["auth", "status"]),
-        1,
-    );
+    let result = command(&temp)
+        .env("TURNKEY_API_PRIVATE_KEY", "")
+        .args(["auth", "status"])
+        .assert()
+        .code(1);
+    let parsed: Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
     assert_eq!(parsed["code"], "invalid_input");
     output(command(&temp).env("TURNKEY_API_PRIVATE_KEY", "").args([
         "--profile",
@@ -285,11 +277,14 @@ fn empty_environment_bundle_does_not_fall_back_to_saved_admin() {
 #[cfg(unix)]
 #[test]
 fn nonunicode_credential_environment_does_not_fall_back() {
-    use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+    use std::os::unix::ffi::OsStringExt;
     let temp = TempDir::new().unwrap();
     registry(&temp);
     command(&temp)
-        .env("TURNKEY_API_PRIVATE_KEY", OsString::from_vec(vec![255]))
+        .env(
+            "TURNKEY_API_PRIVATE_KEY",
+            std::ffi::OsString::from_vec(vec![255]),
+        )
         .args(["auth", "status"])
         .assert()
         .code(1);

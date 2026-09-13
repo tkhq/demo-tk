@@ -1,17 +1,15 @@
-use std::env;
-use std::io::{self, ErrorKind};
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::process::{self, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
-use anyhow::{Context, Error, Result, anyhow};
+use anyhow::{Context, anyhow};
 use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use tokio::process::{Child, Command};
 use tokio::time::sleep;
 use turnkey_auth::config::default_config_dir_from_home;
-use turnkey_auth::ssh::{agent, protocol};
+use turnkey_auth::ssh::protocol;
 
 use super::lock::{AgentLock, is_lock_held_by_other, resolve_lock_file};
 use super::{
@@ -23,16 +21,16 @@ const START_TIMEOUT: Duration = Duration::from_secs(4);
 const STOP_TIMEOUT: Duration = Duration::from_secs(4);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
-pub async fn start(args: StartArgs) -> Result<Outcome> {
+pub async fn start(args: StartArgs) -> anyhow::Result<Outcome> {
     let socket = resolve_socket_path(args.socket)?;
-    let pid_file = resolve_pid_file(&socket, args.pid_file);
+    let pid_file = resolve_pid_file(&socket, args.pid_file)?;
     let lock_file = resolve_lock_file(&pid_file);
     create_parent_dir(&socket).await?;
     create_parent_dir(&pid_file).await?;
     create_parent_dir(&lock_file).await?;
 
     if path_exists(&socket).await? {
-        if probe_agent_socket(&socket).await.is_ok() || is_lock_held_by_other(lock_file).await? {
+        if probe_agent_socket(&socket).await.is_ok() || is_lock_held_by_other(&lock_file).await? {
             return Err(anyhow!(
                 "ssh-agent is already running on {}",
                 socket.display()
@@ -43,7 +41,7 @@ pub async fn start(args: StartArgs) -> Result<Outcome> {
     }
     remove_file_if_present(&pid_file).await?;
 
-    let mut child = Command::new(env::current_exe()?)
+    let mut child = tokio::process::Command::new(std::env::current_exe()?)
         .arg("ssh")
         .arg("agent")
         .arg("internal-run")
@@ -74,12 +72,12 @@ pub async fn start(args: StartArgs) -> Result<Outcome> {
     }
 }
 
-pub async fn stop(args: StopArgs) -> Result<Outcome> {
+pub async fn stop(args: StopArgs) -> anyhow::Result<Outcome> {
     let socket = resolve_socket_path(args.socket)?;
-    let pid_file = resolve_pid_file(&socket, args.pid_file);
+    let pid_file = resolve_pid_file(&socket, args.pid_file)?;
     let lock_file = resolve_lock_file(&pid_file);
 
-    if !is_lock_held_by_other(lock_file).await? {
+    if !is_lock_held_by_other(&lock_file).await? {
         let _ = fs::remove_file(&pid_file).await;
         let _ = remove_socket_if_present(&socket).await;
         return Ok(Outcome::AgentNotRunning(AgentNotRunning {}));
@@ -97,12 +95,12 @@ pub async fn stop(args: StopArgs) -> Result<Outcome> {
     Ok(Outcome::AgentStopped(AgentStopped {}))
 }
 
-pub async fn status(args: StatusArgs) -> Result<Outcome> {
+pub async fn status(args: StatusArgs) -> anyhow::Result<Outcome> {
     let socket = resolve_socket_path(args.socket)?;
-    let pid_file = resolve_pid_file(&socket, args.pid_file);
+    let pid_file = resolve_pid_file(&socket, args.pid_file)?;
     let lock_file = resolve_lock_file(&pid_file);
 
-    if !is_lock_held_by_other(lock_file).await? {
+    if !is_lock_held_by_other(&lock_file).await? {
         return Err(anyhow!("ssh-agent is not running"));
     }
 
@@ -127,40 +125,33 @@ pub async fn status(args: StatusArgs) -> Result<Outcome> {
     }))
 }
 
-pub async fn internal_run(args: InternalRunArgs) -> Result<Outcome> {
+pub async fn internal_run(args: InternalRunArgs) -> anyhow::Result<Outcome> {
     let lock_file = resolve_lock_file(&args.pid_file);
-    let _lock = AgentLock::acquire(lock_file)
+    let _lock = AgentLock::acquire(&lock_file)
         .await?
         .ok_or_else(|| anyhow!("ssh-agent is already running"))?;
-    fs::write(&args.pid_file, format!("{}\n", process::id()))
-        .await
-        .with_context(|| format!("failed to write pid file at {}", args.pid_file.display()))?;
+    write_pid_file(&args.pid_file, std::process::id()).await?;
 
-    let result = agent::run(args.socket).await;
+    let result = turnkey_auth::ssh::agent::run(args.socket).await;
 
     let _ = fs::remove_file(&args.pid_file).await;
     result.map(|()| Outcome::AgentDaemonExited(MachineOnly {}))
 }
 
-fn resolve_pid_file(socket: &Path, pid_file: Option<PathBuf>) -> PathBuf {
-    pid_file.unwrap_or_else(|| PathBuf::from(format!("{}.pid", socket.display())))
-}
-
-async fn wait_for_startup(socket: &Path, child: &mut Child) -> Result<()> {
+async fn wait_for_startup(socket: &Path, child: &mut tokio::process::Child) -> anyhow::Result<()> {
     let iterations = START_TIMEOUT.as_millis() / POLL_INTERVAL.as_millis();
     for _ in 0..iterations {
         if probe_agent_socket(socket).await.is_ok() {
             return Ok(());
         }
-        match child.try_wait() {
-            Ok(None) => {}
-            Ok(Some(status)) => {
-                return Err(anyhow!("background ssh-agent exited early: {status}"));
-            }
-            Err(error) => {
-                return Err(Error::new(error).context("failed to poll background ssh-agent status"));
-            }
+
+        if let Some(status) = child
+            .try_wait()
+            .context("failed to poll background ssh-agent status")?
+        {
+            return Err(anyhow!("background ssh-agent exited early: {status}"));
         }
+
         sleep(POLL_INTERVAL).await;
     }
 
@@ -170,24 +161,26 @@ async fn wait_for_startup(socket: &Path, child: &mut Child) -> Result<()> {
     ))
 }
 
-async fn wait_for_process_exit(pid: u32) -> Result<()> {
+async fn wait_for_process_exit(pid: u32) -> anyhow::Result<()> {
     let iterations = STOP_TIMEOUT.as_millis() / POLL_INTERVAL.as_millis();
     for _ in 0..iterations {
         if !is_process_alive(pid) {
             return Ok(());
         }
+
         sleep(POLL_INTERVAL).await;
     }
 
     Err(anyhow!("timed out waiting for ssh-agent pid {pid} to exit"))
 }
 
-async fn wait_for_socket_removal(socket: &Path) -> Result<()> {
+async fn wait_for_socket_removal(socket: &Path) -> anyhow::Result<()> {
     let iterations = STOP_TIMEOUT.as_millis() / POLL_INTERVAL.as_millis();
     for _ in 0..iterations {
         if !path_exists(socket).await? {
             return Ok(());
         }
+
         sleep(POLL_INTERVAL).await;
     }
 
@@ -197,20 +190,27 @@ async fn wait_for_socket_removal(socket: &Path) -> Result<()> {
     ))
 }
 
-fn resolve_socket_path(socket: Option<PathBuf>) -> Result<PathBuf> {
+fn resolve_pid_file(socket: &Path, pid_file: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    match pid_file {
+        Some(pid_file) => Ok(pid_file),
+        None => Ok(PathBuf::from(format!("{}.pid", socket.display()))),
+    }
+}
+
+fn resolve_socket_path(socket: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     match socket {
         Some(socket) => Ok(socket),
         None => default_socket_path(),
     }
 }
 
-fn default_socket_path() -> Result<PathBuf> {
-    let home =
-        env::var_os("HOME").ok_or_else(|| anyhow!("missing HOME; use --socket to set a path"))?;
+fn default_socket_path() -> anyhow::Result<PathBuf> {
+    let home = std::env::var_os("HOME")
+        .ok_or_else(|| anyhow!("missing HOME; use --socket to set a path"))?;
     Ok(default_config_dir_from_home(Path::new(&home)).join("ssh-agent.sock"))
 }
 
-async fn create_parent_dir(path: &Path) -> Result<()> {
+async fn create_parent_dir(path: &Path) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .await
@@ -220,7 +220,13 @@ async fn create_parent_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn remove_file_if_present(path: &Path) -> Result<()> {
+async fn write_pid_file(path: &Path, pid: u32) -> anyhow::Result<()> {
+    fs::write(path, format!("{pid}\n"))
+        .await
+        .with_context(|| format!("failed to write pid file at {}", path.display()))
+}
+
+async fn remove_file_if_present(path: &Path) -> anyhow::Result<()> {
     match fs::remove_file(path).await {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
@@ -228,10 +234,10 @@ async fn remove_file_if_present(path: &Path) -> Result<()> {
     }
 }
 
-async fn read_pid_file(path: &Path) -> Result<Option<u32>> {
+async fn read_pid_file(path: &Path) -> anyhow::Result<Option<u32>> {
     let raw = match fs::read_to_string(path).await {
         Ok(raw) => raw,
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => {
             return Err(error).with_context(|| format!("failed to read {}", path.display()));
         }
@@ -244,13 +250,13 @@ async fn read_pid_file(path: &Path) -> Result<Option<u32>> {
     Ok(Some(pid))
 }
 
-async fn path_exists(path: &Path) -> Result<bool> {
+async fn path_exists(path: &Path) -> anyhow::Result<bool> {
     fs::try_exists(path)
         .await
         .with_context(|| format!("failed to check {}", path.display()))
 }
 
-async fn remove_socket_if_present(path: &Path) -> Result<()> {
+async fn remove_socket_if_present(path: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::FileTypeExt;
 
     match fs::symlink_metadata(path).await {
@@ -260,7 +266,7 @@ async fn remove_socket_if_present(path: &Path) -> Result<()> {
                 .with_context(|| format!("failed to remove stale socket {}", path.display()))?;
         }
         Ok(_) => {}
-        Err(error) if error.kind() == ErrorKind::NotFound => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => {
             return Err(error).with_context(|| format!("failed to inspect {}", path.display()));
         }
@@ -269,7 +275,7 @@ async fn remove_socket_if_present(path: &Path) -> Result<()> {
     Ok(())
 }
 
-async fn probe_agent_socket(socket: &Path) -> Result<()> {
+async fn probe_agent_socket(socket: &Path) -> anyhow::Result<()> {
     let mut stream = UnixStream::connect(socket)
         .await
         .with_context(|| format!("failed to connect to ssh-agent socket {}", socket.display()))?;
@@ -311,13 +317,13 @@ fn is_process_alive(pid: u32) -> bool {
     }
 }
 
-fn send_signal(pid: u32, signal: i32) -> io::Result<()> {
+fn send_signal(pid: u32, signal: i32) -> std::io::Result<()> {
     // SAFETY: libc::kill is an FFI syscall wrapper and does not dereference
     // Rust pointers or access Rust managed memory
     let rc = unsafe { libc::kill(pid as i32, signal) };
     if rc == 0 {
         Ok(())
     } else {
-        Err(io::Error::last_os_error())
+        Err(std::io::Error::last_os_error())
     }
 }

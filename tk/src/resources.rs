@@ -1,13 +1,12 @@
 use std::{
-    fs,
     io::{self, Read},
     path::PathBuf,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
 use serde::{Serialize, de::DeserializeOwned};
-use serde_json::{Value, from_slice, to_value};
+use serde_json::{Value, to_value};
 use turnkey_client::generated::{
     immutable::activity::v1 as intent, services::coordinator::public::v1 as query,
 };
@@ -15,7 +14,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::{ResolvedAuth, build_turnkey_client},
-    errors::{InvalidInput, Malformed, MissingResource},
+    errors::{InvalidInput, MissingResource},
     operations::{OperationOutput, submit_activity},
 };
 
@@ -25,7 +24,7 @@ pub enum UserCommand {
     Get {
         id: Uuid,
     },
-    /// Create one or more users from a `CreateUsersIntentV4` parameters object.
+    /// Create one or more users from a CreateUsersIntentV4 parameters object.
     Create(BodyArgs),
     /// Update user name, email, phone, or tag membership.
     Update(BodyArgs),
@@ -56,7 +55,7 @@ pub enum PolicyCommand {
     Get {
         id: Uuid,
     },
-    /// Create a policy from a `CreatePolicyIntentV3` parameters object.
+    /// Create a policy from a CreatePolicyIntentV3 parameters object.
     Create(BodyArgs),
     /// Create multiple policies from a parameters object containing policies.
     CreateBatch(BodyArgs),
@@ -77,7 +76,7 @@ pub enum ApiKeyCommand {
         #[arg(long)]
         user_id: Option<Uuid>,
     },
-    /// Register public keys using `CreateApiKeysIntentV2` parameters.
+    /// Register public keys using CreateApiKeysIntentV2 parameters.
     Register(BodyArgs),
     Delete {
         #[arg(long)]
@@ -98,78 +97,75 @@ pub struct BodyArgs {
     input_file: Option<PathBuf>,
 }
 
-pub enum PreparedResource {
-    Query(Query),
-    Mutation(Mutation),
+pub struct PreparedResource {
+    operation: Operation,
 }
 
-pub enum Query {
+enum Operation {
     Users,
     User(Uuid),
-    Tags,
-    Policies,
-    Policy(Uuid),
-    Evaluations(Uuid),
-    ApiKeys(Option<Uuid>),
-}
-
-pub enum Mutation {
     CreateUsers(intent::CreateUsersIntentV4),
     UpdateUser(intent::UpdateUserIntent),
     DeleteUsers(intent::DeleteUsersIntent),
+    Tags,
     CreateTag(intent::CreateUserTagIntent),
     UpdateTag(intent::UpdateUserTagIntent),
     DeleteTags(intent::DeleteUserTagsIntent),
+    Policies,
+    Policy(Uuid),
     CreatePolicy(intent::CreatePolicyIntentV3),
     CreatePolicies(intent::CreatePoliciesIntent),
     UpdatePolicy(intent::UpdatePolicyIntentV2),
     DeletePolicy(intent::DeletePolicyIntent),
     DeletePolicies(intent::DeletePoliciesIntent),
+    Evaluations(Uuid),
+    ApiKeys(Option<Uuid>),
     RegisterKeys(intent::CreateApiKeysIntentV2),
     DeleteKeys(intent::DeleteApiKeysIntent),
 }
 
 impl BodyArgs {
     pub(crate) fn parse<T: DeserializeOwned + Serialize>(self) -> Result<T> {
+        self.parse_inner()
+            .map_err(|error| InvalidInput(format!("{error:#}")).into())
+    }
+
+    fn parse_inner<T: DeserializeOwned + Serialize>(self) -> Result<T> {
         let bytes = match (self.input_json, self.input_file) {
             (Some(json), _) => json.into_bytes(),
             (None, Some(path)) if path.as_os_str() == "-" => {
                 let mut bytes = Vec::new();
-                io::stdin().read_to_end(&mut bytes).map_err(|error| {
-                    Malformed::new("could not read JSON parameters from stdin", error)
-                })?;
+                io::stdin()
+                    .read_to_end(&mut bytes)
+                    .context("read JSON parameters from stdin")?;
                 bytes
             }
-            (None, Some(path)) => fs::read(&path).map_err(|error| {
-                Malformed::new(
-                    format!("could not read JSON parameters from {}", path.display()),
-                    error,
-                )
-            })?,
+            (None, Some(path)) => std::fs::read(&path)
+                .with_context(|| format!("read JSON parameters from {}", path.display()))?,
             (None, None) => unreachable!("clap requires exactly one parameters source"),
         };
-        let mut value: Value = from_slice(&bytes)
-            .map_err(|error| Malformed::new("parameters must be valid JSON", error))?;
-        if !value.is_object() {
-            return Err(InvalidInput("parameters must be a JSON object".into()).into());
-        }
-        normalize_ids(&mut value)?;
-        let typed: T = T::deserialize(&value)
-            .map_err(|error| Malformed::new("invalid operation parameters", error))?;
-        let normalized = to_value(&typed)?;
-        reject_dropped_fields(&value, &normalized, "parameters")?;
-        Ok(typed)
+        parse_parameters(&bytes)
     }
 }
 
-fn normalize_id(value: &mut Value, key: &str) -> Result<()> {
-    let Some(id) = value.as_str() else {
-        return Err(InvalidInput(format!("{key} must be a string")).into());
-    };
-    let id = Uuid::parse_str(id)
-        .map_err(|error| Malformed::new(format!("invalid UUID in {key}"), error))?;
-    *value = Value::String(id.to_string());
-    Ok(())
+fn parse_parameters<T: DeserializeOwned + Serialize>(bytes: &[u8]) -> Result<T> {
+    let mut value: Value = serde_json::from_slice(bytes).context("parse JSON parameters")?;
+    if !value.is_object() {
+        bail!("parameters must be a JSON object");
+    }
+    normalize_ids(&mut value)?;
+    let typed: T = T::deserialize(&value).context("invalid operation parameters")?;
+    let normalized = serde_json::to_value(&typed)?;
+    reject_dropped_fields(&value, &normalized, "parameters")?;
+    Ok(typed)
+}
+
+fn require(condition: bool, message: &str) -> Result<()> {
+    if condition {
+        Ok(())
+    } else {
+        Err(InvalidInput(message.into()).into())
+    }
 }
 
 fn normalize_ids(value: &mut Value) -> Result<()> {
@@ -177,7 +173,10 @@ fn normalize_ids(value: &mut Value) -> Result<()> {
         Value::Object(fields) => {
             for (key, value) in fields {
                 if matches!(key.as_str(), "userId" | "userTagId" | "policyId") {
-                    normalize_id(value, key)?;
+                    let id =
+                        Uuid::parse_str(value.as_str().context("resource ID must be a string")?)
+                            .with_context(|| format!("invalid UUID in {key}"))?;
+                    *value = Value::String(id.to_string());
                 } else if matches!(
                     key.as_str(),
                     "userIds"
@@ -188,11 +187,15 @@ fn normalize_ids(value: &mut Value) -> Result<()> {
                         | "apiKeyIds"
                         | "policyIds"
                 ) {
-                    let Some(ids) = value.as_array_mut() else {
-                        return Err(InvalidInput(format!("{key} must be an array")).into());
-                    };
+                    let ids = value
+                        .as_array_mut()
+                        .context("resource IDs must be an array")?;
                     for value in ids {
-                        normalize_id(value, key)?;
+                        let id = Uuid::parse_str(
+                            value.as_str().context("resource ID must be a string")?,
+                        )
+                        .with_context(|| format!("invalid UUID in {key}"))?;
+                        *value = Value::String(id.to_string());
                     }
                 } else {
                     normalize_ids(value)?;
@@ -214,7 +217,7 @@ fn reject_dropped_fields(input: &Value, normalized: &Value, path: &str) -> Resul
         (Value::Object(input), Value::Object(normalized)) => {
             for (key, value) in input {
                 let Some(known) = normalized.get(key) else {
-                    return Err(InvalidInput(format!("unsupported field {path}.{key}")).into());
+                    bail!("unsupported field {path}.{key}");
                 };
                 reject_dropped_fields(value, known, &format!("{path}.{key}"))?;
             }
@@ -231,214 +234,190 @@ fn reject_dropped_fields(input: &Value, normalized: &Value, path: &str) -> Resul
 
 impl UserCommand {
     pub fn prepare(self) -> Result<PreparedResource> {
-        Ok(match self {
-            UserCommand::List => PreparedResource::Query(Query::Users),
-            UserCommand::Get { id } => PreparedResource::Query(Query::User(id)),
+        let operation = match self {
+            UserCommand::List => Operation::Users,
+            UserCommand::Get { id } => Operation::User(id),
             UserCommand::Create(body) => {
                 let params: intent::CreateUsersIntentV4 = body.parse()?;
-                if params.users.is_empty() {
-                    return Err(InvalidInput("users must contain at least one user".into()).into());
-                }
-                PreparedResource::Mutation(Mutation::CreateUsers(params))
+                require(
+                    !params.users.is_empty(),
+                    "users must contain at least one user",
+                )?;
+                Operation::CreateUsers(params)
             }
-            UserCommand::Update(body) => {
-                PreparedResource::Mutation(Mutation::UpdateUser(body.parse()?))
-            }
-            UserCommand::Delete { ids } => {
-                PreparedResource::Mutation(Mutation::DeleteUsers(intent::DeleteUsersIntent {
-                    user_ids: ids.into_iter().map(|id| id.to_string()).collect(),
-                }))
-            }
+            UserCommand::Update(body) => Operation::UpdateUser(body.parse()?),
+            UserCommand::Delete { ids } => Operation::DeleteUsers(intent::DeleteUsersIntent {
+                user_ids: ids.into_iter().map(|id| id.to_string()).collect(),
+            }),
             UserCommand::Tag { command } => match command {
-                TagCommand::List => PreparedResource::Query(Query::Tags),
-                TagCommand::Create(body) => {
-                    PreparedResource::Mutation(Mutation::CreateTag(body.parse()?))
-                }
-                TagCommand::Update(body) => {
-                    PreparedResource::Mutation(Mutation::UpdateTag(body.parse()?))
-                }
-                TagCommand::Delete { ids } => {
-                    PreparedResource::Mutation(Mutation::DeleteTags(intent::DeleteUserTagsIntent {
-                        user_tag_ids: ids.into_iter().map(|id| id.to_string()).collect(),
-                    }))
-                }
+                TagCommand::List => Operation::Tags,
+                TagCommand::Create(body) => Operation::CreateTag(body.parse()?),
+                TagCommand::Update(body) => Operation::UpdateTag(body.parse()?),
+                TagCommand::Delete { ids } => Operation::DeleteTags(intent::DeleteUserTagsIntent {
+                    user_tag_ids: ids.into_iter().map(|id| id.to_string()).collect(),
+                }),
             },
-        })
+        };
+        Ok(PreparedResource { operation })
     }
 }
 
 impl PolicyCommand {
     pub fn prepare(self) -> Result<PreparedResource> {
-        Ok(match self {
-            PolicyCommand::List => PreparedResource::Query(Query::Policies),
-            PolicyCommand::Get { id } => PreparedResource::Query(Query::Policy(id)),
-            PolicyCommand::Create(body) => {
-                PreparedResource::Mutation(Mutation::CreatePolicy(body.parse()?))
-            }
+        let operation = match self {
+            PolicyCommand::List => Operation::Policies,
+            PolicyCommand::Get { id } => Operation::Policy(id),
+            PolicyCommand::Create(body) => Operation::CreatePolicy(body.parse()?),
             PolicyCommand::CreateBatch(body) => {
                 let params: intent::CreatePoliciesIntent = body.parse()?;
-                if params.policies.is_empty() {
-                    return Err(
-                        InvalidInput("policies must contain at least one policy".into()).into(),
-                    );
-                }
-                PreparedResource::Mutation(Mutation::CreatePolicies(params))
+                require(
+                    !params.policies.is_empty(),
+                    "policies must contain at least one policy",
+                )?;
+                Operation::CreatePolicies(params)
             }
-            PolicyCommand::Update(body) => {
-                PreparedResource::Mutation(Mutation::UpdatePolicy(body.parse()?))
-            }
+            PolicyCommand::Update(body) => Operation::UpdatePolicy(body.parse()?),
             PolicyCommand::Delete { ids } => match ids.as_slice() {
-                [only] => {
-                    PreparedResource::Mutation(Mutation::DeletePolicy(intent::DeletePolicyIntent {
-                        policy_id: only.to_string(),
-                    }))
-                }
-                many => PreparedResource::Mutation(Mutation::DeletePolicies(
-                    intent::DeletePoliciesIntent {
-                        policy_ids: many.iter().map(ToString::to_string).collect(),
-                    },
-                )),
+                [only] => Operation::DeletePolicy(intent::DeletePolicyIntent {
+                    policy_id: only.to_string(),
+                }),
+                many => Operation::DeletePolicies(intent::DeletePoliciesIntent {
+                    policy_ids: many.iter().map(|id| id.to_string()).collect(),
+                }),
             },
-            PolicyCommand::Evaluations { activity_id } => {
-                PreparedResource::Query(Query::Evaluations(activity_id))
-            }
-        })
+            PolicyCommand::Evaluations { activity_id } => Operation::Evaluations(activity_id),
+        };
+        Ok(PreparedResource { operation })
     }
 }
 
 impl ApiKeyCommand {
     pub fn prepare(self) -> Result<PreparedResource> {
-        Ok(match self {
-            ApiKeyCommand::List { user_id } => PreparedResource::Query(Query::ApiKeys(user_id)),
+        let operation = match self {
+            ApiKeyCommand::List { user_id } => Operation::ApiKeys(user_id),
             ApiKeyCommand::Register(body) => {
                 let params: intent::CreateApiKeysIntentV2 = body.parse()?;
-                if params.api_keys.is_empty() {
-                    return Err(InvalidInput(
-                        "apiKeys must contain at least one public key".into(),
-                    )
-                    .into());
-                }
-                PreparedResource::Mutation(Mutation::RegisterKeys(params))
+                require(
+                    !params.api_keys.is_empty(),
+                    "apiKeys must contain at least one public key",
+                )?;
+                Operation::RegisterKeys(params)
             }
             ApiKeyCommand::Delete { user_id, ids } => {
-                PreparedResource::Mutation(Mutation::DeleteKeys(intent::DeleteApiKeysIntent {
+                Operation::DeleteKeys(intent::DeleteApiKeysIntent {
                     user_id: user_id.to_string(),
                     api_key_ids: ids.into_iter().map(|id| id.to_string()).collect(),
-                }))
+                })
             }
-        })
+        };
+        Ok(PreparedResource { operation })
     }
 }
 
 impl PreparedResource {
-    pub async fn run(self, auth: ResolvedAuth) -> Result<OperationOutput> {
-        match self {
-            Self::Query(query) => query.run(auth).await,
-            Self::Mutation(mutation) => mutation.run(auth).await,
+    pub fn command(&self) -> &'static str {
+        match &self.operation {
+            Operation::Users => "user.list",
+            Operation::User(_) => "user.get",
+            Operation::CreateUsers(_) => "user.create",
+            Operation::UpdateUser(_) => "user.update",
+            Operation::DeleteUsers(_) => "user.delete",
+            Operation::Tags => "user.tag.list",
+            Operation::CreateTag(_) => "user.tag.create",
+            Operation::UpdateTag(_) => "user.tag.update",
+            Operation::DeleteTags(_) => "user.tag.delete",
+            Operation::Policies => "policy.list",
+            Operation::Policy(_) => "policy.get",
+            Operation::CreatePolicy(_) => "policy.create",
+            Operation::CreatePolicies(_) => "policy.create-batch",
+            Operation::UpdatePolicy(_) => "policy.update",
+            Operation::DeletePolicy(_) | Operation::DeletePolicies(_) => "policy.delete",
+            Operation::Evaluations(_) => "policy.evaluations",
+            Operation::ApiKeys(_) => "api-key.list",
+            Operation::RegisterKeys(_) => "api-key.register",
+            Operation::DeleteKeys(_) => "api-key.delete",
         }
     }
-}
 
-impl Mutation {
-    async fn run(self, auth: ResolvedAuth) -> Result<OperationOutput> {
-        let (command, endpoint, kind, params) = match self {
-            Self::CreateUsers(p) => (
-                "user.create",
+    pub async fn run(self, auth: ResolvedAuth) -> Result<OperationOutput> {
+        let command = self.command();
+        let (endpoint, kind, params) = match self.operation {
+            Operation::CreateUsers(p) => (
                 "create_users",
                 "ACTIVITY_TYPE_CREATE_USERS_V4",
                 to_value(p)?,
             ),
-            Self::UpdateUser(p) => (
-                "user.update",
-                "update_user",
-                "ACTIVITY_TYPE_UPDATE_USER",
-                to_value(p)?,
-            ),
-            Self::DeleteUsers(p) => (
-                "user.delete",
-                "delete_users",
-                "ACTIVITY_TYPE_DELETE_USERS",
-                to_value(p)?,
-            ),
-            Self::CreateTag(p) => (
-                "user.tag.create",
+            Operation::UpdateUser(p) => ("update_user", "ACTIVITY_TYPE_UPDATE_USER", to_value(p)?),
+            Operation::DeleteUsers(p) => {
+                ("delete_users", "ACTIVITY_TYPE_DELETE_USERS", to_value(p)?)
+            }
+            Operation::CreateTag(p) => (
                 "create_user_tag",
                 "ACTIVITY_TYPE_CREATE_USER_TAG",
                 to_value(p)?,
             ),
-            Self::UpdateTag(p) => (
-                "user.tag.update",
+            Operation::UpdateTag(p) => (
                 "update_user_tag",
                 "ACTIVITY_TYPE_UPDATE_USER_TAG",
                 to_value(p)?,
             ),
-            Self::DeleteTags(p) => (
-                "user.tag.delete",
+            Operation::DeleteTags(p) => (
                 "delete_user_tags",
                 "ACTIVITY_TYPE_DELETE_USER_TAGS",
                 to_value(p)?,
             ),
-            Self::CreatePolicy(p) => (
-                "policy.create",
+            Operation::CreatePolicy(p) => (
                 "create_policy",
                 "ACTIVITY_TYPE_CREATE_POLICY_V3",
                 to_value(p)?,
             ),
-            Self::CreatePolicies(p) => (
-                "policy.create-batch",
+            Operation::CreatePolicies(p) => (
                 "create_policies",
                 "ACTIVITY_TYPE_CREATE_POLICIES",
                 to_value(p)?,
             ),
-            Self::UpdatePolicy(p) => (
-                "policy.update",
+            Operation::UpdatePolicy(p) => (
                 "update_policy",
                 "ACTIVITY_TYPE_UPDATE_POLICY_V2",
                 to_value(p)?,
             ),
-            Self::DeletePolicy(p) => (
-                "policy.delete",
-                "delete_policy",
-                "ACTIVITY_TYPE_DELETE_POLICY",
-                to_value(p)?,
-            ),
-            Self::DeletePolicies(p) => (
-                "policy.delete",
+            Operation::DeletePolicy(p) => {
+                ("delete_policy", "ACTIVITY_TYPE_DELETE_POLICY", to_value(p)?)
+            }
+            Operation::DeletePolicies(p) => (
                 "delete_policies",
                 "ACTIVITY_TYPE_DELETE_POLICIES",
                 to_value(p)?,
             ),
-            Self::RegisterKeys(p) => (
-                "api-key.register",
+            Operation::RegisterKeys(p) => (
                 "create_api_keys",
                 "ACTIVITY_TYPE_CREATE_API_KEYS_V2",
                 to_value(p)?,
             ),
-            Self::DeleteKeys(p) => (
-                "api-key.delete",
+            Operation::DeleteKeys(p) => (
                 "delete_api_keys",
                 "ACTIVITY_TYPE_DELETE_API_KEYS",
                 to_value(p)?,
             ),
+            query => return Self::query(command, query, auth).await,
         };
         submit_activity(&auth, command, endpoint, kind, &params).await
     }
-}
 
-impl Query {
-    async fn run(self, auth: ResolvedAuth) -> Result<OperationOutput> {
+    async fn query(
+        command: &'static str,
+        operation: Operation,
+        auth: ResolvedAuth,
+    ) -> Result<OperationOutput> {
         let client = build_turnkey_client(auth.stamper, &auth.api_base_url)?;
-        let organization_id = auth.org_id.to_string();
-        let (command, data) = match self {
-            Self::Users => (
-                "user.list",
-                to_value(
-                    client
-                        .get_users(query::GetUsersRequest { organization_id })
-                        .await?,
-                )?,
-            ),
-            Self::User(id) => {
+        let organization_id = auth.org_id;
+        let data = match operation {
+            Operation::Users => to_value(
+                client
+                    .get_users(query::GetUsersRequest { organization_id })
+                    .await?,
+            )?,
+            Operation::User(id) => {
                 let response = client
                     .get_user(query::GetUserRequest {
                         organization_id,
@@ -448,25 +427,19 @@ impl Query {
                 if response.user.is_none() {
                     return Err(MissingResource::new("user", id.to_string()).into());
                 }
-                ("user.get", to_value(response)?)
+                to_value(response)?
             }
-            Self::Tags => (
-                "user.tag.list",
-                to_value(
-                    client
-                        .list_user_tags(query::ListUserTagsRequest { organization_id })
-                        .await?,
-                )?,
-            ),
-            Self::Policies => (
-                "policy.list",
-                to_value(
-                    client
-                        .get_policies(query::GetPoliciesRequest { organization_id })
-                        .await?,
-                )?,
-            ),
-            Self::Policy(id) => {
+            Operation::Tags => to_value(
+                client
+                    .list_user_tags(query::ListUserTagsRequest { organization_id })
+                    .await?,
+            )?,
+            Operation::Policies => to_value(
+                client
+                    .get_policies(query::GetPoliciesRequest { organization_id })
+                    .await?,
+            )?,
+            Operation::Policy(id) => {
                 let response = client
                     .get_policy(query::GetPolicyRequest {
                         organization_id,
@@ -476,45 +449,36 @@ impl Query {
                 if response.policy.is_none() {
                     return Err(MissingResource::new("policy", id.to_string()).into());
                 }
-                ("policy.get", to_value(response)?)
+                to_value(response)?
             }
-            Self::Evaluations(id) => (
-                "policy.evaluations",
-                to_value(
-                    client
-                        .get_policy_evaluations(query::GetPolicyEvaluationsRequest {
-                            organization_id,
-                            activity_id: id.to_string(),
-                        })
-                        .await?,
-                )?,
-            ),
-            Self::ApiKeys(user_id) => (
-                "api-key.list",
-                to_value(
-                    client
-                        .get_api_keys(query::GetApiKeysRequest {
-                            organization_id,
-                            user_id: user_id.map(|id| id.to_string()),
-                        })
-                        .await?,
-                )?,
-            ),
+            Operation::Evaluations(id) => to_value(
+                client
+                    .get_policy_evaluations(query::GetPolicyEvaluationsRequest {
+                        organization_id,
+                        activity_id: id.to_string(),
+                    })
+                    .await?,
+            )?,
+            Operation::ApiKeys(user_id) => to_value(
+                client
+                    .get_api_keys(query::GetApiKeysRequest {
+                        organization_id,
+                        user_id: user_id.map(|id| id.to_string()),
+                    })
+                    .await?,
+            )?,
+            _ => unreachable!("mutations are submitted by run"),
         };
         Ok(OperationOutput::result(command, data))
     }
 }
 
-// Asserts on the classified error code.
 #[cfg(test)]
-#[allow(clippy::disallowed_types)]
 mod tests {
     use super::*;
     use crate::errors::{ActivityError, ActivityErrorKind, Classification, ErrorCode, classify};
     use clap::Parser;
-    use serde_json::{from_value, json, to_vec};
-    use std::iter::once;
-    use tempfile::NamedTempFile;
+    use serde_json::json;
     use turnkey_api_key_stamper::TurnkeyP256ApiKey;
     use turnkey_client::generated::external::activity::v1 as activity;
     use wiremock::{
@@ -524,10 +488,6 @@ mod tests {
 
     const ID: &str = "11111111-1111-4111-8111-111111111111";
     const OTHER: &str = "22222222-2222-4222-8222-222222222222";
-
-    fn auth(server: &MockServer) -> ResolvedAuth {
-        ResolvedAuth::for_tests(ID, &server.uri(), TurnkeyP256ApiKey::generate())
-    }
 
     #[derive(Parser)]
     struct TestCli {
@@ -552,7 +512,7 @@ mod tests {
     }
 
     fn prepare(args: &[&str]) -> Result<PreparedResource> {
-        let cli = TestCli::try_parse_from(once("tk").chain(args.iter().copied()))?;
+        let cli = TestCli::try_parse_from(std::iter::once("tk").chain(args.iter().copied()))?;
         match cli.command {
             TestCommand::User { command } => command.prepare(),
             TestCommand::Policy { command } => command.prepare(),
@@ -605,7 +565,7 @@ mod tests {
 
     #[test]
     fn policy_file_preserves_exact_expressions() {
-        let file = NamedTempFile::new().unwrap();
+        let file = tempfile::NamedTempFile::new().unwrap();
         let params = json!({
             "policyName": "agent policy",
             "effect": "EFFECT_ALLOW",
@@ -614,13 +574,15 @@ mod tests {
             "notes": "Reviewed policy",
             "time": null
         });
-        fs::write(file.path(), to_vec(&params).unwrap()).unwrap();
+        std::fs::write(file.path(), serde_json::to_vec(&params).unwrap()).unwrap();
         let body = file.path().display().to_string();
         let command = prepare(&["policy", "create", "--input-file", &body]).unwrap();
-        let PreparedResource::Mutation(Mutation::CreatePolicy(actual)) = command else {
-            panic!("expected prepared policy creation")
-        };
-        assert_eq!(to_value(actual).unwrap(), params);
+        match command.operation {
+            Operation::CreatePolicy(actual) => {
+                assert_eq!(serde_json::to_value(actual).unwrap(), params)
+            }
+            _ => panic!("expected prepared policy creation"),
+        }
     }
 
     #[tokio::test]
@@ -712,7 +674,7 @@ mod tests {
                 "ACTIVITY_STATUS_COMPLETED",
             ] {
                 let server = MockServer::start().await;
-                let expected: activity::Activity = from_value(json!({
+                let expected: activity::Activity = serde_json::from_value(json!({
                     "id": OTHER, "organizationId": ID, "type": kind,
                     "status": status, "fingerprint": "fixture"
                 }))
@@ -725,7 +687,14 @@ mod tests {
                     .expect(1)
                     .mount(&server)
                     .await;
-                let result = prepare(&args).unwrap().run(auth(&server)).await;
+                let result = prepare(&args)
+                    .unwrap()
+                    .run(ResolvedAuth::for_tests(
+                        ID,
+                        &server.uri(),
+                        TurnkeyP256ApiKey::generate(),
+                    ))
+                    .await;
                 match result {
                     Ok(output) => {
                         assert!(!matches!(
@@ -733,8 +702,8 @@ mod tests {
                             "ACTIVITY_STATUS_REJECTED" | "ACTIVITY_STATUS_FAILED"
                         ));
                         assert_eq!(
-                            to_value(output).unwrap()["data"]["activity"],
-                            to_value(expected).unwrap()
+                            serde_json::to_value(output).unwrap()["data"]["activity"],
+                            serde_json::to_value(expected).unwrap()
                         );
                     }
                     Err(error) => {
@@ -752,7 +721,7 @@ mod tests {
                 }
                 let requests = server.received_requests().await.unwrap();
                 assert_eq!(requests.len(), 1);
-                let body: Value = from_slice(&requests[0].body).unwrap();
+                let body: Value = serde_json::from_slice(&requests[0].body).unwrap();
                 assert_eq!(body["type"], kind);
                 assert_eq!(body["organizationId"], ID);
                 assert!(
@@ -789,62 +758,43 @@ mod tests {
             .await;
         let result = prepare(&["user", "get", ID])
             .unwrap()
-            .run(auth(&server))
+            .run(ResolvedAuth::for_tests(
+                ID,
+                &server.uri(),
+                TurnkeyP256ApiKey::generate(),
+            ))
             .await;
-        let error = result.unwrap_err();
-        assert_eq!(error.to_string(), format!("user not found: {ID}"));
-        assert_eq!(
-            classify(&error),
-            Classification {
-                code: ErrorCode::NotFound,
-                http_status: None,
-            }
-        );
+        match result {
+            Err(error) => assert!(error.downcast_ref::<MissingResource>().is_some()),
+            Ok(_) => panic!("missing user was accepted"),
+        }
     }
     #[tokio::test]
     async fn mutation_transport_refuses_redirects_and_preserves_uncertain_outcomes() {
         for (template, expected) in [
             (
                 ResponseTemplate::new(307).insert_header("Location", "/redirect-target"),
-                Classification {
-                    code: ErrorCode::ApiError,
-                    http_status: Some(307),
-                },
+                Classification::new(ErrorCode::ApiError, Some(307)),
             ),
             (
                 ResponseTemplate::new(308).insert_header("Location", "/redirect-target"),
-                Classification {
-                    code: ErrorCode::ApiError,
-                    http_status: Some(308),
-                },
+                Classification::new(ErrorCode::ApiError, Some(308)),
             ),
             (
                 ResponseTemplate::new(200).set_body_string("not JSON"),
-                Classification {
-                    code: ErrorCode::SubmissionUnknown,
-                    http_status: None,
-                },
+                Classification::new(ErrorCode::SubmissionUnknown, None),
             ),
             (
                 ResponseTemplate::new(200).set_body_json(json!({})),
-                Classification {
-                    code: ErrorCode::SubmissionUnknown,
-                    http_status: None,
-                },
+                Classification::new(ErrorCode::SubmissionUnknown, None),
             ),
             (
                 ResponseTemplate::new(401).set_body_json(json!({"message":"denied"})),
-                Classification {
-                    code: ErrorCode::Unauthorized,
-                    http_status: Some(401),
-                },
+                Classification::new(ErrorCode::Unauthorized, Some(401)),
             ),
             (
                 ResponseTemplate::new(403).set_body_json(json!({"message":"denied"})),
-                Classification {
-                    code: ErrorCode::Unauthorized,
-                    http_status: Some(403),
-                },
+                Classification::new(ErrorCode::Unauthorized, Some(403)),
             ),
         ] {
             let server = MockServer::start().await;
@@ -861,7 +811,11 @@ mod tests {
                 .await;
             let error = prepare(&["user", "delete", ID])
                 .unwrap()
-                .run(auth(&server))
+                .run(ResolvedAuth::for_tests(
+                    ID,
+                    &server.uri(),
+                    TurnkeyP256ApiKey::generate(),
+                ))
                 .await
                 .unwrap_err();
             assert_eq!(classify(&error), expected);

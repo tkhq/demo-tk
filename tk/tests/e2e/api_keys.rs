@@ -1,12 +1,25 @@
-use crate::run::{Run, result};
+use crate::run::{Run, one_api_key, result, user_params};
 use serde_json::{Value, json};
 use std::fs;
 
 #[test]
 #[ignore]
-fn registered_api_key_is_listed_for_its_user_and_gone_after_delete() {
+fn api_key_register_list_delete() {
     let run = Run::new();
-    let (user_id, _) = run.create_user("user-keys");
+    let name = run.name("user-keys");
+    let created = run.submit(
+        run.admin().args([
+            "user",
+            "create",
+            "--input-json",
+            &user_params(&name, one_api_key(&run, &name)),
+        ]),
+        "user.create",
+    );
+    let user_id = result(&created, "createUsersResult")["userIds"][0]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let key_path = run.home.path().join("registered.json");
     let generated = run.ok(run

@@ -17,8 +17,6 @@
 
 // The runner reports retry progress on stderr; that is this suite's output contract.
 #![allow(clippy::print_stderr)]
-// Test helpers may panic.
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod config;
 mod run;
 

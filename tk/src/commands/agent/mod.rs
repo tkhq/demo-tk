@@ -4,11 +4,11 @@ mod lock;
 use std::fmt::{self, Display, Formatter};
 use std::path::PathBuf;
 
-use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
 use serde::Serialize;
 
 use crate::outcome::Outcome;
+use crate::output::StdCtx;
 
 #[derive(Debug, ClapArgs)]
 #[command(
@@ -20,7 +20,7 @@ pub struct Args {
     command: Command,
 }
 
-pub async fn run(args: Args) -> Result<Outcome> {
+pub async fn run(_ctx: &mut StdCtx, args: Args) -> anyhow::Result<Outcome> {
     match args.command {
         Command::Start(args) => daemon::start(args).await,
         Command::Stop(args) => daemon::stop(args).await,
@@ -33,8 +33,8 @@ pub async fn run(args: Args) -> Result<Outcome> {
 #[cfg_attr(test, derive(Default))]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRunning {
-    pid: u32,
-    socket: String,
+    pub pid: u32,
+    pub socket: String,
 }
 
 impl Display for AgentRunning {
@@ -82,45 +82,45 @@ enum Command {
 }
 
 #[derive(Debug, ClapArgs)]
-struct StartArgs {
+pub struct StartArgs {
     /// Unix socket path to bind for SSH agent connections.
     #[arg(long, value_name = "path")]
-    socket: Option<PathBuf>,
+    pub socket: Option<PathBuf>,
 
     /// PID file path for tracking the background SSH agent.
     #[arg(long, value_name = "path")]
-    pid_file: Option<PathBuf>,
+    pub pid_file: Option<PathBuf>,
 }
 
 #[derive(Debug, ClapArgs)]
-struct StopArgs {
+pub struct StopArgs {
     /// Unix socket path bound for SSH agent connections.
     #[arg(long, value_name = "path")]
-    socket: Option<PathBuf>,
+    pub socket: Option<PathBuf>,
 
     /// PID file path for tracking the background SSH agent.
     #[arg(long, value_name = "path")]
-    pid_file: Option<PathBuf>,
+    pub pid_file: Option<PathBuf>,
 }
 
 #[derive(Debug, ClapArgs)]
-struct StatusArgs {
+pub struct StatusArgs {
     /// Unix socket path bound for SSH agent connections.
     #[arg(long, value_name = "path")]
-    socket: Option<PathBuf>,
+    pub socket: Option<PathBuf>,
 
     /// PID file path for tracking the background SSH agent.
     #[arg(long, value_name = "path")]
-    pid_file: Option<PathBuf>,
+    pub pid_file: Option<PathBuf>,
 }
 
 #[derive(Debug, ClapArgs)]
-struct InternalRunArgs {
+pub struct InternalRunArgs {
     /// Unix socket path to bind for SSH agent connections.
     #[arg(long, value_name = "path")]
-    socket: PathBuf,
+    pub socket: PathBuf,
 
     /// PID file path for tracking the background SSH agent.
     #[arg(long, value_name = "path", hide = true)]
-    pid_file: PathBuf,
+    pub pid_file: PathBuf,
 }

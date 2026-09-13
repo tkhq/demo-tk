@@ -1,4 +1,4 @@
-//! Outcome reasons; variant names are the stable `snake_case` JSON values.
+//! Outcome reasons; variant names are the stable snake_case JSON values.
 
 use crate::commands::{agent, config, public_key};
 use serde::Serialize;

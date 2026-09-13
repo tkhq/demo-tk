@@ -1,10 +1,9 @@
-use anyhow::Result;
 use clap::Args as ClapArgs;
 use serde::Serialize;
 use std::fmt::{self, Display, Formatter};
-use turnkey_auth::public_key::get_public_key_line;
 
 use crate::outcome::Outcome;
+use crate::output::StdCtx;
 
 #[derive(Debug, ClapArgs)]
 #[command(about, long_about = None)]
@@ -14,7 +13,7 @@ pub struct Args {}
 #[cfg_attr(test, derive(Default))]
 #[serde(rename_all = "camelCase")]
 pub struct PublicKeyPrinted {
-    public_key: String,
+    pub public_key: String,
 }
 
 impl Display for PublicKeyPrinted {
@@ -23,8 +22,8 @@ impl Display for PublicKeyPrinted {
     }
 }
 
-pub async fn run(_args: Args) -> Result<Outcome> {
+pub async fn run(_ctx: &mut StdCtx, _args: Args) -> anyhow::Result<Outcome> {
     Ok(Outcome::PublicKeyPrinted(PublicKeyPrinted {
-        public_key: get_public_key_line().await?,
+        public_key: turnkey_auth::public_key::get_public_key_line().await?,
     }))
 }

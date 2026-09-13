@@ -126,7 +126,7 @@ fn wallet_create_get_update_and_account_pagination() {
 
 #[test]
 #[ignore]
-fn sign_payload_returns_r_s_v_and_sign_transaction_returns_type2_hex() {
+fn sign_payload_and_transaction() {
     let run = Run::new();
     let created = run.submit(
         run.admin().args([
@@ -196,5 +196,5 @@ fn sign_payload_returns_r_s_v_and_sign_transaction_returns_type2_hex() {
         .unwrap();
     assert!(tx.starts_with("02"), "not a type-2 transaction: {tx}");
     assert!(tx.len() > UNSIGNED_EIP1559_TX.len());
-    hex::decode(tx).unwrap();
+    assert!(hex::decode(tx).is_ok());
 }

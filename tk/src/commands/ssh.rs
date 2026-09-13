@@ -1,8 +1,8 @@
-use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
 
 use crate::commands::{agent, git_sign, public_key};
 use crate::outcome::Outcome;
+use crate::output::StdCtx;
 
 #[derive(Debug, ClapArgs)]
 #[command(about = "SSH related commands.", long_about = None)]
@@ -11,11 +11,11 @@ pub struct Args {
     command: Command,
 }
 
-pub async fn run(args: Args) -> Result<Outcome> {
+pub async fn run(ctx: &mut StdCtx, args: Args) -> anyhow::Result<Outcome> {
     match args.command {
-        Command::Agent(args) => agent::run(args).await,
-        Command::GitSign(args) => git_sign::run(args).await,
-        Command::PublicKey(args) => public_key::run(args).await,
+        Command::Agent(args) => agent::run(ctx, args).await,
+        Command::GitSign(args) => git_sign::run(ctx, args).await,
+        Command::PublicKey(args) => public_key::run(ctx, args).await,
     }
 }
 

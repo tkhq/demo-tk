@@ -2553,7 +2553,6 @@ dependencies = [
  "toml",
  "turnkey_api_key_stamper",
  "turnkey_client",
- "uuid",
  "wiremock",
 ]
 

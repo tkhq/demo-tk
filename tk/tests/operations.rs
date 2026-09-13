@@ -1,11 +1,6 @@
 //! Tests for shared operation helpers.
-// Test helpers may panic.
-#![allow(clippy::unwrap_used)]
-
-use std::fs;
 
 use assert_cmd::Command;
-use predicates::prelude::*;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
@@ -78,7 +73,7 @@ fn offline_generation_needs_no_identity_and_never_overwrites() {
     let key = temp.path().join("key.json");
     let result = record(cli().args(["api-key", "generate", "--output"]).arg(&key), 0);
     assert_eq!(result["command"], "api-key.generate");
-    let bytes = fs::read(&key).unwrap();
+    let bytes = std::fs::read(&key).unwrap();
     let stored: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(
         !result
@@ -86,10 +81,10 @@ fn offline_generation_needs_no_identity_and_never_overwrites() {
             .contains(stored["private_key"].as_str().unwrap())
     );
     record(cli().args(["api-key", "generate", "--output"]).arg(&key), 1);
-    assert_eq!(fs::read(key).unwrap(), bytes);
+    assert_eq!(std::fs::read(key).unwrap(), bytes);
 }
 #[tokio::test]
-async fn signed_request_preserves_body_and_pending_exit_code() {
+async fn signed_request_preserves_body_and_pending_vs_rejected_exit_codes() {
     let server = MockServer::start().await;
     let body = format!(
         r#"{{
@@ -118,6 +113,30 @@ async fn signed_request_preserves_body_and_pending_exit_code() {
     );
     assert_eq!(pending["status"], "pending");
     assert_eq!(pending["activity"]["id"], "pending-id");
+    server.reset().await;
+    Mock::given(method("POST"))
+        .and(path("/public/v1/query/get_activity"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"activity":{"id":"rejected-id","status":"ACTIVITY_STATUS_REJECTED"}}),
+        ))
+        .expect(2)
+        .mount(&server)
+        .await;
+    let inspected = record(
+        authed(&server.uri()).args(["activity", "get", "rejected-id"]),
+        0,
+    );
+    assert_eq!(inspected["activity"]["status"], "ACTIVITY_STATUS_REJECTED");
+    let waited = record(
+        authed(&server.uri()).args(["activity", "wait", "rejected-id"]),
+        1,
+    );
+    assert_eq!(waited["reason"], "command_error");
+    assert_eq!(waited["code"], "api_error");
+    assert_eq!(
+        waited["details"]["activity"],
+        json!({"id":"rejected-id","status":"ACTIVITY_STATUS_REJECTED"})
+    );
 }
 
 #[tokio::test]
@@ -147,6 +166,27 @@ async fn raw_request_http_status_keeps_the_api_message() {
     );
 }
 
+#[tokio::test]
+async fn wait_timeout_is_a_resumable_error_record() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/public/v1/query/get_activity"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"activity":{"id":"slow-id","status":"ACTIVITY_STATUS_CONSENSUS_NEEDED"}}),
+        ))
+        .mount(&server)
+        .await;
+    let result = record(
+        authed(&server.uri()).args(["activity", "wait", "slow-id", "--timeout", "1"]),
+        1,
+    );
+    assert_eq!(result["code"], "wait_timeout");
+    assert_eq!(
+        result["details"]["activity"],
+        json!({"id":"slow-id","status":"ACTIVITY_STATUS_CONSENSUS_NEEDED"})
+    );
+}
+
 #[test]
 fn human_mode_errors_go_to_stderr_for_api_commands() {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_tk"));
@@ -162,6 +202,6 @@ fn human_mode_errors_go_to_stderr_for_api_commands() {
     ])
     .assert()
     .code(1)
-    .stdout(predicate::str::is_empty())
-    .stderr(predicate::str::contains("error: body must be valid JSON"));
+    .stdout(predicates::str::is_empty())
+    .stderr(predicates::str::contains("error: body must be valid JSON"));
 }

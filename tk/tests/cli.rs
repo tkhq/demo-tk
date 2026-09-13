@@ -1,30 +1,8 @@
 //! Tests for top-level CLI parsing.
-// Test helpers may panic.
-#![allow(clippy::unwrap_used)]
-
-use std::path::{Path, PathBuf};
 
 use assert_cmd::Command;
 use predicates::prelude::*;
-use serde_json::{Value, json};
-use tempfile::{TempDir, tempdir};
-
-fn config_path() -> (TempDir, PathBuf) {
-    let temp = tempdir().unwrap();
-    let config_path = temp.path().join("tk.toml");
-    (temp, config_path)
-}
-
-fn tk(config_path: &Path) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_tk"));
-    cmd.env("TURNKEY_TK_CONFIG_PATH", config_path)
-        .env_remove("TURNKEY_ORGANIZATION_ID")
-        .env_remove("TURNKEY_API_PUBLIC_KEY")
-        .env_remove("TURNKEY_API_PRIVATE_KEY")
-        .env_remove("TURNKEY_PRIVATE_KEY_ID")
-        .env_remove("TURNKEY_API_BASE_URL");
-    cmd
-}
+use tempfile::tempdir;
 
 #[test]
 fn cli_help_lists_commands() {
@@ -91,21 +69,31 @@ fn cli_help_lists_commands() {
 
 #[test]
 fn public_key_requires_turnkey_org_id() {
-    let (_temp, config_path) = config_path();
+    let temp = tempdir().unwrap();
+    let config_path = temp.path().join("tk.toml");
 
-    tk(&config_path)
-        .arg("ssh")
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_tk"));
+    cmd.arg("ssh")
         .arg("public-key")
-        .assert()
+        .env("TURNKEY_TK_CONFIG_PATH", &config_path)
+        .env_remove("TURNKEY_ORGANIZATION_ID")
+        .env_remove("TURNKEY_API_PUBLIC_KEY")
+        .env_remove("TURNKEY_API_PRIVATE_KEY")
+        .env_remove("TURNKEY_PRIVATE_KEY_ID")
+        .env_remove("TURNKEY_API_BASE_URL");
+
+    cmd.assert()
         .failure()
         .stderr(predicate::str::contains("turnkey.organizationId"));
 }
 
 #[test]
 fn json_mode_emits_ndjson_outcomes() {
-    let (_temp, config_path) = config_path();
+    let temp = tempdir().unwrap();
+    let config_path = temp.path().join("tk.toml");
 
-    let set_output = tk(&config_path)
+    let mut set_cmd = Command::new(env!("CARGO_BIN_EXE_tk"));
+    let set_output = set_cmd
         .args([
             "config",
             "set",
@@ -113,43 +101,54 @@ fn json_mode_emits_ndjson_outcomes() {
             "json-org",
             "--message-format=json",
         ])
+        .env("TURNKEY_TK_CONFIG_PATH", &config_path)
         .assert()
         .success()
         .get_output()
         .stdout
         .clone();
-    let record: Value = serde_json::from_slice(&set_output).unwrap();
+    let record: serde_json::Value = serde_json::from_slice(&set_output).unwrap();
     assert_eq!(record["reason"], "config_value_set");
     assert_eq!(record["key"], "turnkey.organizationId");
 
-    let get_output = tk(&config_path)
+    let mut get_cmd = Command::new(env!("CARGO_BIN_EXE_tk"));
+    let get_output = get_cmd
         .args([
             "config",
             "get",
             "turnkey.organizationId",
             "--message-format=json",
         ])
+        .env("TURNKEY_TK_CONFIG_PATH", &config_path)
+        .env_remove("TURNKEY_ORGANIZATION_ID")
         .assert()
         .success()
         .get_output()
         .stdout
         .clone();
-    let record: Value = serde_json::from_slice(&get_output).unwrap();
+    let record: serde_json::Value = serde_json::from_slice(&get_output).unwrap();
     assert_eq!(record["reason"], "config_value");
     assert_eq!(record["value"], "json-org");
 }
 
 #[test]
 fn json_mode_emits_command_error_envelope_on_stdout() {
-    let (_temp, config_path) = config_path();
+    let temp = tempdir().unwrap();
+    let config_path = temp.path().join("tk.toml");
 
-    let result = tk(&config_path)
-        .args(["ssh", "public-key", "--message-format=json"])
-        .assert()
-        .code(1);
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_tk"));
+    cmd.args(["ssh", "public-key", "--message-format=json"])
+        .env("TURNKEY_TK_CONFIG_PATH", &config_path)
+        .env_remove("TURNKEY_ORGANIZATION_ID")
+        .env_remove("TURNKEY_API_PUBLIC_KEY")
+        .env_remove("TURNKEY_API_PRIVATE_KEY")
+        .env_remove("TURNKEY_PRIVATE_KEY_ID")
+        .env_remove("TURNKEY_API_BASE_URL");
+
+    let result = cmd.assert().code(1);
     let stdout = result.get_output().stdout.clone();
     assert!(result.get_output().stderr.is_empty());
-    let record: Value = serde_json::from_slice(&stdout).unwrap();
+    let record: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
     assert_eq!(record["reason"], "command_error");
     assert_eq!(record["code"], "command_error");
     assert!(
@@ -167,7 +166,7 @@ fn usage_errors_follow_the_json_protocol_when_requested() {
         .args(["--message-format=json", "unknown-command"])
         .assert()
         .code(2);
-    let record: Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    let record: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
     assert_eq!(record["reason"], "command_error");
     assert_eq!(record["code"], "usage_error");
     assert!(record["message"].as_str().unwrap().contains("Usage:"));
@@ -188,7 +187,7 @@ fn missing_nested_subcommand_is_a_json_usage_error_when_requested() {
         .args(["--message-format=json", "ssh", "agent"])
         .assert()
         .code(2);
-    let record: Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
+    let record: serde_json::Value = serde_json::from_slice(&result.get_output().stdout).unwrap();
     assert_eq!(record["reason"], "command_error");
     assert_eq!(record["code"], "usage_error");
     assert!(record["message"].as_str().unwrap().contains("Usage:"));
@@ -197,11 +196,13 @@ fn missing_nested_subcommand_is_a_json_usage_error_when_requested() {
 
 #[test]
 fn non_interactive_env_accepts_boolean_spellings() {
-    let (_temp, config_path) = config_path();
+    let temp = tempdir().unwrap();
+    let config_path = temp.path().join("tk.toml");
 
     for value in ["", "false", "0", "no", "true", "1", "yes"] {
-        tk(&config_path)
-            .args(["config", "list"])
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_tk"));
+        cmd.args(["config", "list"])
+            .env("TURNKEY_TK_CONFIG_PATH", &config_path)
             .env("TK_NON_INTERACTIVE", value)
             .assert()
             .success();
@@ -210,10 +211,13 @@ fn non_interactive_env_accepts_boolean_spellings() {
 
 #[test]
 fn config_list_json_reports_the_redacted_config() {
-    let (_temp, config_path) = config_path();
+    let temp = tempdir().unwrap();
+    let config_path = temp.path().join("tk.toml");
 
-    let output = tk(&config_path)
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_tk"));
+    let output = cmd
         .args(["config", "list", "--message-format=json"])
+        .env("TURNKEY_TK_CONFIG_PATH", &config_path)
         .env("TURNKEY_ORGANIZATION_ID", "org-id")
         .env("TURNKEY_API_PUBLIC_KEY", "02ab")
         .env("TURNKEY_API_PRIVATE_KEY", "secret-private-key")
@@ -224,11 +228,11 @@ fn config_list_json_reports_the_redacted_config() {
         .get_output()
         .stdout
         .clone();
-    let record: Value = serde_json::from_slice(&output).unwrap();
+    let record: serde_json::Value = serde_json::from_slice(&output).unwrap();
 
     assert_eq!(
         record,
-        json!({
+        serde_json::json!({
             "reason": "config_listed",
             "config": {
                 "turnkey": {
@@ -245,11 +249,19 @@ fn config_list_json_reports_the_redacted_config() {
 
 #[test]
 fn human_errors_render_the_full_chain_on_stderr() {
-    let (_temp, config_path) = config_path();
+    let temp = tempdir().unwrap();
+    let config_path = temp.path().join("tk.toml");
 
-    tk(&config_path)
-        .args(["ssh", "public-key"])
-        .assert()
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_tk"));
+    cmd.args(["ssh", "public-key"])
+        .env("TURNKEY_TK_CONFIG_PATH", &config_path)
+        .env_remove("TURNKEY_ORGANIZATION_ID")
+        .env_remove("TURNKEY_API_PUBLIC_KEY")
+        .env_remove("TURNKEY_API_PRIVATE_KEY")
+        .env_remove("TURNKEY_PRIVATE_KEY_ID")
+        .env_remove("TURNKEY_API_BASE_URL");
+
+    cmd.assert()
         .code(1)
         .stderr(predicate::str::contains("error: "))
         .stderr(predicate::str::contains("turnkey.organizationId"));

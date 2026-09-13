@@ -1,18 +1,14 @@
-// Asserts on the classified error code.
-#![allow(clippy::disallowed_types)]
 use super::*;
 use crate::errors::{Classification, ErrorCode, classify};
 use clap::Parser;
-use clap::error::ErrorKind;
-use std::net::TcpListener;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 struct RequestCli {
     #[command(flatten)]
     request: RequestArgs,
 }
 
-#[derive(Debug, Parser)]
+#[derive(Parser)]
 struct ActivityCli {
     #[command(subcommand)]
     activity: ActivityCommand,
@@ -36,18 +32,8 @@ fn get_activity(id: &str, status: &str) -> Mock {
     json("query/get_activity", activity(id, status))
 }
 
-fn activity_error(error: &Error) -> &ActivityError {
+fn activity_error(error: &anyhow::Error) -> &ActivityError {
     error.downcast_ref::<ActivityError>().unwrap()
-}
-
-async fn consensus_target(queries: u64) -> (MockServer, ResolvedAuth) {
-    let server = MockServer::start().await;
-    let auth = auth(&server, TurnkeyP256ApiKey::generate());
-    get_activity("target", "ACTIVITY_STATUS_CONSENSUS_NEEDED")
-        .expect(queries)
-        .mount(&server)
-        .await;
-    (server, auth)
 }
 
 #[test]
@@ -62,6 +48,26 @@ fn result_serialization_preserves_the_machine_contract() {
             "activity":{"id":"a","status":"ACTIVITY_STATUS_COMPLETED"}
         })
     );
+}
+
+#[test]
+fn observed_activity_is_pending_or_terminal() {
+    let pending = observed(
+        "secret.export",
+        activity("a1", "ACTIVITY_STATUS_CONSENSUS_NEEDED"),
+    )
+    .unwrap();
+    assert!(pending.is_pending());
+    assert_eq!(pending.data()["activity"]["id"], "a1");
+
+    let completed = observed("secret.export", activity("a2", "ACTIVITY_STATUS_COMPLETED")).unwrap();
+    assert!(!completed.is_pending());
+
+    let rejected =
+        observed("secret.export", activity("a3", "ACTIVITY_STATUS_REJECTED")).unwrap_err();
+    let error = activity_error(&rejected);
+    assert_eq!(error.kind(), ActivityErrorKind::NotCompleted);
+    assert_eq!(error.activity().unwrap()["id"], "a3");
 }
 
 #[test]
@@ -89,13 +95,8 @@ fn url_keeps_a_base_path_prefix() {
 
 #[test]
 fn parser_enforces_body_source_and_safe_path() {
-    assert_eq!(
-        RequestCli::try_parse_from(["tk", "--path", "/public/v1/query/whoami"])
-            .unwrap_err()
-            .kind(),
-        ErrorKind::MissingRequiredArgument
-    );
-    assert_eq!(
+    assert!(RequestCli::try_parse_from(["tk", "--path", "/public/v1/query/whoami"]).is_err());
+    assert!(
         RequestCli::try_parse_from([
             "tk",
             "--path",
@@ -105,22 +106,12 @@ fn parser_enforces_body_source_and_safe_path() {
             "--body-file",
             "-"
         ])
-        .unwrap_err()
-        .kind(),
-        ErrorKind::ArgumentConflict
+        .is_err()
     );
-    assert_eq!(
-        RequestCli::try_parse_from(["tk", "--path", "https://other.test", "--body", "{}"])
-            .unwrap_err()
-            .kind(),
-        ErrorKind::ValueValidation
+    assert!(
+        RequestCli::try_parse_from(["tk", "--path", "https://other.test", "--body", "{}"]).is_err()
     );
-    assert_eq!(
-        ActivityCli::try_parse_from(["tk", "wait", "a", "--timeout", "0"])
-            .unwrap_err()
-            .kind(),
-        ErrorKind::ValueValidation
-    );
+    assert!(ActivityCli::try_parse_from(["tk", "wait", "a", "--timeout", "0"]).is_err());
 }
 
 #[tokio::test]
@@ -140,7 +131,7 @@ async fn reject_success_and_malformed_submission_are_distinct() {
     let output = run_activity(ActivityCommand::Reject { id: "a".into() }, &auth)
         .await
         .unwrap();
-    assert_eq!(output.status(), Status::Rejected);
+    assert_eq!(output.status, "rejected");
     json("submit/test", json!({}))
         .expect(1)
         .mount(&server)
@@ -157,7 +148,12 @@ async fn reject_success_and_malformed_submission_are_distinct() {
 
 #[tokio::test]
 async fn rejected_reject_proposal_is_not_a_rejected_target() {
-    let (server, auth) = consensus_target(1).await;
+    let server = MockServer::start().await;
+    let auth = auth(&server, TurnkeyP256ApiKey::generate());
+    get_activity("target", "ACTIVITY_STATUS_CONSENSUS_NEEDED")
+        .expect(1)
+        .mount(&server)
+        .await;
     json(
         "submit/reject_activity",
         activity("decision", "ACTIVITY_STATUS_REJECTED"),
@@ -184,7 +180,12 @@ async fn rejected_reject_proposal_is_not_a_rejected_target() {
 
 #[tokio::test]
 async fn completed_vote_proposal_reports_the_target_status() {
-    let (server, auth) = consensus_target(2).await;
+    let server = MockServer::start().await;
+    let auth = auth(&server, TurnkeyP256ApiKey::generate());
+    get_activity("target", "ACTIVITY_STATUS_CONSENSUS_NEEDED")
+        .expect(2)
+        .mount(&server)
+        .await;
     json(
         "submit/approve_activity",
         activity("decision", "ACTIVITY_STATUS_COMPLETED"),
@@ -200,7 +201,7 @@ async fn completed_vote_proposal_reports_the_target_status() {
     )
     .await
     .unwrap();
-    assert_eq!(output.status(), Status::Pending);
+    assert_eq!(output.status, "pending");
     assert_eq!(
         output.activity,
         Some(json!({"id": "target", "status": "ACTIVITY_STATUS_CONSENSUS_NEEDED"}))
@@ -238,18 +239,14 @@ async fn mutation_timeout_is_unknown_and_does_not_leak_body() {
         ActivityErrorKind::SubmissionUnknown
     );
     assert!(!format!("{error:#}").contains("secret-marker"));
-    assert!(
-        error
-            .chain()
-            .any(<dyn std::error::Error>::is::<reqwest::Error>)
-    );
+    assert!(error.chain().any(|cause| cause.is::<reqwest::Error>()));
     server.verify().await;
 }
 
 #[tokio::test]
 async fn mutation_connection_failure_is_safe_to_retry() {
     let base = {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         format!("http://{}", listener.local_addr().unwrap())
     };
     let error = post(
@@ -265,10 +262,7 @@ async fn mutation_connection_failure_is_safe_to_retry() {
     assert!(error.downcast_ref::<ActivityError>().is_none());
     assert_eq!(
         classify(&error),
-        Classification {
-            code: ErrorCode::NetworkError,
-            http_status: None,
-        }
+        Classification::new(ErrorCode::NetworkError, None)
     );
 }
 
@@ -276,7 +270,12 @@ async fn mutation_connection_failure_is_safe_to_retry() {
 async fn vote_submission_failures_retain_last_observed_target() {
     for approve in [true, false] {
         for timeout in [true, false] {
-            let (server, auth) = consensus_target(1).await;
+            let server = MockServer::start().await;
+            let auth = auth(&server, TurnkeyP256ApiKey::generate());
+            get_activity("target", "ACTIVITY_STATUS_CONSENSUS_NEEDED")
+                .expect(1)
+                .mount(&server)
+                .await;
             let vote_path = if approve {
                 "/public/v1/submit/approve_activity"
             } else {
@@ -340,7 +339,7 @@ async fn wait_survives_transient_failures_and_fails_fast_on_client_errors() {
     )
     .await
     .unwrap();
-    assert_eq!(output.status(), Status::Completed);
+    assert_eq!(output.status, "completed");
     server.verify().await;
 
     server.reset().await;

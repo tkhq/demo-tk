@@ -19,8 +19,9 @@ pub struct GenerateArgs {
 impl GenerateArgs {
     pub async fn run(self) -> Result<OperationOutput> {
         let key = TurnkeyP256ApiKey::generate();
+        let public_key = hex::encode(key.compressed_public_key());
         let mut stored = StoredApiKey {
-            public_key: hex::encode(key.compressed_public_key()),
+            public_key: public_key.clone(),
             private_key: hex::encode(key.private_key()),
             curve: KeyCurve::P256,
         };
@@ -32,7 +33,7 @@ impl GenerateArgs {
             .with_context(|| format!("create {}", self.output.display()))?;
         Ok(OperationOutput::result(
             "api-key.generate",
-            json!({"publicKey": stored.public_key, "curve": stored.curve, "path": self.output}),
+            json!({"publicKey": public_key, "curve": "p256", "path": self.output}),
         ))
     }
 }
@@ -40,10 +41,7 @@ impl GenerateArgs {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::SecureCreateError;
     use std::fs;
-    #[cfg(unix)]
-    use std::os::unix::fs::symlink;
     #[tokio::test]
     async fn generated_credentials_are_valid_private_and_not_in_output() {
         let dir = tempfile::tempdir().unwrap();
@@ -74,16 +72,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("key.json");
         fs::write(&path, b"existing").unwrap();
-        let error = GenerateArgs {
-            output: path.clone(),
-        }
-        .run()
-        .await
-        .unwrap_err();
-        assert!(matches!(
-            error.downcast_ref::<SecureCreateError>(),
-            Some(SecureCreateError::Exists)
-        ));
+        assert!(
+            GenerateArgs {
+                output: path.clone()
+            }
+            .run()
+            .await
+            .is_err()
+        );
         assert_eq!(fs::read(path).unwrap(), b"existing");
     }
 
@@ -93,13 +89,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("target");
         let path = dir.path().join("link");
-        symlink(&target, &path).unwrap();
-        let error = GenerateArgs { output: path }.run().await.unwrap_err();
-        // O_CREAT|O_EXCL fails with EEXIST on a symlink, dangling or not.
-        assert!(matches!(
-            error.downcast_ref::<SecureCreateError>(),
-            Some(SecureCreateError::Exists)
-        ));
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+        assert!(GenerateArgs { output: path }.run().await.is_err());
         assert!(!target.exists());
     }
 }

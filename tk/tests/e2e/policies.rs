@@ -6,12 +6,21 @@ use serde_json::json;
 fn policy_lifecycle_and_update_field_names() {
     let run = Run::new();
     let name = run.name("policy");
-    let created = run.create_policy(json!({
-        "policyName": name,
-        "effect": "EFFECT_DENY",
-        "condition": "false",
-        "notes": "tk e2e",
-    }));
+    let created = run.submit(
+        run.admin().args([
+            "policy",
+            "create",
+            "--input-json",
+            &json!({
+                "policyName": name,
+                "effect": "EFFECT_DENY",
+                "condition": "false",
+                "notes": "tk e2e",
+            })
+            .to_string(),
+        ]),
+        "policy.create",
+    );
     assert_eq!(
         created["data"]["activity"]["type"],
         "ACTIVITY_TYPE_CREATE_POLICY_V3"
@@ -84,20 +93,29 @@ fn policy_lifecycle_and_update_field_names() {
 
 #[test]
 #[ignore]
-fn quorum_approval_completes_and_rejection_fails_a_consensus_activity() {
+fn consensus_approve_and_reject() {
     let run = Run::new();
     let (submitter_id, submitter) = run.create_user("submitter");
     let (approver_id, approver) = run.create_user("approver");
 
-    let created = run.create_policy(json!({
-        "policyName": run.name("consensus"),
-        "effect": "EFFECT_ALLOW",
-        "condition": "activity.type == 'ACTIVITY_TYPE_CREATE_USER_TAG'",
-        "consensus": format!(
-            "approvers.any(user, user.id == '{submitter_id}') && approvers.any(user, user.id == '{approver_id}')"
-        ),
-        "notes": "tk e2e consensus",
-    }));
+    let created = run.submit(
+        run.admin().args([
+            "policy",
+            "create",
+            "--input-json",
+            &json!({
+                "policyName": run.name("consensus"),
+                "effect": "EFFECT_ALLOW",
+                "condition": "activity.type == 'ACTIVITY_TYPE_CREATE_USER_TAG'",
+                "consensus": format!(
+                    "approvers.any(user, user.id == '{submitter_id}') && approvers.any(user, user.id == '{approver_id}')"
+                ),
+                "notes": "tk e2e consensus",
+            })
+            .to_string(),
+        ]),
+        "policy.create",
+    );
     assert!(
         result(&created, "createPolicyResult")["policyId"].is_string(),
         "{created}"

@@ -1,4 +1,4 @@
-use crate::run::{AdminLogin, Run};
+use crate::run::Run;
 use serde_json::{Value, json};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -36,14 +36,16 @@ fn api_key_generate_writes_0600_and_prints_only_public_key() {
 #[ignore]
 fn login_creates_registry_and_profile_commands_behave() {
     let run = Run::new();
-    let AdminLogin {
-        name,
-        key_file,
-        record: login,
-    } = run.login_admin();
+    let name = run.name("admin");
+    let key_file = run.admin_key_file();
     let canonical_key_file = fs::canonicalize(&key_file).unwrap();
     let org = run.org();
     let base = run.config.api_base_url.clone();
+
+    let login = run.ok(run
+        .cli()
+        .args(["login", &name, "--organization-id", &org, "--api-key-file"])
+        .arg(&key_file));
     assert_eq!(login["command"], "auth.login");
     assert_eq!(login["status"], "completed");
     assert_eq!(login["data"]["profile"], name);
@@ -118,7 +120,18 @@ fn login_creates_registry_and_profile_commands_behave() {
 #[ignore]
 fn profile_flag_beats_ambient_bundle() {
     let run = Run::new();
-    let AdminLogin { name, .. } = run.login_admin();
+    let name = run.name("admin");
+    let key_file = run.admin_key_file();
+    run.ok(run
+        .cli()
+        .args([
+            "login",
+            &name,
+            "--organization-id",
+            &run.org(),
+            "--api-key-file",
+        ])
+        .arg(&key_file));
     let status = run.ok(run.cli().env("TURNKEY_API_PRIVATE_KEY", "unused").args([
         "--profile",
         &name,
@@ -147,7 +160,18 @@ fn complete_bundle_works_without_home() {
 #[ignore]
 fn partial_bundle_is_invalid_input_without_registry_fallback() {
     let run = Run::new();
-    run.login_admin();
+    let name = run.name("admin");
+    let key_file = run.admin_key_file();
+    run.ok(run
+        .cli()
+        .args([
+            "login",
+            &name,
+            "--organization-id",
+            &run.org(),
+            "--api-key-file",
+        ])
+        .arg(&key_file));
     let error = run.err(
         run.cli()
             .env("TURNKEY_API_PRIVATE_KEY", &run.config.private_key.0)
@@ -180,7 +204,7 @@ fn login_with_unregistered_credential_fails_and_writes_no_profile() {
                 "login",
                 &run.name("nope"),
                 "--organization-id",
-                run.org(),
+                &run.org(),
                 "--api-key-file",
             ])
             .arg(&key_file),

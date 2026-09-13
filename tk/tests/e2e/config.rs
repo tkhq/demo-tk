@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::env;
 use std::fmt::{self, Debug, Formatter};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 const REQUIRED_KEYS: [&str; 3] = [
@@ -28,6 +28,10 @@ pub(crate) struct E2eConfig {
     pub(crate) api_base_url: String,
 }
 
+fn env_file() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../.env.test")
+}
+
 fn parse_env_file(text: &str) -> BTreeMap<String, String> {
     text.lines()
         .filter_map(|line| {
@@ -49,7 +53,7 @@ fn parse_env_file(text: &str) -> BTreeMap<String, String> {
 
 impl E2eConfig {
     pub(crate) fn load() -> Self {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.env.test");
+        let path = env_file();
         let file = fs::read_to_string(&path)
             .map(|text| parse_env_file(&text))
             .unwrap_or_default();

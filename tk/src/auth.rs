@@ -1,11 +1,11 @@
-use anyhow::{Context, Error, Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::{Args, Subcommand};
-use reqwest::{ClientBuilder, Url, redirect::Policy};
+use reqwest::{ClientBuilder, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     collections::BTreeMap,
-    io::{self, ErrorKind},
+    io::ErrorKind,
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
@@ -19,15 +19,12 @@ use turnkey_client::TurnkeyClient;
 use turnkey_client::generated::GetWhoamiRequest;
 use uuid::Uuid;
 
-use crate::{
-    errors::{InvalidInput, Malformed},
-    operations::OperationOutput,
-};
+use crate::{errors::InvalidInput, operations::OperationOutput};
 
 const DEFAULT_URL: &str = "https://api.turnkey.com";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-#[derive(Debug, Args)]
+#[derive(Debug, Default, Args)]
 pub struct AuthOptions {
     /// Identity registry path.
     #[arg(long, global = true, env = "TK_CONFIG")]
@@ -60,7 +57,7 @@ pub enum AuthCommand {
 pub struct LoginArgs {
     /// Name for the new profile.
     name: String,
-    /// Existing P256 credential JSON file (public key, private key, curve).
+    /// Existing P256 credential JSON file (public_key, private_key, curve).
     #[arg(long)]
     api_key_file: PathBuf,
 }
@@ -84,7 +81,7 @@ pub struct StoredApiKey {
     pub curve: KeyCurve,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum KeyCurve {
     P256,
@@ -120,66 +117,27 @@ struct Profile {
     organization_id: Uuid,
     api_base_url: String,
     api_key_file: PathBuf,
-}
-
-pub enum CredentialSource {
-    Environment,
-    Profile(String),
-}
-
-/// An HTTP(S) origin, optionally with a path prefix, that carries no
-/// credentials, query, or fragment. The text is kept exactly as supplied so
-/// persisted and reported values match the input.
-#[derive(Serialize)]
-#[serde(transparent)]
-pub struct ApiBaseUrl(String);
-
-impl ApiBaseUrl {
-    fn parse(raw: String) -> Result<Self> {
-        let url =
-            Url::parse(&raw).map_err(|error| Malformed::new("invalid API base URL", error))?;
-        if !matches!(url.scheme(), "https" | "http")
-            || url.host_str().is_none()
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-        {
-            return Err(InvalidInput(
-                "API base URL must be an HTTP(S) URL without credentials, query or fragment".into(),
-            )
-            .into());
-        }
-        Ok(Self(raw))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<ApiBaseUrl> for String {
-    fn from(url: ApiBaseUrl) -> Self {
-        url.0
-    }
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ssh_signing_key_id: Option<String>,
 }
 
 pub struct ResolvedAuth {
-    pub org_id: Uuid,
-    pub api_base_url: ApiBaseUrl,
+    pub org_id: String,
+    pub api_base_url: String,
     pub stamper: TurnkeyP256ApiKey,
-    pub source: CredentialSource,
+    source: &'static str,
+    profile: Option<String>,
 }
 
 #[cfg(test)]
 impl ResolvedAuth {
     pub fn for_tests(org_id: &str, api_base_url: &str, stamper: TurnkeyP256ApiKey) -> Self {
         Self {
-            org_id: Uuid::parse_str(org_id).expect("test organization ID is a UUID"),
-            api_base_url: ApiBaseUrl::parse(api_base_url.into())
-                .expect("test API base URL is a valid HTTP(S) URL"),
+            org_id: org_id.into(),
+            api_base_url: api_base_url.into(),
             stamper,
-            source: CredentialSource::Environment,
+            source: "test",
+            profile: None,
         }
     }
 }
@@ -190,11 +148,11 @@ pub fn transport(builder: ClientBuilder) -> ClientBuilder {
 
 pub fn build_turnkey_client(
     stamper: TurnkeyP256ApiKey,
-    api_base_url: &ApiBaseUrl,
+    api_base_url: &str,
 ) -> Result<TurnkeyClient<TurnkeyP256ApiKey>> {
     TurnkeyClient::builder()
         .api_key(stamper)
-        .base_url(api_base_url.as_str())
+        .base_url(api_base_url)
         .with_reqwest_builder(transport)
         .build()
         .context("failed to build Turnkey client")
@@ -221,7 +179,7 @@ pub(crate) fn state_dir() -> Result<PathBuf> {
     Ok(home()?.join(".config/turnkey/tk"))
 }
 
-async fn sweep_stale(dir: &Path, max_age: Duration) -> io::Result<usize> {
+pub(crate) async fn sweep_stale(dir: &Path, max_age: Duration) -> std::io::Result<usize> {
     let cutoff = SystemTime::now()
         .checked_sub(max_age)
         .unwrap_or(SystemTime::UNIX_EPOCH);
@@ -269,23 +227,15 @@ async fn load(path: &Path) -> Result<Registry> {
         Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Registry::default()),
         Err(e) => return Err(e).with_context(|| format!("read registry {}", path.display())),
     };
-    let malformed = |mut error: toml::de::Error| {
-        // The registry may hold a pasted secret; keep the parser's message and
-        // key path but never echo the document itself.
-        error.set_input(None);
-        Malformed::new(
-            format!("invalid identity registry {}", path.display()),
-            error,
-        )
-    };
-    let RegistryVersion { version } = toml::from_str(&text).map_err(malformed)?;
+    let invalid = || InvalidInput(format!("invalid identity registry {}", path.display()));
+    let RegistryVersion { version } = toml::from_str(&text).map_err(|_| invalid())?;
     if version != 1 {
         bail!(
             "unsupported registry version {version} in {}",
             path.display()
         );
     }
-    let registry: Registry = toml::from_str(&text).map_err(malformed)?;
+    let registry: Registry = toml::from_str(&text).map_err(|_| invalid())?;
     if let Some((name, profile)) = registry
         .profiles
         .iter()
@@ -301,19 +251,19 @@ async fn load(path: &Path) -> Result<Registry> {
     Ok(registry)
 }
 
-struct FileLock {
+pub(crate) struct FileLock {
     _file: fs::File,
 }
 
 #[derive(Debug, thiserror::Error)]
 #[error("{resource} is locked by another tk process ({}); retry after it completes", lock.display())]
-struct LockHeld {
+pub(crate) struct LockHeld {
     resource: String,
     lock: PathBuf,
 }
 
 impl FileLock {
-    async fn acquire(lock: PathBuf, resource: &str) -> Result<Self> {
+    pub(crate) async fn acquire(lock: PathBuf, resource: &str) -> Result<Self> {
         if let Some(parent) = lock.parent() {
             fs::create_dir_all(parent).await?;
         }
@@ -332,7 +282,7 @@ impl FileLock {
             // lifetime of `file`.
             let status = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
             if status != 0 {
-                let error = io::Error::last_os_error();
+                let error = std::io::Error::last_os_error();
                 if error.kind() == ErrorKind::WouldBlock {
                     return Err(LockHeld {
                         resource: resource.into(),
@@ -372,7 +322,7 @@ pub enum SecureCreateError {
     #[error("refusing to overwrite an existing file")]
     Exists,
     #[error(transparent)]
-    Io(io::Error),
+    Io(std::io::Error),
 }
 
 pub async fn secure_create(path: &Path, contents: &[u8]) -> Result<(), SecureCreateError> {
@@ -398,8 +348,6 @@ pub async fn secure_create(path: &Path, contents: &[u8]) -> Result<(), SecureCre
     Ok(())
 }
 
-// The decode errors echo private credential bytes, which must not enter the error chain.
-#[allow(clippy::map_err_ignore)]
 fn parse_key(private: &str, public: &str) -> Result<TurnkeyP256ApiKey> {
     let bytes = hex::decode(private)
         .map_err(|_| InvalidInput("private credential must be hexadecimal".into()))?;
@@ -416,23 +364,36 @@ async fn read_key(path: &Path) -> Result<TurnkeyP256ApiKey> {
     let text = fs::read_to_string(path)
         .await
         .with_context(|| format!("read credential {}", path.display()))?;
-    let key: StoredApiKey = serde_json::from_str(&text).map_err(|error| {
-        Malformed::new(
-            format!("invalid credential JSON in {}", path.display()),
-            error,
-        )
-    })?;
+    let key: StoredApiKey = serde_json::from_str(&text)
+        .map_err(|_| InvalidInput(format!("invalid credential JSON in {}", path.display())))?;
     parse_key(&key.private_key, &key.public_key)
 }
 
-fn endpoint(options: &AuthOptions, fallback: String) -> Result<ApiBaseUrl> {
-    ApiBaseUrl::parse(
-        options
-            .api_base_url
-            .clone()
-            .or_else(|| env("TURNKEY_API_BASE_URL"))
-            .unwrap_or(fallback),
-    )
+fn endpoint(options: &AuthOptions, fallback: String) -> Result<String> {
+    let endpoint = options
+        .api_base_url
+        .clone()
+        .or_else(|| env("TURNKEY_API_BASE_URL"))
+        .unwrap_or(fallback);
+    parse_endpoint(endpoint)
+}
+
+fn parse_endpoint(endpoint: String) -> Result<String> {
+    let url =
+        reqwest::Url::parse(&endpoint).map_err(|_| InvalidInput("invalid API base URL".into()))?;
+    if !matches!(url.scheme(), "https" | "http")
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(InvalidInput(
+            "API base URL must be an HTTP(S) URL without credentials, query or fragment".into(),
+        )
+        .into());
+    }
+    Ok(endpoint)
 }
 
 const ENV_BUNDLE: [&str; 3] = [
@@ -453,8 +414,6 @@ pub async fn resolve(options: &AuthOptions) -> Result<ResolvedAuth> {
                 .into());
             };
             let [org, public, private] = [org, public, private].map(|value| {
-                // The Err payload is the credential bytes, which must not enter the error chain.
-                #[allow(clippy::map_err_ignore)]
                 value.into_string().map_err(|_| {
                     InvalidInput("credential environment value is not valid Unicode".into())
                 })
@@ -467,15 +426,15 @@ pub async fn resolve(options: &AuthOptions) -> Result<ResolvedAuth> {
             }
             let org = match options.organization_id {
                 Some(org) => org,
-                None => Uuid::parse_str(&org).map_err(|error| {
-                    Malformed::new("invalid environment organization ID", error)
-                })?,
+                None => Uuid::parse_str(&org)
+                    .map_err(|_| InvalidInput("invalid environment organization ID".into()))?,
             };
             return Ok(ResolvedAuth {
-                org_id: org,
+                org_id: org.to_string(),
                 api_base_url: endpoint(options, DEFAULT_URL.into())?,
                 stamper: parse_key(&private, &public)?,
-                source: CredentialSource::Environment,
+                source: "environment",
+                profile: None,
             });
         }
     }
@@ -495,10 +454,14 @@ pub async fn resolve(options: &AuthOptions) -> Result<ResolvedAuth> {
         ))
     })?;
     Ok(ResolvedAuth {
-        org_id: options.organization_id.unwrap_or(profile.organization_id),
+        org_id: options
+            .organization_id
+            .unwrap_or(profile.organization_id)
+            .to_string(),
         api_base_url: endpoint(options, profile.api_base_url.clone())?,
         stamper: read_key(&profile.api_key_file).await?,
-        source: CredentialSource::Profile(name.clone()),
+        source: "profile",
+        profile: Some(name.clone()),
     })
 }
 
@@ -510,23 +473,19 @@ pub async fn run_auth(command: AuthCommand, options: &AuthOptions) -> Result<Ope
     match command {
         AuthCommand::Status => {
             let auth = resolve(options).await?;
-            let (source, profile) = match &auth.source {
-                CredentialSource::Environment => ("environment", None),
-                CredentialSource::Profile(name) => ("profile", Some(name)),
-            };
             Ok(OperationOutput::result(
                 "auth.status",
-                json!({"ready": true, "profile": profile, "organizationId": auth.org_id, "apiBaseUrl": auth.api_base_url, "publicKey": hex::encode(auth.stamper.compressed_public_key()), "credentialSource": source}),
+                json!({"ready": true, "profile": auth.profile, "organizationId": auth.org_id, "apiBaseUrl": auth.api_base_url, "publicKey": hex::encode(auth.stamper.compressed_public_key()), "credentialSource": auth.source}),
             ))
         }
         AuthCommand::Whoami => {
             let auth = resolve(options).await?;
             let identity = build_turnkey_client(auth.stamper, &auth.api_base_url)?
                 .get_whoami(GetWhoamiRequest {
-                    organization_id: auth.org_id.to_string(),
+                    organization_id: auth.org_id,
                 })
                 .await
-                .map_err(Error::new)
+                .map_err(anyhow::Error::new)
                 .context("Turnkey API request failed")?;
             Ok(OperationOutput::result(
                 "auth.whoami",
@@ -575,7 +534,7 @@ pub async fn run_auth(command: AuthCommand, options: &AuthOptions) -> Result<Ope
                     organization_id: org.to_string(),
                 })
                 .await
-                .map_err(Error::new)
+                .map_err(anyhow::Error::new)
                 .context("Turnkey API request failed")?;
             let _lock = registry_lock(&path).await?;
             let mut registry = load(&path).await?;
@@ -590,8 +549,9 @@ pub async fn run_auth(command: AuthCommand, options: &AuthOptions) -> Result<Ope
                 args.name.clone(),
                 Profile {
                     organization_id: org,
-                    api_base_url: base_url.into(),
+                    api_base_url: base_url,
                     api_key_file: key_path,
+                    ssh_signing_key_id: None,
                 },
             );
             registry.active_profile = Some(args.name.clone());

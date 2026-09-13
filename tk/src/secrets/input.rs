@@ -2,12 +2,7 @@
 //! resolved.
 
 use anyhow::{Context, Result};
-use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
-use std::fmt::{self, Display, Formatter};
-use std::fs::File;
-use std::io::{self, IsTerminal, Read};
-use std::mem::take;
+use std::io::{IsTerminal, Read};
 use std::path::Path;
 use turnkey_client::generated::immutable::models::v1::KeyValue;
 use turnkey_enclave_encrypt::QuorumPublicKey;
@@ -17,53 +12,29 @@ use zeroize::Zeroizing;
 use crate::errors::InvalidInput;
 use crate::output::MissingRequiredInput;
 
-const MAX_SECRET_BYTES: usize = 1024 * 1024;
+pub(crate) const MAX_SECRET_BYTES: usize = 1024 * 1024;
 
-#[cfg_attr(test, derive(Debug, PartialEq))]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SecretRef {
     Id(Uuid),
-    Name(SecretName),
+    Name(String),
 }
 
-/// A non-blank secret name of at most 256 bytes.
-#[derive(Clone, Debug, Serialize)]
-#[cfg_attr(test, derive(PartialEq))]
-#[serde(transparent)]
-pub struct SecretName(String);
-
-impl SecretName {
-    pub(crate) fn parse(raw: &str) -> Result<Self, String> {
-        if raw.trim().is_empty() {
-            return Err("secret name must not be blank".into());
-        }
-        if raw.len() > 256 {
-            return Err("secret name must be at most 256 bytes".into());
-        }
-        Ok(Self(raw.to_owned()))
+pub(crate) fn parse_label(raw: &str) -> Result<String, String> {
+    if raw.trim().is_empty() {
+        return Err("secret name must not be blank".into());
     }
-
-    pub(crate) fn parse_new(raw: &str) -> Result<Self, String> {
-        if Uuid::parse_str(raw).is_ok() {
-            return Err("secret name must not be a UUID".into());
-        }
-        Self::parse(raw)
+    if raw.len() > 256 {
+        return Err("secret name must be at most 256 bytes".into());
     }
-
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
+    Ok(raw.to_owned())
 }
 
-impl Display for SecretName {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+pub(crate) fn parse_name(raw: &str) -> Result<String, String> {
+    if Uuid::parse_str(raw).is_ok() {
+        return Err("secret name must not be a UUID".into());
     }
-}
-
-impl From<SecretName> for String {
-    fn from(name: SecretName) -> Self {
-        name.0
-    }
+    parse_label(raw)
 }
 
 pub(crate) fn parse_key_value(raw: &str) -> Result<KeyValue, String> {
@@ -76,40 +47,16 @@ pub(crate) fn parse_key_value(raw: &str) -> Result<KeyValue, String> {
     }
 }
 
-/// Key/value pairs from a repeatable flag, in the order given, with each key present once.
-#[cfg_attr(test, derive(Debug))]
-pub struct UniqueKeyValues(Vec<KeyValue>);
-
-impl UniqueKeyValues {
-    pub(crate) fn parse(pairs: Vec<KeyValue>, flag: &str) -> Result<Self> {
-        let mut seen = BTreeSet::new();
-        for pair in &pairs {
-            if !seen.insert(pair.key.as_str()) {
-                return Err(InvalidInput(format!(
-                    "{flag} key {} was given more than once",
-                    pair.key
-                ))
-                .into());
-            }
+pub(crate) fn unique_key_values(pairs: Vec<KeyValue>, flag: &str) -> Result<Vec<KeyValue>> {
+    let mut seen = std::collections::BTreeSet::new();
+    for pair in &pairs {
+        if !seen.insert(pair.key.as_str()) {
+            return Err(
+                InvalidInput(format!("{flag} key {} was given more than once", pair.key)).into(),
+            );
         }
-        Ok(Self(pairs))
     }
-}
-
-impl From<UniqueKeyValues> for Vec<KeyValue> {
-    fn from(pairs: UniqueKeyValues) -> Self {
-        pairs.0
-    }
-}
-
-impl From<UniqueKeyValues> for BTreeMap<String, String> {
-    fn from(pairs: UniqueKeyValues) -> Self {
-        pairs
-            .0
-            .into_iter()
-            .map(|KeyValue { key, value }| (key, value))
-            .collect()
-    }
+    Ok(pairs)
 }
 
 pub(crate) fn read_value(
@@ -118,35 +65,33 @@ pub(crate) fn read_value(
 ) -> Result<Zeroizing<String>> {
     if let Some(path) = from_file {
         let mut bytes = Zeroizing::new(Vec::new());
-        File::open(path)
-            .with_context(|| format!("read secret value from {}", path.display()))?
+        std::fs::File::open(path)?
             .take(MAX_SECRET_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)
-            .with_context(|| format!("read secret value from {}", path.display()))?;
-        return normalize(take(&mut *bytes));
+            .read_to_end(&mut bytes)?;
+        return normalize(std::mem::take(&mut *bytes));
     }
-    let stdin = io::stdin();
+    let stdin = std::io::stdin();
     if !stdin.is_terminal() {
         let mut bytes = Zeroizing::new(Vec::new());
         stdin
             .lock()
             .take(MAX_SECRET_BYTES as u64 + 1)
             .read_to_end(&mut bytes)?;
-        return normalize(take(&mut *bytes));
+        return normalize(std::mem::take(&mut *bytes));
     }
     if non_interactive {
         return Err(MissingRequiredInput::new("--from-file").into());
     }
-    let mut value = Zeroizing::new(rpassword::prompt_password("Secret value: ")?);
-    normalize(take(&mut *value).into_bytes())
+    let value = Zeroizing::new(rpassword::prompt_password("Secret value: ")?);
+    normalize(value.as_bytes().to_vec())
 }
 
-fn normalize(bytes: Vec<u8>) -> Result<Zeroizing<String>> {
+pub(crate) fn normalize(bytes: Vec<u8>) -> Result<Zeroizing<String>> {
     let mut bytes = Zeroizing::new(bytes);
     if bytes.len() > MAX_SECRET_BYTES {
         return Err(InvalidInput("secret value exceeds the 1 MiB limit".into()).into());
     }
-    let mut value = match String::from_utf8(take(&mut *bytes)) {
+    let mut value = match String::from_utf8(std::mem::take(&mut *bytes)) {
         Ok(value) => Zeroizing::new(value),
         Err(error) => {
             drop(Zeroizing::new(error.into_bytes()));
@@ -186,23 +131,21 @@ pub(crate) fn quorum_for(api_base_url: &str) -> Result<QuorumPublicKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use turnkey_client::generated::immutable::models::v1::KeyValue;
 
     #[test]
     fn import_name_must_be_a_non_blank_non_uuid_label() {
+        assert_eq!(parse_name("api-token").unwrap(), "api-token");
         assert_eq!(
-            SecretName::parse_new("api-token").unwrap(),
-            SecretName("api-token".into())
-        );
-        assert_eq!(
-            SecretName::parse_new(" ").unwrap_err(),
+            parse_name(" ").unwrap_err(),
             "secret name must not be blank"
         );
         assert_eq!(
-            SecretName::parse_new(&"x".repeat(257)).unwrap_err(),
+            parse_name(&"x".repeat(257)).unwrap_err(),
             "secret name must be at most 256 bytes"
         );
         assert_eq!(
-            SecretName::parse_new(&Uuid::new_v4().to_string()).unwrap_err(),
+            parse_name(&Uuid::new_v4().to_string()).unwrap_err(),
             "secret name must not be a UUID"
         );
     }
@@ -245,7 +188,7 @@ mod tests {
                 value: "2".into(),
             },
         ];
-        let error = UniqueKeyValues::parse(pairs, "--property").unwrap_err();
+        let error = unique_key_values(pairs, "--property").unwrap_err();
         assert_eq!(
             error.to_string(),
             "--property key a was given more than once"

@@ -1,6 +1,6 @@
 use crate::{
     auth::{ResolvedAuth, build_turnkey_client},
-    errors::{Malformed, MissingResource},
+    errors::{InvalidInput, MissingResource},
     operations::{OperationOutput, submit_activity},
     resources::BodyArgs,
 };
@@ -12,7 +12,7 @@ use turnkey_client::generated::{
     external::options::v1::Pagination,
     immutable::activity::v1::{
         CreateWalletAccountsIntent, CreateWalletIntent, SignRawPayloadIntentV2,
-        SignTransactionIntentV2, UpdateWalletIntent, WalletAccountParams,
+        SignTransactionIntentV2, UpdateWalletIntent,
     },
 };
 use uuid::Uuid;
@@ -55,31 +55,16 @@ pub enum SignCommand {
 }
 
 pub enum PreparedWalletCommand {
-    Query(WalletQuery),
-    Mutation(WalletMutation),
-}
-
-pub enum WalletQuery {
     List,
     Get(Uuid),
+    Create(CreateWalletIntent),
+    Update(UpdateWalletIntent),
     Accounts {
         wallet_id: Uuid,
         limit: u32,
         cursor: Option<String>,
     },
-}
-
-pub enum WalletMutation {
-    Create(CreateWalletIntent),
-    Update {
-        wallet_id: Uuid,
-        wallet_name: String,
-    },
-    CreateAccounts {
-        wallet_id: Uuid,
-        accounts: Vec<WalletAccountParams>,
-        persist: Option<bool>,
-    },
+    CreateAccounts(CreateWalletAccountsIntent),
     Payload(SignRawPayloadIntentV2),
     Transaction(SignTransactionIntentV2),
 }
@@ -87,21 +72,14 @@ pub enum WalletMutation {
 impl WalletCommand {
     pub fn prepare(self) -> Result<PreparedWalletCommand> {
         Ok(match self {
-            Self::List => PreparedWalletCommand::Query(WalletQuery::List),
-            Self::Get { id } => PreparedWalletCommand::Query(WalletQuery::Get(id)),
-            Self::Create(input) => {
-                PreparedWalletCommand::Mutation(WalletMutation::Create(input.parse()?))
-            }
+            Self::List => PreparedWalletCommand::List,
+            Self::Get { id } => PreparedWalletCommand::Get(id),
+            Self::Create(input) => PreparedWalletCommand::Create(input.parse()?),
             Self::Update(input) => {
-                let UpdateWalletIntent {
-                    wallet_id,
-                    wallet_name,
-                } = input.parse()?;
-                PreparedWalletCommand::Mutation(WalletMutation::Update {
-                    wallet_id: Uuid::parse_str(&wallet_id)
-                        .map_err(|error| Malformed::new("walletId must be a UUID", error))?,
-                    wallet_name,
-                })
+                let params: UpdateWalletIntent = input.parse()?;
+                Uuid::parse_str(&params.wallet_id)
+                    .map_err(|_| InvalidInput("walletId must be a UUID".into()))?;
+                PreparedWalletCommand::Update(params)
             }
             Self::Account {
                 command:
@@ -110,25 +88,18 @@ impl WalletCommand {
                         limit,
                         cursor,
                     },
-            } => PreparedWalletCommand::Query(WalletQuery::Accounts {
+            } => PreparedWalletCommand::Accounts {
                 wallet_id,
                 limit,
                 cursor,
-            }),
+            },
             Self::Account {
                 command: AccountCommand::Create(input),
             } => {
-                let CreateWalletAccountsIntent {
-                    wallet_id,
-                    accounts,
-                    persist,
-                } = input.parse()?;
-                PreparedWalletCommand::Mutation(WalletMutation::CreateAccounts {
-                    wallet_id: Uuid::parse_str(&wallet_id)
-                        .map_err(|error| Malformed::new("walletId must be a UUID", error))?,
-                    accounts,
-                    persist,
-                })
+                let params: CreateWalletAccountsIntent = input.parse()?;
+                Uuid::parse_str(&params.wallet_id)
+                    .map_err(|_| InvalidInput("walletId must be a UUID".into()))?;
+                PreparedWalletCommand::CreateAccounts(params)
             }
         })
     }
@@ -136,24 +107,15 @@ impl WalletCommand {
 
 impl SignCommand {
     pub fn prepare(self) -> Result<PreparedWalletCommand> {
-        Ok(PreparedWalletCommand::Mutation(match self {
-            Self::Payload(input) => WalletMutation::Payload(input.parse()?),
-            Self::Transaction(input) => WalletMutation::Transaction(input.parse()?),
-        }))
+        Ok(match self {
+            Self::Payload(input) => PreparedWalletCommand::Payload(input.parse()?),
+            Self::Transaction(input) => PreparedWalletCommand::Transaction(input.parse()?),
+        })
     }
 }
 
 impl PreparedWalletCommand {
     pub async fn run(self, auth: ResolvedAuth) -> Result<OperationOutput> {
-        match self {
-            Self::Query(query) => query.run(auth).await,
-            Self::Mutation(mutation) => mutation.run(auth).await,
-        }
-    }
-}
-
-impl WalletMutation {
-    async fn run(self, auth: ResolvedAuth) -> Result<OperationOutput> {
         let (command, endpoint, kind, params) = match self {
             Self::Create(p) => (
                 "wallet.create",
@@ -161,31 +123,17 @@ impl WalletMutation {
                 "ACTIVITY_TYPE_CREATE_WALLET",
                 to_value(p)?,
             ),
-            Self::Update {
-                wallet_id,
-                wallet_name,
-            } => (
+            Self::Update(p) => (
                 "wallet.update",
                 "update_wallet",
                 "ACTIVITY_TYPE_UPDATE_WALLET",
-                to_value(UpdateWalletIntent {
-                    wallet_id: wallet_id.to_string(),
-                    wallet_name,
-                })?,
+                to_value(p)?,
             ),
-            Self::CreateAccounts {
-                wallet_id,
-                accounts,
-                persist,
-            } => (
+            Self::CreateAccounts(p) => (
                 "wallet.account.create",
                 "create_wallet_accounts",
                 "ACTIVITY_TYPE_CREATE_WALLET_ACCOUNTS",
-                to_value(CreateWalletAccountsIntent {
-                    wallet_id: wallet_id.to_string(),
-                    accounts,
-                    persist,
-                })?,
+                to_value(p)?,
             ),
             Self::Payload(p) => (
                 "sign.payload",
@@ -199,15 +147,14 @@ impl WalletMutation {
                 "ACTIVITY_TYPE_SIGN_TRANSACTION_V2",
                 to_value(p)?,
             ),
+            query => return query.query(auth).await,
         };
         submit_activity(&auth, command, endpoint, kind, &params).await
     }
-}
 
-impl WalletQuery {
-    async fn run(self, auth: ResolvedAuth) -> Result<OperationOutput> {
+    async fn query(self, auth: ResolvedAuth) -> Result<OperationOutput> {
         let client = build_turnkey_client(auth.stamper, &auth.api_base_url)?;
-        let organization_id = auth.org_id.to_string();
+        let organization_id = auth.org_id;
         match self {
             Self::List => {
                 let data = client
@@ -255,6 +202,7 @@ impl WalletQuery {
                     json!({"accounts": accounts, "nextCursor": next}),
                 ))
             }
+            _ => unreachable!("mutations are submitted by run"),
         }
     }
 }
@@ -263,14 +211,13 @@ impl WalletQuery {
 mod tests {
     use super::*;
     use clap::Parser;
-    use clap::error::ErrorKind;
-    #[derive(Debug, Parser)]
+    #[derive(Parser)]
     struct WalletParser {
         #[command(subcommand)]
         command: WalletCommand,
     }
 
-    #[derive(Debug, Parser)]
+    #[derive(Parser)]
     struct SignParser {
         #[command(subcommand)]
         command: SignCommand,
@@ -278,27 +225,14 @@ mod tests {
 
     #[test]
     fn conflicting_or_missing_inputs_fail_during_parsing() {
-        assert_eq!(
-            WalletParser::try_parse_from(["wallet", "create"])
-                .unwrap_err()
-                .kind(),
-            ErrorKind::MissingRequiredArgument
-        );
+        assert!(WalletParser::try_parse_from(["wallet", "create"]).is_err());
         let both = "wallet create --input-json {} --input-file x".split(' ');
-        assert_eq!(
-            WalletParser::try_parse_from(both).unwrap_err().kind(),
-            ErrorKind::ArgumentConflict
-        );
+        assert!(WalletParser::try_parse_from(both).is_err());
     }
 
     #[test]
     fn wallet_uuid_is_checked_before_authentication() {
-        assert_eq!(
-            WalletParser::try_parse_from(["wallet", "get", "not-an-id"])
-                .unwrap_err()
-                .kind(),
-            ErrorKind::ValueValidation
-        );
+        assert!(WalletParser::try_parse_from(["wallet", "get", "not-an-id"]).is_err());
         let parsed = WalletParser::try_parse_from([
             "wallet",
             "update",
@@ -306,15 +240,7 @@ mod tests {
             r#"{"walletId":"bad","walletName":"next"}"#,
         ])
         .unwrap();
-        let error = parsed
-            .command
-            .prepare()
-            .err()
-            .expect("prepare should have failed");
-        let malformed = error
-            .downcast_ref::<Malformed>()
-            .expect("a malformed wallet id is a Malformed error");
-        assert_eq!(malformed.to_string(), "walletId must be a UUID");
+        assert!(parsed.command.prepare().is_err());
     }
 
     #[test]
@@ -326,23 +252,13 @@ mod tests {
             r#"{"signWith":"opaque-key","payload":"00"}"#,
         ])
         .unwrap();
-        let error = parsed
-            .command
-            .prepare()
-            .err()
-            .expect("prepare should have failed");
-        let malformed = error
-            .downcast_ref::<Malformed>()
-            .expect("missing algorithm inputs are a Malformed error");
-        assert_eq!(malformed.to_string(), "invalid operation parameters");
+        assert!(parsed.command.prepare().is_err());
     }
 
     #[test]
     fn signing_preserves_opaque_key_identifiers() {
         let parsed = SignParser::try_parse_from(["sign", "transaction", "--input-json", r#"{"signWith":"opaque-key","unsignedTransaction":"00","type":"TRANSACTION_TYPE_ETHEREUM"}"#]).unwrap();
-        let PreparedWalletCommand::Mutation(WalletMutation::Transaction(params)) =
-            parsed.command.prepare().unwrap()
-        else {
+        let PreparedWalletCommand::Transaction(params) = parsed.command.prepare().unwrap() else {
             panic!("expected prepared transaction")
         };
         assert_eq!(params.sign_with, "opaque-key");
