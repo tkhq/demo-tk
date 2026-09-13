@@ -1,10 +1,10 @@
+use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
 use serde::Serialize;
 use std::fmt::{self, Display, Formatter};
+use turnkey_auth::config::{self, ConfigKey, RedactedConfig};
 
 use crate::outcome::Outcome;
-use crate::output::StdCtx;
-use turnkey_auth::config::{self, ConfigKey, RedactedConfig};
 
 #[derive(Debug, ClapArgs)]
 #[command(about, long_about = None)]
@@ -41,8 +41,8 @@ struct SetArgs {
 #[cfg_attr(test, derive(Default))]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigValue {
-    pub key: String,
-    pub value: String,
+    key: String,
+    value: String,
 }
 
 impl Display for ConfigValue {
@@ -55,7 +55,7 @@ impl Display for ConfigValue {
 #[cfg_attr(test, derive(Default))]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigValueSet {
-    pub key: String,
+    key: String,
 }
 
 impl Display for ConfigValueSet {
@@ -68,24 +68,26 @@ impl Display for ConfigValueSet {
 #[cfg_attr(test, derive(Default))]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigListed {
-    pub config: RedactedConfig,
+    config: RedactedConfig,
 }
 
 impl Display for ConfigListed {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        // fmt::Error carries no payload.
+        #[allow(clippy::map_err_ignore)]
         let rendered = serde_json::to_string_pretty(&self.config).map_err(|_| fmt::Error)?;
         f.write_str(&rendered)
     }
 }
 
-pub async fn run(_ctx: &mut StdCtx, args: Args) -> anyhow::Result<Outcome> {
+pub async fn run(args: Args) -> Result<Outcome> {
     Ok(match args.command {
         Command::Get(GetArgs { key }) => Outcome::ConfigValue(ConfigValue {
             value: config::get_resolved_config_value(key).await?,
             key: key.to_string(),
         }),
         Command::Set(SetArgs { key, value }) => {
-            config::set_config_value(key, &value).await?;
+            config::set_config_value(key, value).await?;
             Outcome::ConfigValueSet(ConfigValueSet {
                 key: key.to_string(),
             })

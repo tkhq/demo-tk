@@ -1,5 +1,8 @@
 use crate::run::Run;
 use serde_json::json;
+use std::fs::{self, File};
+use std::time::{Duration, SystemTime};
+use uuid::Uuid;
 
 #[test]
 #[ignore]
@@ -8,24 +11,23 @@ fn secret_import_list_and_export_round_trip() {
     let name = run.name("api-token");
     let value = "hunter2-😀-multi\nline";
 
-    let imported = run.ok(run
-        .admin()
-        .args([
-            "secret",
-            "import",
-            &name,
-            "--property",
-            "env=prod",
-            "--property",
-            "team=payments",
-        ])
-        .write_stdin(format!("{value}\n")));
-    assert_eq!(imported["command"], "secret.import");
-    assert_eq!(imported["status"], "completed", "{imported}");
+    let imported = run.submit(
+        run.admin()
+            .args([
+                "secret",
+                "import",
+                &name,
+                "--property",
+                "env=prod",
+                "--property",
+                "team=payments",
+            ])
+            .write_stdin(format!("{value}\n")),
+        "secret.import",
+    );
     assert_eq!(imported["data"]["name"], name);
     let secret_id = imported["data"]["secretId"].as_str().unwrap().to_string();
-    assert!(uuid::Uuid::parse_str(&secret_id).is_ok(), "{imported}");
-    assert_eq!(imported["activity"]["status"], "ACTIVITY_STATUS_COMPLETED");
+    assert!(Uuid::parse_str(&secret_id).is_ok(), "{imported}");
 
     let listed = run.ok(run.admin().args(["secret", "list", "--limit", "100"]));
     assert_eq!(listed["command"], "secret.list");
@@ -35,8 +37,7 @@ fn secret_import_list_and_export_round_trip() {
         .unwrap()
         .iter()
         .find(|entry| entry["secretId"] == secret_id)
-        .unwrap_or_else(|| panic!("imported secret missing from list: {listed}"))
-        .clone();
+        .unwrap_or_else(|| panic!("imported secret missing from list: {listed}"));
     assert_eq!(entry["name"], name);
     assert_eq!(
         entry["staticProperties"],
@@ -87,12 +88,12 @@ fn secret_import_list_and_export_round_trip() {
     );
     assert_eq!(to_file["data"]["out"], out.to_str().unwrap());
     assert!(to_file["data"].get("value").is_none(), "{to_file}");
-    assert_eq!(std::fs::read_to_string(&out).unwrap(), value);
+    assert_eq!(fs::read_to_string(&out).unwrap(), value);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(
-            std::fs::metadata(&out).unwrap().permissions().mode() & 0o777,
+            fs::metadata(&out).unwrap().permissions().mode() & 0o777,
             0o600
         );
     }
@@ -115,16 +116,16 @@ fn secret_import_list_and_export_round_trip() {
         .home()
         .join(".config/turnkey/tk/secrets/pending")
         .join(run.org());
-    std::fs::create_dir_all(&pending_dir).unwrap();
-    let stale = pending_dir.join(format!("{}.json", uuid::Uuid::new_v4()));
-    let fresh = pending_dir.join(format!("{}.json", uuid::Uuid::new_v4()));
-    std::fs::write(&stale, b"{}").unwrap();
-    std::fs::write(&fresh, b"{}").unwrap();
-    std::fs::File::options()
+    fs::create_dir_all(&pending_dir).unwrap();
+    let stale = pending_dir.join(format!("{}.json", Uuid::new_v4()));
+    let fresh = pending_dir.join(format!("{}.json", Uuid::new_v4()));
+    fs::write(&stale, b"{}").unwrap();
+    fs::write(&fresh, b"{}").unwrap();
+    File::options()
         .write(true)
         .open(&stale)
         .unwrap()
-        .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(9 * 3600))
+        .set_modified(SystemTime::now() - Duration::from_secs(9 * 3600))
         .unwrap();
     run.ok(run.admin().args(["secret", "list"]));
     assert!(!stale.exists(), "stale pending state must be swept");
@@ -139,7 +140,6 @@ fn secret_import_list_and_export_round_trip() {
     assert_eq!(duplicate["code"], "api_error", "{duplicate}");
 }
 
-/// A policy-denied export leaves no recovery key.
 #[test]
 #[ignore]
 fn an_export_denied_by_policy_writes_no_recovery_key() {
@@ -148,13 +148,7 @@ fn an_export_denied_by_policy_writes_no_recovery_key() {
     let (_, unauthorized) = run.create_user("unauthorized");
 
     let name = run.name("locked-secret");
-    let imported = run.submit(
-        run.admin()
-            .args(["secret", "import", &name])
-            .write_stdin("not yours"),
-        "secret.import",
-    );
-    let secret_id = imported["data"]["secretId"].as_str().unwrap().to_string();
+    let secret_id = run.import_secret(&name, "not yours");
     let state = run.export_state(
         &hex::encode(unauthorized.compressed_public_key()),
         &secret_id,
@@ -190,34 +184,19 @@ fn secret_export_with_consensus_finishes_by_rerunning_the_command() {
     let run = Run::new();
     let (submitter_id, submitter) = run.create_user("submitter");
     let (approver_id, approver) = run.create_user("approver");
-    run.submit(
-        run.admin().args([
-            "policy",
-            "create",
-            "--input-json",
-            &json!({
-                "policyName": run.name("export-consensus"),
-                "effect": "EFFECT_ALLOW",
-                "condition": "activity.type == 'ACTIVITY_TYPE_EXPORT_SECRETS'",
-                "consensus": format!(
-                    "approvers.any(user, user.id == '{submitter_id}') && approvers.any(user, user.id == '{approver_id}')"
-                ),
-                "notes": "tk e2e secret export consensus",
-            })
-            .to_string(),
-        ]),
-        "policy.create",
-    );
+    run.create_policy(json!({
+        "policyName": run.name("export-consensus"),
+        "effect": "EFFECT_ALLOW",
+        "condition": "activity.type == 'ACTIVITY_TYPE_EXPORT_SECRETS'",
+        "consensus": format!(
+            "approvers.any(user, user.id == '{submitter_id}') && approvers.any(user, user.id == '{approver_id}')"
+        ),
+        "notes": "tk e2e secret export consensus",
+    }));
 
     let name = run.name("db-password");
     let value = "correct horse battery staple";
-    let imported = run.submit(
-        run.admin()
-            .args(["secret", "import", &name])
-            .write_stdin(value),
-        "secret.import",
-    );
-    let secret_id = imported["data"]["secretId"].as_str().unwrap().to_string();
+    let secret_id = run.import_secret(&name, value);
     let state = run.export_state(&hex::encode(submitter.compressed_public_key()), &secret_id);
 
     let pending = run.ok(run
@@ -312,7 +291,6 @@ fn secret_export_with_consensus_finishes_by_rerunning_the_command() {
     );
 }
 
-/// Pending export state belongs to the submitting credential.
 #[test]
 #[ignore]
 fn a_pending_export_belongs_to_the_credential_that_started_it() {
@@ -320,36 +298,21 @@ fn a_pending_export_belongs_to_the_credential_that_started_it() {
     let (owner_id, owner) = run.create_user("owner");
     let (other_id, other) = run.create_user("other");
     let (approver_id, approver) = run.create_user("approver");
-    run.submit(
-        run.admin().args([
-            "policy",
-            "create",
-            "--input-json",
-            &json!({
-                "policyName": run.name("export-per-credential"),
-                "effect": "EFFECT_ALLOW",
-                "condition": "activity.type == 'ACTIVITY_TYPE_EXPORT_SECRETS'",
-                // Either submitter plus the approver, so an export submitted
-                // by either credential needs one more approval.
-                "consensus": format!(
-                    "(approvers.any(user, user.id == '{owner_id}') || approvers.any(user, user.id == '{other_id}')) && approvers.any(user, user.id == '{approver_id}')"
-                ),
-                "notes": "tk e2e per-credential export state",
-            })
-            .to_string(),
-        ]),
-        "policy.create",
-    );
+    run.create_policy(json!({
+        "policyName": run.name("export-per-credential"),
+        "effect": "EFFECT_ALLOW",
+        "condition": "activity.type == 'ACTIVITY_TYPE_EXPORT_SECRETS'",
+        // Either submitter plus the approver, so an export submitted
+        // by either credential needs one more approval.
+        "consensus": format!(
+            "(approvers.any(user, user.id == '{owner_id}') || approvers.any(user, user.id == '{other_id}')) && approvers.any(user, user.id == '{approver_id}')"
+        ),
+        "notes": "tk e2e per-credential export state",
+    }));
 
     let name = run.name("shared-secret");
     let value = "one secret, two credentials";
-    let imported = run.submit(
-        run.admin()
-            .args(["secret", "import", &name])
-            .write_stdin(value),
-        "secret.import",
-    );
-    let secret_id = imported["data"]["secretId"].as_str().unwrap().to_string();
+    let secret_id = run.import_secret(&name, value);
     let owner_state = run.export_state(&hex::encode(owner.compressed_public_key()), &secret_id);
     let other_state = run.export_state(&hex::encode(other.compressed_public_key()), &secret_id);
 
@@ -364,7 +327,6 @@ fn a_pending_export_belongs_to_the_credential_that_started_it() {
         "another credential must not share the owner's state"
     );
 
-    // The second credential starts its own export rather than resuming.
     let second = run.ok(run
         .as_user(&other)
         .args(["secret", "export", "--name", &name]));
@@ -376,7 +338,6 @@ fn a_pending_export_belongs_to_the_credential_that_started_it() {
     );
     assert!(other_state.exists());
 
-    // Each credential resumes only its own activity.
     assert_eq!(
         run.ok(run
             .as_user(&owner)
@@ -390,7 +351,6 @@ fn a_pending_export_belongs_to_the_credential_that_started_it() {
         second_activity
     );
 
-    // Approving one export delivers to its owner and leaves the other alone.
     run.ok(run
         .as_user(&approver)
         .args(["activity", "approve", &first_activity]));

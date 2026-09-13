@@ -3,21 +3,21 @@
 use anyhow::Result;
 use serde_json::json;
 use std::collections::BTreeMap;
+use std::mem::take;
 use turnkey_client::ActivityResult;
-use turnkey_client::generated::immutable::models::v1::KeyValue;
 use zeroize::Zeroizing;
 
-use super::input::quorum_for;
+use super::input::{SecretName, UniqueKeyValues, quorum_for};
 use crate::auth::{ResolvedAuth, build_turnkey_client};
 use crate::operations::OperationOutput;
 
 pub(super) async fn run(
     auth: ResolvedAuth,
-    name: String,
+    name: SecretName,
     mut value: Zeroizing<String>,
-    properties: Vec<KeyValue>,
+    properties: UniqueKeyValues,
 ) -> Result<OperationOutput> {
-    let quorum = quorum_for(&auth.api_base_url)?;
+    let quorum = quorum_for(auth.api_base_url.as_str())?;
     let ResolvedAuth {
         org_id,
         api_base_url,
@@ -25,18 +25,21 @@ pub(super) async fn run(
         ..
     } = auth;
     let client = build_turnkey_client(stamper, &api_base_url)?;
-    let properties: BTreeMap<String, String> = properties
-        .into_iter()
-        .map(|KeyValue { key, value }| (key, value))
-        .collect();
-    let plaintext = std::mem::take(&mut *value);
+    let properties: BTreeMap<String, String> = properties.into();
+    let plaintext = take(&mut *value);
     let ActivityResult {
         result: secret_id,
         activity_id,
         status,
         app_proofs: _,
     } = client
-        .import_secret(org_id, Some(name.clone()), plaintext, properties, &quorum)
+        .import_secret(
+            org_id.to_string(),
+            Some(name.clone().into()),
+            plaintext,
+            properties,
+            &quorum,
+        )
         .await?;
     Ok(OperationOutput::result(
         "secret.import",

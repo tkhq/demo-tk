@@ -4,18 +4,18 @@ use anyhow::{Result, anyhow};
 use std::path::PathBuf;
 
 /// Parsed `ssh-keygen -Y sign` style invocation data for Git signing.
-pub struct GitSignInvocation {
+pub(crate) struct GitSignInvocation {
     /// Requested SSH signing namespace.
-    pub namespace: String,
+    pub(crate) namespace: String,
     /// Path to the OpenSSH public key file passed by Git.
-    pub public_key_path: PathBuf,
+    pub(crate) public_key_path: PathBuf,
     /// Path to the payload file Git wants signed.
-    pub payload_path: PathBuf,
+    pub(crate) payload_path: PathBuf,
 }
 
 impl GitSignInvocation {
     /// Parses the `ssh-keygen -Y sign` style arguments Git passes to an SSH signer.
-    pub fn parse(args: &[String]) -> Result<Self> {
+    pub(crate) fn parse(args: &[String]) -> Result<Self> {
         let mut namespace = None;
         let mut public_key_path = None;
         let mut payload_path = None;
@@ -35,7 +35,7 @@ impl GitSignInvocation {
                     namespace = Some(
                         iter.next()
                             .ok_or_else(|| anyhow!("missing value after -n"))?
-                            .to_string(),
+                            .clone(),
                     );
                 }
                 "-f" => {
@@ -64,10 +64,5 @@ impl GitSignInvocation {
                 .ok_or_else(|| anyhow!("missing required -f <public-key-file>"))?,
             payload_path: payload_path.ok_or_else(|| anyhow!("missing payload file path"))?,
         })
-    }
-
-    /// Returns the output path where the detached signature should be written.
-    pub fn signature_path(&self) -> PathBuf {
-        PathBuf::from(format!("{}.sig", self.payload_path.display()))
     }
 }

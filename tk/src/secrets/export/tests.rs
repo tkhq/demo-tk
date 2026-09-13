@@ -1,6 +1,7 @@
+// Asserts on the classified error code.
+#![allow(clippy::disallowed_types)]
 use super::*;
 use crate::errors::{ErrorCode, classify};
-use serde_json::Value;
 use tempfile::TempDir;
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 use wiremock::matchers::path as route;
@@ -13,21 +14,13 @@ fn fixture(server: &MockServer) -> (TempDir, ResolvedAuth, Uuid) {
     (TempDir::new().unwrap(), auth, Uuid::new_v4())
 }
 
-fn mock(route_path: &str, status: u16, body: Value) -> Mock {
-    Mock::given(route(format!("/public/v1/{route_path}")))
-        .respond_with(ResponseTemplate::new(status).set_body_json(body))
-}
-
 #[tokio::test]
 async fn a_submission_that_fails_leaves_no_recipient_key_on_disk() {
     let server = MockServer::start().await;
-    mock(
-        "submit/export_secrets",
-        500,
-        json!({"message": "unavailable"}),
-    )
-    .mount(&server)
-    .await;
+    Mock::given(route("/public/v1/submit/export_secrets"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({"message": "unavailable"})))
+        .mount(&server)
+        .await;
     let (dir, auth, secret_id) = fixture(&server);
     let binding = Binding::of(&auth);
 
@@ -37,7 +30,7 @@ async fn a_submission_that_fails_leaves_no_recipient_key_on_disk() {
         auth,
         SecretRef::Id(secret_id),
         None,
-        vec![],
+        UniqueKeyValues::parse(vec![], "--context").unwrap(),
     )
     .await
     .err()
@@ -56,7 +49,7 @@ async fn state_written_against_another_endpoint_is_refused() {
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(
         &path,
-        serde_json::to_vec(&json!({
+        to_vec(&json!({
             "version": 1,
             "organizationId": binding.organization_id,
             "apiBaseUrl": "https://api.turnkey.com",
@@ -76,16 +69,22 @@ async fn state_written_against_another_endpoint_is_refused() {
         auth,
         SecretRef::Id(secret_id),
         None,
-        vec![],
+        UniqueKeyValues::parse(vec![], "--context").unwrap(),
     )
     .await
     .err()
     .expect("export should have failed");
 
     assert_eq!(classify(&error).code, ErrorCode::InvalidInput);
-    let message = format!("{error:#}");
-    assert!(
-        message.contains("different API base URL") && message.contains("https://api.turnkey.com"),
-        "{message}"
+    let InvalidInput(message) = error
+        .downcast_ref::<InvalidInput>()
+        .expect("refused state is an InvalidInput error");
+    assert_eq!(
+        *message,
+        format!(
+            "pending export state {} belongs to a different API base URL (https://api.turnkey.com, not {}); resume it with the identity that started it",
+            path.display(),
+            server.uri()
+        )
     );
 }
