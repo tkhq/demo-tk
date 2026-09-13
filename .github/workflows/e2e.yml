@@ -5,8 +5,8 @@ on:
     branches: [main]
   pull_request:
     paths:
-      - tk/**
-      - auth/**
+      - crates/tk/**
+      - crates/auth/**
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml

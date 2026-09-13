@@ -9,11 +9,6 @@ Experimental Turnkey auth workspace centered on the `tk` CLI.
 
 > Warning: `tk` is experimental and has not been audited.
 
-## Workspace layout
-
-- `tk/`: CLI crate and end-user command docs
-- `auth/`: shared auth library used by the CLI
-
 ## Installation
 
 From the root of this repo:

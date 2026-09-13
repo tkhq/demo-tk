@@ -29,7 +29,7 @@ pub(crate) struct E2eConfig {
 }
 
 fn env_file() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../.env.test")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../.env.test")
 }
 
 fn parse_env_file(text: &str) -> BTreeMap<String, String> {
