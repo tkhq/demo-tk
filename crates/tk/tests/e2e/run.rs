@@ -27,11 +27,16 @@ const SCRUBBED: [&str; 11] = [
     "TURNKEY_API_BASE_URL",
     "RUST_LOG",
 ];
-pub(crate) const UNROUTABLE: &str = "http://127.0.0.1:9";
+const UNROUTABLE: &str = "http://127.0.0.1:9";
 const ATTEMPTS: u32 = 5;
 
 fn backoff(attempt: u32) {
     thread::sleep(Duration::from_secs(1u64 << (attempt - 1)));
+}
+fn activity_failed(record: &Value) -> bool {
+    record["reason"] == "command_error"
+        && record["code"] == "api_error"
+        && record["details"]["activity"]["status"] == "ACTIVITY_STATUS_FAILED"
 }
 fn transient(record: &Value) -> bool {
     record["reason"] == "command_error"
@@ -41,19 +46,13 @@ fn transient(record: &Value) -> bool {
                     .as_u64()
                     .is_some_and(|status| status == 429 || status >= 500)))
 }
-fn activity_failed(record: &Value) -> bool {
-    record["reason"] == "command_error"
-        && record["code"] == "api_error"
-        && record["activity"]["status"] == "ACTIVITY_STATUS_FAILED"
-}
 
 pub(crate) struct Run {
     pub(crate) home: TempDir,
     /// Parent organization and its admin credential.
     pub(crate) config: E2eConfig,
-    pub(crate) marker: String,
+    marker: String,
     pub(crate) secrets: RefCell<Vec<String>>,
-    /// The owned sub-organization, once created.
     sub_org: Option<String>,
 }
 
@@ -63,6 +62,12 @@ fn now_ms() -> String {
         .unwrap()
         .as_millis()
         .to_string()
+}
+
+pub(crate) struct AdminLogin {
+    pub(crate) name: String,
+    pub(crate) key_file: PathBuf,
+    pub(crate) record: Value,
 }
 
 pub(crate) fn result<'v>(record: &'v Value, key: &str) -> &'v Value {
@@ -149,9 +154,9 @@ impl Run {
     }
 
     /// The sub-organization used by this test.
-    pub(crate) fn org(&self) -> String {
+    pub(crate) fn org(&self) -> &str {
         self.sub_org
-            .clone()
+            .as_deref()
             .expect("sub-organization is created before any test command runs")
     }
 
@@ -177,7 +182,7 @@ impl Run {
         &self.config.public_key
     }
 
-    pub(crate) fn cli_at(&self, base: &str) -> Command {
+    fn cli_at(&self, base: &str) -> Command {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_tk"));
         for name in SCRUBBED {
             cmd.env_remove(name);
@@ -213,7 +218,7 @@ impl Run {
     fn admin_at(&self, base: &str) -> Command {
         self.with_bundle(
             self.cli_at(base),
-            &self.org(),
+            self.org(),
             &self.config.public_key,
             &self.config.private_key.0,
         )
@@ -241,35 +246,13 @@ impl Run {
     pub(crate) fn as_user(&self, key: &TurnkeyP256ApiKey) -> Command {
         self.with_bundle(
             self.cli(),
-            &self.org(),
+            self.org(),
             &hex::encode(key.compressed_public_key()),
             &hex::encode(key.private_key()),
         )
     }
 
-    /// Writes the admin key in `tk api-key generate` format.
-    pub(crate) fn admin_key_file(&self) -> PathBuf {
-        let path = self.home.path().join("admin-key.json");
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&path)
-            .unwrap();
-        file.write_all(
-            json!({
-                "public_key": self.config.public_key,
-                "private_key": self.config.private_key.0,
-                "curve": "p256",
-            })
-            .to_string()
-            .as_bytes(),
-        )
-        .unwrap();
-        path
-    }
-
-    pub(crate) fn redact(&self, bytes: &[u8]) -> String {
+    fn redact(&self, bytes: &[u8]) -> String {
         let mut text = String::from_utf8_lossy(bytes).into_owned();
         for secret in self.secrets.borrow().iter() {
             text = text.replace(secret, "<redacted>");
@@ -291,27 +274,20 @@ impl Run {
         (output.status.code(), stdout, stderr)
     }
 
-    /// Runs the binary once and asserts that stderr is empty.
-    fn captured(&self, cmd: &mut Command) -> (Option<i32>, String, String) {
+    fn run(&self, cmd: &mut Command) -> (Option<i32>, Value, String) {
         let (code, stdout, stderr) = self.output(cmd);
         assert!(stderr.is_empty(), "stderr not empty: {stderr}");
-        (code, stdout, stderr)
-    }
-
-    /// Runs the binary and parses its JSON record.
-    fn run(&self, cmd: &mut Command) -> (Option<i32>, Value, String, String) {
-        let (code, stdout, stderr) = self.captured(cmd);
         let record = serde_json::from_str(&stdout)
             .unwrap_or_else(|error| panic!("stdout is not one JSON record ({error}): {stdout}"));
-        (code, record, stdout, stderr)
+        (code, record, stdout)
     }
 
     /// Runs the binary with backoff for transient failures.
-    fn attempt(&self, cmd: &mut Command) -> (Option<i32>, Value, String, String) {
+    fn attempt(&self, cmd: &mut Command) -> (Option<i32>, Value, String) {
         for attempt in 1..ATTEMPTS {
-            let (exit, record, stdout, stderr) = self.run(cmd);
+            let (exit, record, stdout) = self.run(cmd);
             if !transient(&record) {
-                return (exit, record, stdout, stderr);
+                return (exit, record, stdout);
             }
             eprintln!("transient failure, attempt {attempt}/{ATTEMPTS}: {stdout}");
             backoff(attempt);
@@ -319,13 +295,9 @@ impl Run {
         self.run(cmd)
     }
 
-    pub(crate) fn record(&self, cmd: &mut Command, code: i32) -> Value {
-        let (exit, record, stdout, stderr) = self.attempt(cmd);
-        assert_eq!(
-            exit,
-            Some(code),
-            "unexpected exit code\nstdout: {stdout}\nstderr: {stderr}"
-        );
+    fn record(&self, cmd: &mut Command, code: i32) -> Value {
+        let (exit, record, stdout) = self.attempt(cmd);
+        assert_eq!(exit, Some(code), "unexpected exit code\nstdout: {stdout}");
         record
     }
 
@@ -337,7 +309,6 @@ impl Run {
         self.record(cmd, 1)
     }
 
-    /// Runs a human-mode read, retrying non-zero exits and stderr output.
     fn human_attempt(&self, cmd: &mut Command) -> (Option<i32>, String, String) {
         for attempt in 1..ATTEMPTS {
             let (code, stdout, stderr) = self.output(cmd);
@@ -352,7 +323,8 @@ impl Run {
         self.output(cmd)
     }
 
-    /// Runs a human-mode command and returns its raw stdout.
+    /// Runs a human-mode command and returns its raw stdout, retrying
+    /// non-zero exits and stderr output.
     pub(crate) fn human_stdout(&self, cmd: &mut Command) -> String {
         let (code, stdout, stderr) = self.human_attempt(cmd);
         assert_eq!(
@@ -364,16 +336,14 @@ impl Run {
         stdout
     }
 
-    fn wait_as(&self, mut cmd: Command, id: &str) -> Value {
-        let record = self.ok(cmd.args(["activity", "wait", id, "--timeout", "90"]));
+    pub(crate) fn wait(&self, id: &str) -> Value {
+        let record = self.ok(self
+            .admin()
+            .args(["activity", "wait", id, "--timeout", "90"]));
         assert_eq!(record["command"], "activity.wait");
         assert_eq!(record["status"], "completed", "{record}");
         assert_eq!(record["activity"]["id"], id);
         record
-    }
-
-    pub(crate) fn wait(&self, id: &str) -> Value {
-        self.wait_as(self.admin(), id)
     }
 
     /// Submits once and waits for pending activities.
@@ -382,20 +352,20 @@ impl Run {
         cmd: &mut Command,
         command: &str,
         waiter: &dyn Fn() -> Command,
-    ) -> Result<Value, (Value, String, String)> {
-        let (exit, record, stdout, stderr) = self.attempt(cmd);
+    ) -> Result<Value, (Value, String)> {
+        let (exit, record, stdout) = self.attempt(cmd);
         if exit != Some(0) {
-            return Err((record, stdout, stderr));
+            return Err((record, stdout));
         }
         assert_eq!(record["command"], command, "{record}");
         match record["status"].as_str() {
             Some("completed") => Ok(record),
             Some("pending") => {
                 let id = id_of(&record);
-                let (exit, waited, stdout, stderr) =
+                let (exit, waited, stdout) =
                     self.attempt(waiter().args(["activity", "wait", &id, "--timeout", "90"]));
                 if exit != Some(0) {
-                    return Err((waited, stdout, stderr));
+                    return Err((waited, stdout));
                 }
                 assert_eq!(waited["status"], "completed", "{waited}");
                 assert_eq!(waited["activity"]["id"], id);
@@ -409,7 +379,7 @@ impl Run {
     /// and transient activity failures.
     pub(crate) fn export(&self, cmd: &mut Command) -> Value {
         for attempt in 1..=ATTEMPTS {
-            let (exit, record, stdout, stderr) = self.attempt(cmd);
+            let (exit, record, stdout) = self.attempt(cmd);
             if exit != Some(0) {
                 if activity_failed(&record) && attempt < ATTEMPTS {
                     eprintln!(
@@ -418,7 +388,7 @@ impl Run {
                     backoff(attempt);
                     continue;
                 }
-                panic!("secret.export failed\nstdout: {stdout}\nstderr: {stderr}");
+                panic!("secret.export failed\nstdout: {stdout}");
             }
             assert_eq!(record["command"], "secret.export", "{record}");
             match record["status"].as_str() {
@@ -436,15 +406,13 @@ impl Run {
         for attempt in 1..=ATTEMPTS {
             match self.submit_once(cmd, command, waiter) {
                 Ok(record) => return record,
-                Err((record, _, _)) if activity_failed(&record) && attempt < ATTEMPTS => {
+                Err((record, _)) if activity_failed(&record) && attempt < ATTEMPTS => {
                     eprintln!(
                         "{command} failed server-side, attempt {attempt}/{ATTEMPTS}: {record}"
                     );
                     backoff(attempt);
                 }
-                Err((_, stdout, stderr)) => {
-                    panic!("{command} failed\nstdout: {stdout}\nstderr: {stderr}")
-                }
+                Err((_, stdout)) => panic!("{command} failed\nstdout: {stdout}"),
             }
         }
         panic!("{command} did not complete within {ATTEMPTS} attempts")
@@ -454,8 +422,28 @@ impl Run {
     pub(crate) fn submit(&self, cmd: &mut Command, command: &str) -> Value {
         self.submit_as(cmd, command, &|| self.admin())
     }
-    /// Creates a user with a fresh API key.
-    pub(crate) fn create_user(&self, label: &str) -> (String, TurnkeyP256ApiKey) {
+    /// Imports `value` as a secret named `name` and returns its id.
+    pub(crate) fn import_secret(&self, name: &str, value: &str) -> String {
+        let imported = self.submit(
+            self.admin()
+                .args(["secret", "import", name])
+                .write_stdin(value),
+            "secret.import",
+        );
+        imported["data"]["secretId"].as_str().unwrap().to_string()
+    }
+    /// Creates a policy from its `policy create` parameters and returns the
+    /// completed `policy.create` record.
+    pub(crate) fn create_policy(&self, params: Value) -> Value {
+        self.submit(
+            self.admin()
+                .args(["policy", "create", "--input-json", &params.to_string()]),
+            "policy.create",
+        )
+    }
+    /// Creates a user with a fresh API key and returns the completed
+    /// `user.create` record with that key.
+    pub(crate) fn create_user_activity(&self, label: &str) -> (Value, TurnkeyP256ApiKey) {
         let name = self.name(label);
         let key = self.key();
         let api_keys = json!([{
@@ -472,19 +460,67 @@ impl Run {
             ]),
             "user.create",
         );
+        (created, key)
+    }
+    /// Creates a user with a fresh API key.
+    pub(crate) fn create_user(&self, label: &str) -> (String, TurnkeyP256ApiKey) {
+        let (created, key) = self.create_user_activity(label);
         let user_id = result(&created, "createUsersResult")["userIds"][0]
             .as_str()
             .unwrap()
             .to_string();
         (user_id, key)
     }
-    /// Deletes the sub-organization and retries transient failures.
-    fn delete_sub_organization(&self) {
+    // The admin key in `tk api-key generate` format.
+    fn admin_key_file(&self) -> PathBuf {
+        let path = self.home.path().join("admin-key.json");
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        file.write_all(
+            json!({
+                "public_key": self.config.public_key,
+                "private_key": self.config.private_key.0,
+                "curve": "p256",
+            })
+            .to_string()
+            .as_bytes(),
+        )
+        .unwrap();
+        path
+    }
+
+    /// Logs the admin key in as a profile named after this run.
+    pub(crate) fn login_admin(&self) -> AdminLogin {
+        let name = self.name("admin");
+        let key_file = self.admin_key_file();
+        let record = self.ok(self
+            .cli()
+            .args([
+                "login",
+                &name,
+                "--organization-id",
+                self.org(),
+                "--api-key-file",
+            ])
+            .arg(&key_file));
+        AdminLogin {
+            name,
+            key_file,
+            record,
+        }
+    }
+
+    // Deletes the sub-organization, re-submitting server-side failures.
+    fn delete_sub_organization(&self, sub_org: &str) {
         for attempt in 1..=ATTEMPTS {
             let body = json!({
                 "type": "ACTIVITY_TYPE_DELETE_SUB_ORGANIZATION",
                 "timestampMs": now_ms(),
-                "organizationId": self.org(),
+                "organizationId": sub_org,
                 "parameters": {"deleteWithoutExport": true},
             })
             .to_string();
@@ -498,16 +534,15 @@ impl Run {
             ]);
             match self.submit_once(&mut cmd, "request", &|| self.admin()) {
                 Ok(_) => return,
-                Err((record, _, _)) if activity_failed(&record) && attempt < ATTEMPTS => {
+                Err((record, _)) if activity_failed(&record) && attempt < ATTEMPTS => {
                     eprintln!(
                         "sub-organization delete failed server-side, attempt {attempt}/{ATTEMPTS}: {record}"
                     );
                     backoff(attempt);
                 }
-                Err((_, stdout, stderr)) => panic!(
-                    "delete sub-organization {} failed\nstdout: {stdout}\nstderr: {stderr}",
-                    self.org()
-                ),
+                Err((_, stdout)) => {
+                    panic!("delete sub-organization {sub_org} failed\nstdout: {stdout}")
+                }
             }
         }
     }
@@ -518,7 +553,10 @@ impl Drop for Run {
         let Some(sub_org) = self.sub_org.clone() else {
             return;
         };
-        if let Err(panic) = catch_unwind(AssertUnwindSafe(|| self.delete_sub_organization())) {
+        let deleted = catch_unwind(AssertUnwindSafe(|| {
+            self.delete_sub_organization(&sub_org);
+        }));
+        if let Err(panic) = deleted {
             let message = panic
                 .downcast_ref::<String>()
                 .cloned()

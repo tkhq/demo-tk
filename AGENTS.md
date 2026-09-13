@@ -118,9 +118,12 @@ Default guidance for coding-agent runs in this repository.
   block (`let approved = { … };`) names the result without adding a
   signature. A helper must earn its boundary: actual repeated callers
   (extract on the third occurrence, not in anticipation of reuse), a
-  genuinely generic unit, or an intentional `pub` surface. A `.clone()`
-  added only to satisfy an extracted signature means the boundary is
-  wrong — dissolve the helper rather than pay the clone.
+  genuinely generic unit, an intentional `pub` surface, or a name that states
+  intent the body only shows as mechanism. Keep a one-use helper when inlining
+  it would push the caller past about 60 lines, add a level of nesting inside
+  a loop or match arm, or need a labeled block. A `.clone()` added only to
+  satisfy an extracted signature means the boundary is wrong — dissolve the
+  helper rather than pay the clone.
 - Match enums exhaustively when variants require distinct behavior. Use a
   wildcard only when all current and future non-target variants are
   intentionally handled alike.

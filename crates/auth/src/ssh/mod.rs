@@ -2,36 +2,24 @@
 
 use anyhow::{Context, Result, anyhow};
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use sha2::{Digest, Sha512};
 
 pub mod agent;
-pub mod git;
+pub(crate) mod git;
 pub mod protocol;
 
 const SSH_ED25519_ALGORITHM: &str = "ssh-ed25519";
 const SSHSIG_PREAMBLE: &[u8] = b"SSHSIG";
 /// Default hash algorithm name encoded into SSHSIG payloads.
-pub const DEFAULT_HASH_ALGORITHM: &str = "sha512";
+const DEFAULT_HASH_ALGORITHM: &str = "sha512";
 
 /// Encodes a raw Ed25519 public key as an OpenSSH `authorized_keys` line.
-pub fn encode_public_key_line(public_key: &[u8], comment: Option<&str>) -> Result<String> {
-    if public_key.len() != 32 {
-        return Err(anyhow!(
-            "expected 32-byte ed25519 public key, got {} bytes",
-            public_key.len()
-        ));
-    }
-
+pub fn encode_public_key_line(public_key: &[u8; 32]) -> String {
     let blob = encode_string(SSH_ED25519_ALGORITHM.as_bytes(), Vec::new());
     let blob = encode_string(public_key, blob);
-    let encoded = base64::engine::general_purpose::STANDARD.encode(blob);
-
-    Ok(match comment {
-        Some(comment) if !comment.is_empty() => {
-            format!("{SSH_ED25519_ALGORITHM} {encoded} {comment}")
-        }
-        _ => format!("{SSH_ED25519_ALGORITHM} {encoded}"),
-    })
+    let encoded = STANDARD.encode(blob);
+    format!("{SSH_ED25519_ALGORITHM} {encoded}")
 }
 
 fn encode_string(bytes: &[u8], mut output: Vec<u8>) -> Vec<u8> {
@@ -43,7 +31,7 @@ fn encode_string(bytes: &[u8], mut output: Vec<u8>) -> Vec<u8> {
 /// Parsed components of an OpenSSH Ed25519 public key line.
 pub struct ParsedPublicKey {
     /// Raw 32-byte Ed25519 public key.
-    pub public_key: Vec<u8>,
+    pub public_key: [u8; 32],
     /// Full OpenSSH public key blob including algorithm tag.
     pub public_key_blob: Vec<u8>,
 }
@@ -63,7 +51,7 @@ pub fn parse_public_key_line(line: &str) -> Result<ParsedPublicKey> {
         .next()
         .ok_or_else(|| anyhow!("missing SSH public key body"))?;
 
-    let blob = base64::engine::general_purpose::STANDARD
+    let blob = STANDARD
         .decode(encoded)
         .context("failed to decode SSH public key body")?;
 
@@ -73,12 +61,12 @@ pub fn parse_public_key_line(line: &str) -> Result<ParsedPublicKey> {
             "SSH public key blob algorithm mismatch: {blob_algorithm}"
         ));
     }
-    if public_key.len() != 32 {
-        return Err(anyhow!(
+    let public_key = <[u8; 32]>::try_from(public_key).map_err(|public_key| {
+        anyhow!(
             "expected 32-byte SSH Ed25519 public key, got {} bytes",
             public_key.len()
-        ));
-    }
+        )
+    })?;
 
     Ok(ParsedPublicKey {
         public_key,
@@ -87,7 +75,7 @@ pub fn parse_public_key_line(line: &str) -> Result<ParsedPublicKey> {
 }
 
 /// Builds the `SSHSIG` signed payload for the given namespace and message.
-pub fn build_signed_data(namespace: &str, payload: &[u8]) -> Vec<u8> {
+pub(crate) fn build_signed_data(namespace: &str, payload: &[u8]) -> Vec<u8> {
     let digest = Sha512::digest(payload);
     let mut output = Vec::new();
     output.extend_from_slice(SSHSIG_PREAMBLE);
@@ -99,19 +87,11 @@ pub fn build_signed_data(namespace: &str, payload: &[u8]) -> Vec<u8> {
 }
 
 /// Encodes a detached SSH signature in OpenSSH armored format.
-pub fn encode_armored_signature(
+pub(crate) fn encode_armored_signature(
     public_key_blob: &[u8],
     namespace: &str,
-    hash_algorithm: &str,
-    signature: &[u8],
-) -> Result<String> {
-    if signature.len() != 64 {
-        return Err(anyhow!(
-            "expected 64-byte ed25519 signature, got {} bytes",
-            signature.len()
-        ));
-    }
-
+    signature: &[u8; 64],
+) -> String {
     let signature_blob = encode_string(
         signature,
         encode_string(SSH_ED25519_ALGORITHM.as_bytes(), Vec::new()),
@@ -123,15 +103,18 @@ pub fn encode_armored_signature(
     blob = encode_string(public_key_blob, blob);
     blob = encode_string(namespace.as_bytes(), blob);
     blob = encode_string(&[], blob);
-    blob = encode_string(hash_algorithm.as_bytes(), blob);
+    blob = encode_string(DEFAULT_HASH_ALGORITHM.as_bytes(), blob);
     blob = encode_string(&signature_blob, blob);
 
-    let base64 = base64::engine::general_purpose::STANDARD.encode(blob);
+    let base64 = STANDARD.encode(blob);
     let wrapped = wrap_base64(&base64, 76);
 
-    Ok(format!(
-        "-----BEGIN SSH SIGNATURE-----\n{wrapped}\n-----END SSH SIGNATURE-----\n"
-    ))
+    format!(
+        r#"-----BEGIN SSH SIGNATURE-----
+{wrapped}
+-----END SSH SIGNATURE-----
+"#
+    )
 }
 
 fn wrap_base64(input: &str, width: usize) -> String {

@@ -126,7 +126,7 @@ fn wallet_create_get_update_and_account_pagination() {
 
 #[test]
 #[ignore]
-fn sign_payload_and_transaction() {
+fn sign_payload_returns_r_s_v_and_sign_transaction_returns_type2_hex() {
     let run = Run::new();
     let created = run.submit(
         run.admin().args([

@@ -1,14 +1,19 @@
 //! Auth configuration resolution and persistence helpers.
 
 use std::collections::BTreeMap;
+use std::env;
 use std::fmt::{self, Display, Formatter};
+use std::fs::Permissions;
+use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
+use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
+use uuid::Uuid;
 
 const DEFAULT_API_BASE_URL: &str = "https://api.turnkey.com";
 const CONFIG_PATH_ENV: &str = "TURNKEY_TK_CONFIG_PATH";
@@ -22,34 +27,28 @@ const PRIVATE_KEY_ID_ENV: &str = "TURNKEY_PRIVATE_KEY_ID";
 const API_BASE_URL_ENV: &str = "TURNKEY_API_BASE_URL";
 const REDACTED_VALUE: &str = "<redacted>";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 /// Fully resolved Turnkey auth configuration.
 pub struct Config {
     /// Turnkey organization identifier.
-    pub organization_id: String,
+    pub organization_id: Uuid,
     /// Turnkey API public key used for request stamping.
     pub api_public_key: String,
     /// Turnkey API private key used for request stamping.
     pub api_private_key: String,
-    /// Turnkey Ed25519 private key identifier.
-    pub private_key_id: String,
+    /// Turnkey Ed25519 private key identifier, if configured.
+    pub private_key_id: Option<String>,
     /// Base URL for the Turnkey API.
     pub api_base_url: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
 /// Effective config, with missing required fields left `None`.
-pub struct ResolvedConfig {
-    /// Resolved Turnkey organization identifier, if present.
-    pub organization_id: Option<String>,
-    /// Resolved Turnkey API public key, if present.
-    pub api_public_key: Option<String>,
-    /// Resolved Turnkey API private key, if present.
-    pub api_private_key: Option<String>,
-    /// Resolved Turnkey private key identifier, if present.
-    pub private_key_id: Option<String>,
-    /// Resolved API base URL, including defaulting.
-    pub api_base_url: String,
+struct ResolvedConfig {
+    organization_id: Option<String>,
+    api_public_key: Option<String>,
+    api_private_key: Option<String>,
+    private_key_id: Option<String>,
+    api_base_url: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,64 +68,28 @@ pub enum ConfigKey {
 
 impl Config {
     /// Resolves a complete config from the process environment and config file.
-    pub async fn resolve() -> Result<Self> {
+    pub(crate) async fn resolve() -> Result<Self> {
         ResolvedConfig::resolve()
             .await
             .and_then(ResolvedConfig::into_complete)
     }
 
     /// Resolves a complete config from an explicit path and environment map.
-    pub fn resolve_from_map(path: &Path, env: &BTreeMap<String, String>) -> Result<Self> {
-        ResolvedConfig::resolve_from_map(path, env).and_then(ResolvedConfig::into_complete)
+    pub async fn resolve_from_map(path: &Path, env: &BTreeMap<String, String>) -> Result<Self> {
+        ResolvedConfig::resolve_from_map(path, env)
+            .await
+            .and_then(ResolvedConfig::into_complete)
     }
 }
 
 impl ResolvedConfig {
-    /// Resolves the effective config, leaving unset required values `None`.
-    pub async fn resolve() -> Result<Self> {
+    async fn resolve() -> Result<Self> {
         let path = global_config_path()?;
-        let env = std::env::vars().collect::<BTreeMap<_, _>>();
-        Self::resolve_from_map_async(&path, &env).await
+        let env = env::vars().collect::<BTreeMap<_, _>>();
+        Self::resolve_from_map(&path, &env).await
     }
 
-    /// Resolves the effective auth configuration from an explicit config path and environment map.
-    pub fn resolve_from_map(path: &Path, env: &BTreeMap<String, String>) -> Result<Self> {
-        let persisted = load_persisted_config_sync(path)?;
-        Ok(Self {
-            organization_id: resolve_value(
-                env,
-                ORGANIZATION_ID_ENV,
-                persisted.turnkey.organization_id.as_deref(),
-            ),
-            api_public_key: resolve_value(
-                env,
-                API_PUBLIC_KEY_ENV,
-                persisted.turnkey.api_public_key.as_deref(),
-            ),
-            api_private_key: resolve_value(
-                env,
-                API_PRIVATE_KEY_ENV,
-                persisted.turnkey.api_private_key.as_deref(),
-            ),
-            private_key_id: resolve_value(
-                env,
-                PRIVATE_KEY_ID_ENV,
-                persisted.turnkey.private_key_id.as_deref(),
-            ),
-            api_base_url: resolve_value(
-                env,
-                API_BASE_URL_ENV,
-                persisted.turnkey.api_base_url.as_deref(),
-            )
-            .unwrap_or_else(|| DEFAULT_API_BASE_URL.to_string()),
-        })
-    }
-
-    /// Resolves the effective auth configuration from an explicit config path and environment map.
-    pub async fn resolve_from_map_async(
-        path: &Path,
-        env: &BTreeMap<String, String>,
-    ) -> Result<Self> {
+    async fn resolve_from_map(path: &Path, env: &BTreeMap<String, String>) -> Result<Self> {
         let persisted = load_persisted_config(path).await?;
         Ok(Self {
             organization_id: resolve_value(
@@ -158,38 +121,52 @@ impl ResolvedConfig {
         })
     }
 
-    /// Returns the effective value for a specific config key.
-    pub fn get(&self, key: ConfigKey) -> Option<&str> {
-        match key {
-            ConfigKey::OrganizationId => self.organization_id.as_deref(),
-            ConfigKey::ApiPublicKey => self.api_public_key.as_deref(),
-            ConfigKey::ApiPrivateKey => self.api_private_key.as_deref(),
-            ConfigKey::PrivateKeyId => self.private_key_id.as_deref(),
-            ConfigKey::ApiBaseUrl => Some(&self.api_base_url),
-        }
+    fn into_complete(self) -> Result<Config> {
+        let Self {
+            organization_id,
+            api_public_key,
+            api_private_key,
+            private_key_id,
+            api_base_url,
+        } = self;
+        let organization_id = required_value(ConfigKey::OrganizationId, organization_id)?;
+        let organization_id = Uuid::parse_str(&organization_id).with_context(|| {
+            format!(
+                "config value {} is not a UUID: {organization_id}",
+                ConfigKey::OrganizationId
+            )
+        })?;
+        Ok(Config {
+            organization_id,
+            api_public_key: required_value(ConfigKey::ApiPublicKey, api_public_key)?,
+            api_private_key: required_value(ConfigKey::ApiPrivateKey, api_private_key)?,
+            private_key_id,
+            api_base_url,
+        })
     }
 
-    /// The effective config with sensitive values redacted, ready to display.
-    pub fn redacted(&self) -> RedactedConfig {
+    fn redacted(self) -> RedactedConfig {
+        let Self {
+            organization_id,
+            api_public_key,
+            api_private_key,
+            private_key_id,
+            api_base_url,
+        } = self;
+        let display = |key: ConfigKey, value: Option<String>| {
+            value
+                .map(|value| key.display_value(value))
+                .unwrap_or_default()
+        };
         RedactedConfig {
             turnkey: RedactedTurnkeyConfig {
-                organization_id: self.organization_id.clone().unwrap_or_default(),
-                api_public_key: self.api_public_key.clone().unwrap_or_default(),
-                api_private_key: redact_if_present(self.api_private_key.as_deref()),
-                private_key_id: self.private_key_id.clone().unwrap_or_default(),
-                api_base_url: self.api_base_url.clone(),
+                organization_id: display(ConfigKey::OrganizationId, organization_id),
+                api_public_key: display(ConfigKey::ApiPublicKey, api_public_key),
+                api_private_key: display(ConfigKey::ApiPrivateKey, api_private_key),
+                private_key_id: display(ConfigKey::PrivateKeyId, private_key_id),
+                api_base_url: ConfigKey::ApiBaseUrl.display_value(api_base_url),
             },
         }
-    }
-
-    fn into_complete(self) -> Result<Config> {
-        Ok(Config {
-            organization_id: required_value("turnkey.organizationId", self.organization_id)?,
-            api_public_key: required_value("turnkey.apiPublicKey", self.api_public_key)?,
-            api_private_key: required_value("turnkey.apiPrivateKey", self.api_private_key)?,
-            private_key_id: self.private_key_id.unwrap_or_default(),
-            api_base_url: self.api_base_url,
-        })
     }
 }
 
@@ -205,13 +182,24 @@ impl ConfigKey {
 
     /// The dotted name this key is written as, both on the command line and in
     /// the persisted config file.
-    pub const fn name(self) -> &'static str {
+    const fn name(self) -> &'static str {
         match self {
             Self::OrganizationId => "turnkey.organizationId",
             Self::ApiPublicKey => "turnkey.apiPublicKey",
             Self::ApiPrivateKey => "turnkey.apiPrivateKey",
             Self::PrivateKeyId => "turnkey.privateKeyId",
             Self::ApiBaseUrl => "turnkey.apiBaseUrl",
+        }
+    }
+
+    /// The value as it may be shown to a user: secrets are replaced with a
+    /// redaction marker, everything else passes through unchanged.
+    fn display_value(self, value: String) -> String {
+        match self {
+            Self::ApiPrivateKey => REDACTED_VALUE.to_string(),
+            Self::OrganizationId | Self::ApiPublicKey | Self::PrivateKeyId | Self::ApiBaseUrl => {
+                value
+            }
         }
     }
 }
@@ -239,18 +227,14 @@ impl FromStr for ConfigKey {
 #[derive(Debug, thiserror::Error)]
 #[error(
     "unsupported config key: {key}; supported keys: {}",
-    supported_key_names()
+    ConfigKey::ALL.map(ConfigKey::name).join(", ")
 )]
 pub struct UnsupportedConfigKey {
     key: String,
 }
 
-fn supported_key_names() -> String {
-    ConfigKey::ALL.map(ConfigKey::name).join(", ")
-}
-
 /// Returns the global tk config path, honoring `TURNKEY_TK_CONFIG_PATH` when set.
-pub fn global_config_path() -> Result<PathBuf> {
+fn global_config_path() -> Result<PathBuf> {
     if let Some(path) = read_value_from_process_env(CONFIG_PATH_ENV) {
         return Ok(PathBuf::from(path));
     }
@@ -272,16 +256,17 @@ pub fn default_config_file_from_home(home: &Path) -> PathBuf {
 
 /// Returns one resolved config value, redacting the private key when requested.
 pub async fn get_resolved_config_value(key: ConfigKey) -> Result<String> {
-    let config = ResolvedConfig::resolve().await?;
-    let value = config
-        .get(key)
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| anyhow!("config value is not set"))?;
+    let resolved = ResolvedConfig::resolve().await?;
+    let value = match key {
+        ConfigKey::OrganizationId => resolved.organization_id,
+        ConfigKey::ApiPublicKey => resolved.api_public_key,
+        ConfigKey::ApiPrivateKey => resolved.api_private_key,
+        ConfigKey::PrivateKeyId => resolved.private_key_id,
+        ConfigKey::ApiBaseUrl => Some(resolved.api_base_url),
+    }
+    .ok_or_else(|| anyhow!("config value is not set"))?;
 
-    Ok(match key {
-        ConfigKey::ApiPrivateKey => REDACTED_VALUE.to_string(),
-        _ => value.to_owned(),
-    })
+    Ok(key.display_value(value))
 }
 
 /// Resolves the effective config with sensitive values redacted.
@@ -290,54 +275,38 @@ pub async fn redacted_config() -> Result<RedactedConfig> {
 }
 
 /// Persists one config value to the global config file.
-pub async fn set_config_value(key: ConfigKey, value: &str) -> Result<()> {
+pub async fn set_config_value(key: ConfigKey, value: String) -> Result<()> {
     let path = global_config_path()?;
     let mut persisted = load_persisted_config(&path).await?;
-    persisted.turnkey.set(key, value.to_string());
+    persisted.turnkey.set(key, value);
     save_persisted_config(&path, &persisted).await
-}
-
-async fn load_persisted_config(path: &Path) -> Result<PersistedConfigFile> {
-    match tokio::fs::read_to_string(path).await {
-        Ok(contents) => toml::from_str(&contents).context("failed to parse config file"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(PersistedConfigFile::default())
-        }
-        Err(error) => Err(error.into()),
-    }
-}
-
-fn load_persisted_config_sync(path: &Path) -> Result<PersistedConfigFile> {
-    match std::fs::read_to_string(path) {
-        Ok(contents) => toml::from_str(&contents).context("failed to parse config file"),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(PersistedConfigFile::default())
-        }
-        Err(error) => Err(error.into()),
-    }
 }
 
 async fn save_persisted_config(path: &Path, config: &PersistedConfigFile) -> Result<()> {
     if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
+        fs::create_dir_all(parent).await?;
     }
     let serialized = toml::to_string_pretty(config).context("failed to serialize config file")?;
-    let mut file = tokio::fs::OpenOptions::new()
+    let mut file = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
         .mode(0o600)
         .open(path)
         .await?;
-    file.set_permissions(std::fs::Permissions::from_mode(0o600))
-        .await?;
+    file.set_permissions(Permissions::from_mode(0o600)).await?;
     file.write_all(serialized.as_bytes()).await?;
     file.flush().await?;
     Ok(())
 }
 
-fn read_value(env: &BTreeMap<String, String>, key: &str) -> Option<String> {
-    env.get(key).and_then(|value| normalize_value(value))
+async fn load_persisted_config(path: &Path) -> Result<PersistedConfigFile> {
+    match fs::read_to_string(path).await {
+        Ok(contents) => toml::from_str(&contents)
+            .with_context(|| format!("failed to parse config file at {}", path.display())),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(PersistedConfigFile::default()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn resolve_value(
@@ -345,13 +314,13 @@ fn resolve_value(
     env_key: &str,
     persisted: Option<&str>,
 ) -> Option<String> {
-    read_value(env, env_key).or_else(|| persisted.and_then(normalize_value))
+    env.get(env_key)
+        .and_then(|value| normalize_value(value))
+        .or_else(|| persisted.and_then(normalize_value))
 }
 
 fn read_value_from_process_env(key: &str) -> Option<String> {
-    std::env::var(key)
-        .ok()
-        .and_then(|value| normalize_value(&value))
+    env::var(key).ok().and_then(|value| normalize_value(&value))
 }
 
 fn normalize_value(value: &str) -> Option<String> {
@@ -363,24 +332,17 @@ fn normalize_value(value: &str) -> Option<String> {
     }
 }
 
-fn required_value(name: &str, value: Option<String>) -> Result<String> {
-    value.ok_or_else(|| anyhow!("missing required config value: {name}"))
+fn required_value(key: ConfigKey, value: Option<String>) -> Result<String> {
+    value.ok_or_else(|| anyhow!("missing required config value: {key}"))
 }
 
-fn redact_if_present(value: Option<&str>) -> String {
-    match value {
-        Some(value) if !value.is_empty() => REDACTED_VALUE.to_string(),
-        _ => String::new(),
-    }
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 struct PersistedConfigFile {
     #[serde(default)]
     turnkey: PersistedTurnkeyConfig,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PersistedTurnkeyConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -408,12 +370,12 @@ impl PersistedTurnkeyConfig {
 }
 
 /// The effective config with sensitive values redacted.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Default, Serialize)]
 pub struct RedactedConfig {
     turnkey: RedactedTurnkeyConfig,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RedactedTurnkeyConfig {
     organization_id: String,

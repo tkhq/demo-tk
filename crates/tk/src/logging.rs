@@ -1,4 +1,4 @@
-use std::io::IsTerminal;
+use std::io::{self, IsTerminal};
 use tracing_subscriber::EnvFilter;
 
 pub fn init() {
@@ -8,7 +8,7 @@ pub fn init() {
         .compact()
         .with_env_filter(filter)
         .with_target(true)
-        .with_ansi(std::io::stderr().is_terminal())
-        .with_writer(std::io::stderr)
+        .with_ansi(io::stderr().is_terminal())
+        .with_writer(io::stderr)
         .init();
 }

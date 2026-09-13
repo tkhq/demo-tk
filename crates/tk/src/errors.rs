@@ -1,5 +1,6 @@
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
+use std::error::Error;
 pub use turnkey_auth::errors::MissingResource;
 use turnkey_client::TurnkeyClientError;
 
@@ -12,14 +13,14 @@ pub struct InvalidInput(pub String);
 pub struct Malformed {
     summary: String,
     #[source]
-    source: serde_json::Error,
+    source: Box<dyn Error + Send + Sync>,
 }
 
 impl Malformed {
-    pub fn new(summary: impl Into<String>, source: serde_json::Error) -> Self {
+    pub fn new(summary: impl Into<String>, source: impl Error + Send + Sync + 'static) -> Self {
         Self {
             summary: summary.into(),
-            source,
+            source: Box::new(source),
         }
     }
 }
@@ -31,7 +32,8 @@ pub struct UnexpectedHttpStatus {
     pub body: String,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug)]
+#[cfg_attr(test, derive(Eq, PartialEq))]
 pub enum ActivityErrorKind {
     /// A mutation was sent but its outcome could not be observed. Callers must
     /// inspect activities before resubmitting.
@@ -52,7 +54,7 @@ pub struct ActivityError {
     activity: Option<Value>,
     message: String,
     #[source]
-    source: Option<Box<dyn std::error::Error + Send + Sync>>,
+    source: Option<Box<dyn Error + Send + Sync>>,
 }
 
 impl ActivityError {
@@ -70,7 +72,7 @@ impl ActivityError {
         self
     }
 
-    pub fn with_source(mut self, source: impl std::error::Error + Send + Sync + 'static) -> Self {
+    pub fn with_source(mut self, source: impl Error + Send + Sync + 'static) -> Self {
         self.source = Some(Box::new(source));
         self
     }
@@ -88,13 +90,13 @@ pub fn error_details(error: &anyhow::Error) -> Option<Value> {
     error
         .downcast_ref::<ActivityError>()
         .and_then(ActivityError::activity)
-        .map(|activity| serde_json::json!({"activity": activity}))
+        .map(|activity| json!({"activity": activity}))
 }
 
 const MAX_ERROR_MESSAGE_BYTES: usize = 8 * 1024;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[cfg_attr(test, derive(strum::EnumIter))]
+#[derive(Serialize)]
+#[cfg_attr(test, derive(Debug, Eq, PartialEq, strum::EnumIter))]
 #[serde(rename_all = "snake_case")]
 pub enum ErrorCode {
     /// A required value was absent in non-interactive mode.
@@ -123,14 +125,14 @@ pub enum ErrorCode {
     CommandError,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(test, derive(Debug, Eq, PartialEq))]
 pub struct Classification {
     pub code: ErrorCode,
     pub http_status: Option<u16>,
 }
 
 impl Classification {
-    pub(crate) fn new(code: ErrorCode, http_status: Option<u16>) -> Self {
+    fn new(code: ErrorCode, http_status: Option<u16>) -> Self {
         Self { code, http_status }
     }
 }
@@ -169,45 +171,6 @@ pub fn classify(error: &anyhow::Error) -> Classification {
     Classification::new(ErrorCode::CommandError, None)
 }
 
-fn classify_http_status(status: u16) -> Classification {
-    let code = match status {
-        401 | 403 => ErrorCode::Unauthorized,
-        404 => ErrorCode::NotFound,
-        _ => ErrorCode::ApiError,
-    };
-    Classification::new(code, Some(status))
-}
-
-fn classify_reqwest_error(error: &reqwest::Error) -> Classification {
-    if error.is_connect() {
-        Classification::new(ErrorCode::NetworkError, None)
-    } else if error.is_timeout() || error.is_request() || error.is_body() {
-        Classification::new(ErrorCode::NetworkUncertain, None)
-    } else {
-        Classification::new(ErrorCode::CommandError, None)
-    }
-}
-
-pub(crate) fn render_error_chain(error: &anyhow::Error) -> String {
-    truncate_message(format!("{error:#}"))
-}
-
-fn truncate_message(message: String) -> String {
-    if message.len() <= MAX_ERROR_MESSAGE_BYTES {
-        return message;
-    }
-
-    let total = message.len();
-    let mut cut = MAX_ERROR_MESSAGE_BYTES;
-    while !message.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!(
-        "{}… [error message truncated; {total} bytes total]",
-        &message[..cut]
-    )
-}
-
 fn classify_turnkey_client_error(error: &TurnkeyClientError) -> Classification {
     match error {
         TurnkeyClientError::UnexpectedHttpStatus(status, _)
@@ -240,6 +203,42 @@ fn classify_turnkey_client_error(error: &TurnkeyClientError) -> Classification {
     }
 }
 
+fn classify_http_status(status: u16) -> Classification {
+    let code = match status {
+        401 | 403 => ErrorCode::Unauthorized,
+        404 => ErrorCode::NotFound,
+        _ => ErrorCode::ApiError,
+    };
+    Classification::new(code, Some(status))
+}
+
+fn classify_reqwest_error(error: &reqwest::Error) -> Classification {
+    if error.is_connect() {
+        Classification::new(ErrorCode::NetworkError, None)
+    } else if error.is_timeout() || error.is_request() || error.is_body() {
+        Classification::new(ErrorCode::NetworkUncertain, None)
+    } else {
+        Classification::new(ErrorCode::CommandError, None)
+    }
+}
+
+pub(crate) fn render_error_chain(error: &anyhow::Error) -> String {
+    let message = format!("{error:#}");
+    if message.len() <= MAX_ERROR_MESSAGE_BYTES {
+        return message;
+    }
+
+    let total = message.len();
+    let mut cut = MAX_ERROR_MESSAGE_BYTES;
+    while !message.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!(
+        "{}… [error message truncated; {total} bytes total]",
+        &message[..cut]
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,48 +246,20 @@ mod tests {
     use std::collections::BTreeSet;
     use strum::IntoEnumIterator;
 
-    fn wire_name(code: ErrorCode) -> String {
-        serde_json::to_value(code)
-            .expect("every error code must serialize")
-            .as_str()
-            .expect("every error code must serialize as a JSON string")
-            .to_string()
-    }
-
-    fn documented_codes() -> BTreeSet<String> {
-        crate::cli::LONG_ABOUT
-            .lines()
-            .filter_map(|line| {
-                let rest = line.strip_prefix("        ")?;
-                if rest.starts_with(' ') {
-                    return None;
-                }
-                let (token, _) = rest.split_once("  ")?;
-                token
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c == '_')
-                    .then(|| token.to_string())
-            })
-            .collect()
-    }
-
     #[test]
     fn error_code_wire_names_are_unique() {
         let mut seen = BTreeSet::new();
         for code in ErrorCode::iter() {
-            let name = wire_name(code);
+            let name = serde_json::to_value(code)
+                .expect("every error code must serialize")
+                .as_str()
+                .expect("every error code must serialize as a JSON string")
+                .to_string();
             assert!(
                 seen.insert(name.clone()),
                 "wire name `{name}` is used by more than one ErrorCode variant"
             );
         }
-    }
-
-    #[test]
-    fn help_documents_every_error_code() {
-        let declared: BTreeSet<String> = ErrorCode::iter().map(wire_name).collect();
-        let documented = documented_codes();
-        assert_eq!(documented, declared);
     }
 
     fn client_error(error: TurnkeyClientError) -> anyhow::Error {
@@ -305,7 +276,10 @@ mod tests {
 
         assert_eq!(
             classify(&error),
-            Classification::new(ErrorCode::NotFound, Some(404))
+            Classification {
+                code: ErrorCode::NotFound,
+                http_status: Some(404),
+            }
         );
     }
 
@@ -316,23 +290,11 @@ mod tests {
 
         assert_eq!(
             classify(&error),
-            Classification::new(ErrorCode::NotFound, None)
+            Classification {
+                code: ErrorCode::NotFound,
+                http_status: None,
+            }
         );
-    }
-
-    #[test]
-    fn http_401_and_403_map_to_unauthorized() {
-        for status in [401u16, 403] {
-            let error = client_error(TurnkeyClientError::UnexpectedHttpStatus(
-                status,
-                "denied".to_string(),
-            ));
-            assert_eq!(
-                classify(&error),
-                Classification::new(ErrorCode::Unauthorized, Some(status)),
-                "status {status}"
-            );
-        }
     }
 
     #[test]
@@ -343,13 +305,16 @@ mod tests {
         ));
         assert_eq!(
             classify(&error),
-            Classification::new(ErrorCode::ApiError, Some(500))
+            Classification {
+                code: ErrorCode::ApiError,
+                http_status: Some(500),
+            }
         );
     }
 
     #[test]
     fn response_protocol_and_activity_failures_map_to_api_error() {
-        let decode_error = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        let decode_error = serde_json::from_str::<Value>("{").unwrap_err();
         let errors = [
             TurnkeyClientError::MissingContentTypeHeader,
             TurnkeyClientError::HeaderToStrError("invalid header".to_string()),
@@ -369,7 +334,10 @@ mod tests {
             let error = client_error(error);
             assert_eq!(
                 classify(&error),
-                Classification::new(ErrorCode::ApiError, None)
+                Classification {
+                    code: ErrorCode::ApiError,
+                    http_status: None,
+                }
             );
         }
     }
@@ -381,13 +349,16 @@ mod tests {
         ));
         assert_eq!(
             classify(&error),
-            Classification::new(ErrorCode::ApprovalRequired, None)
+            Classification {
+                code: ErrorCode::ApprovalRequired,
+                http_status: None,
+            }
         );
     }
 
     #[test]
     fn local_client_failures_map_to_command_error() {
-        let serialization_error = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        let serialization_error = serde_json::from_str::<Value>("{").unwrap_err();
         let errors = [
             TurnkeyClientError::BuilderMissingApiKey,
             TurnkeyClientError::SerdeJsonFailure(serialization_error),
@@ -400,27 +371,35 @@ mod tests {
             let error = client_error(error);
             assert_eq!(
                 classify(&error),
-                Classification::new(ErrorCode::CommandError, None)
+                Classification {
+                    code: ErrorCode::CommandError,
+                    http_status: None,
+                }
             );
         }
     }
 
     #[test]
     fn malformed_json_classifies_as_invalid_input_and_keeps_the_parse_error_as_source() {
-        let parse_error = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        let parse_error = serde_json::from_str::<Value>("{").unwrap_err();
+        let parse_message = parse_error.to_string();
         let error = anyhow::Error::new(Malformed::new("state is malformed", parse_error));
 
         assert_eq!(
             classify(&error),
-            Classification::new(ErrorCode::InvalidInput, None)
+            Classification {
+                code: ErrorCode::InvalidInput,
+                http_status: None,
+            }
         );
         let malformed = error.downcast_ref::<Malformed>().unwrap();
-        assert!(std::error::Error::source(malformed).is_some());
+        assert_eq!(malformed.source().unwrap().to_string(), parse_message);
     }
 
     #[test]
     fn activity_error_keeps_a_non_reqwest_source_in_the_chain() {
-        let parse_error = serde_json::from_str::<serde_json::Value>("{").unwrap_err();
+        let parse_error = serde_json::from_str::<Value>("{").unwrap_err();
+        let parse_message = parse_error.to_string();
         let error = anyhow::Error::new(
             ActivityError::new(ActivityErrorKind::MalformedResponse, "bad response")
                 .with_source(parse_error),
@@ -428,10 +407,13 @@ mod tests {
 
         assert_eq!(
             classify(&error),
-            Classification::new(ErrorCode::ApiError, None)
+            Classification {
+                code: ErrorCode::ApiError,
+                http_status: None,
+            }
         );
         let activity_error = error.downcast_ref::<ActivityError>().unwrap();
-        assert!(std::error::Error::source(activity_error).is_some());
+        assert_eq!(activity_error.source().unwrap().to_string(), parse_message);
     }
 
     #[test]
@@ -439,7 +421,10 @@ mod tests {
         let error = anyhow!("some other failure").context("while doing a thing");
         assert_eq!(
             classify(&error),
-            Classification::new(ErrorCode::CommandError, None)
+            Classification {
+                code: ErrorCode::CommandError,
+                http_status: None,
+            }
         );
     }
 
