@@ -220,6 +220,8 @@ fn handle_parse_error(error: clap::Error) -> ExitCode {
             let message = error.render().to_string().trim_end().to_string();
             let error_message = ErrorMessage::usage_error(message);
 
+            // ErrorMessage holds only strings and an enum, so serializing it cannot fail.
+            #[allow(clippy::expect_used)]
             let msg =
                 serde_json::to_string(&error_message).expect("usage error message serializes");
 
@@ -352,7 +354,9 @@ SSH agent:
     )
 }
 
+// Checks that help documents every error code.
 #[cfg(test)]
+#[allow(clippy::disallowed_types)]
 mod tests {
     use super::*;
     use crate::errors::ErrorCode;

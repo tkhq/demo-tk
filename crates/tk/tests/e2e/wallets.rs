@@ -196,5 +196,5 @@ fn sign_payload_returns_r_s_v_and_sign_transaction_returns_type2_hex() {
         .unwrap();
     assert!(tx.starts_with("02"), "not a type-2 transaction: {tx}");
     assert!(tx.len() > UNSIGNED_EIP1559_TX.len());
-    assert!(hex::decode(tx).is_ok());
+    hex::decode(tx).unwrap();
 }

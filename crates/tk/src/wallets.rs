@@ -1,6 +1,6 @@
 use crate::{
     auth::{ResolvedAuth, build_turnkey_client},
-    errors::{InvalidInput, MissingResource},
+    errors::{Malformed, MissingResource},
     operations::{OperationOutput, submit_activity},
     resources::BodyArgs,
 };
@@ -99,7 +99,7 @@ impl WalletCommand {
                 } = input.parse()?;
                 PreparedWalletCommand::Mutation(WalletMutation::Update {
                     wallet_id: Uuid::parse_str(&wallet_id)
-                        .map_err(|_| InvalidInput("walletId must be a UUID".into()))?,
+                        .map_err(|error| Malformed::new("walletId must be a UUID", error))?,
                     wallet_name,
                 })
             }
@@ -125,7 +125,7 @@ impl WalletCommand {
                 } = input.parse()?;
                 PreparedWalletCommand::Mutation(WalletMutation::CreateAccounts {
                     wallet_id: Uuid::parse_str(&wallet_id)
-                        .map_err(|_| InvalidInput("walletId must be a UUID".into()))?,
+                        .map_err(|error| Malformed::new("walletId must be a UUID", error))?,
                     accounts,
                     persist,
                 })
@@ -262,7 +262,6 @@ impl WalletQuery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::errors::Malformed;
     use clap::Parser;
     use clap::error::ErrorKind;
     #[derive(Debug, Parser)]
@@ -312,10 +311,10 @@ mod tests {
             .prepare()
             .err()
             .expect("prepare should have failed");
-        let InvalidInput(message) = error
-            .downcast_ref::<InvalidInput>()
-            .expect("a malformed wallet id is an InvalidInput error");
-        assert_eq!(message, "walletId must be a UUID");
+        let malformed = error
+            .downcast_ref::<Malformed>()
+            .expect("a malformed wallet id is a Malformed error");
+        assert_eq!(malformed.to_string(), "walletId must be a UUID");
     }
 
     #[test]

@@ -1,3 +1,5 @@
+// This module defines ErrorCode and owns its classification.
+#![allow(clippy::disallowed_types)]
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::error::Error;

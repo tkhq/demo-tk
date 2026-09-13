@@ -157,11 +157,10 @@ impl Serialize for OperationOutput {
 
 impl Display for OperationOutput {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            serde_json::to_string_pretty(self).map_err(|_| fmt::Error)?
-        )
+        // fmt::Error carries no payload.
+        #[allow(clippy::map_err_ignore)]
+        let rendered = serde_json::to_string_pretty(self).map_err(|_| fmt::Error)?;
+        f.write_str(&rendered)
     }
 }
 
@@ -204,7 +203,7 @@ impl RequestPath {
 
 fn url(base: &str, path: &str) -> Result<Url> {
     Url::parse(&format!("{}{path}", base.trim_end_matches('/')))
-        .map_err(|_| InvalidInput("invalid request URL".into()).into())
+        .map_err(|error| Malformed::new("invalid request URL", error).into())
 }
 
 pub(crate) fn client() -> Result<Client> {

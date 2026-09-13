@@ -25,7 +25,7 @@ pub enum UserCommand {
     Get {
         id: Uuid,
     },
-    /// Create one or more users from a CreateUsersIntentV4 parameters object.
+    /// Create one or more users from a `CreateUsersIntentV4` parameters object.
     Create(BodyArgs),
     /// Update user name, email, phone, or tag membership.
     Update(BodyArgs),
@@ -56,7 +56,7 @@ pub enum PolicyCommand {
     Get {
         id: Uuid,
     },
-    /// Create a policy from a CreatePolicyIntentV3 parameters object.
+    /// Create a policy from a `CreatePolicyIntentV3` parameters object.
     Create(BodyArgs),
     /// Create multiple policies from a parameters object containing policies.
     CreateBatch(BodyArgs),
@@ -77,7 +77,7 @@ pub enum ApiKeyCommand {
         #[arg(long)]
         user_id: Option<Uuid>,
     },
-    /// Register public keys using CreateApiKeysIntentV2 parameters.
+    /// Register public keys using `CreateApiKeysIntentV2` parameters.
     Register(BodyArgs),
     Delete {
         #[arg(long)]
@@ -295,7 +295,7 @@ impl PolicyCommand {
                 }
                 many => PreparedResource::Mutation(Mutation::DeletePolicies(
                     intent::DeletePoliciesIntent {
-                        policy_ids: many.iter().map(|id| id.to_string()).collect(),
+                        policy_ids: many.iter().map(ToString::to_string).collect(),
                     },
                 )),
             },
@@ -505,7 +505,9 @@ impl Query {
     }
 }
 
+// Asserts on the classified error code.
 #[cfg(test)]
+#[allow(clippy::disallowed_types)]
 mod tests {
     use super::*;
     use crate::errors::{ActivityError, ActivityErrorKind, Classification, ErrorCode, classify};

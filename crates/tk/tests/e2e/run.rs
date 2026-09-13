@@ -198,7 +198,7 @@ impl Run {
         self.cli_at(&self.config.api_base_url)
     }
 
-    fn with_bundle(&self, mut cmd: Command, org: &str, public: &str, private: &str) -> Command {
+    fn with_bundle(mut cmd: Command, org: &str, public: &str, private: &str) -> Command {
         cmd.env("TURNKEY_ORGANIZATION_ID", org)
             .env("TURNKEY_API_PUBLIC_KEY", public)
             .env("TURNKEY_API_PRIVATE_KEY", private);
@@ -207,7 +207,7 @@ impl Run {
 
     /// Admin key scoped to the parent organization.
     fn parent(&self) -> Command {
-        self.with_bundle(
+        Self::with_bundle(
             self.cli(),
             &self.config.organization_id.to_string(),
             &self.config.public_key,
@@ -216,7 +216,7 @@ impl Run {
     }
 
     fn admin_at(&self, base: &str) -> Command {
-        self.with_bundle(
+        Self::with_bundle(
             self.cli_at(base),
             self.org(),
             &self.config.public_key,
@@ -244,7 +244,7 @@ impl Run {
 
     /// Bundle for another sub-organization user.
     pub(crate) fn as_user(&self, key: &TurnkeyP256ApiKey) -> Command {
-        self.with_bundle(
+        Self::with_bundle(
             self.cli(),
             self.org(),
             &hex::encode(key.compressed_public_key()),
@@ -560,7 +560,7 @@ impl Drop for Run {
             let message = panic
                 .downcast_ref::<String>()
                 .cloned()
-                .or_else(|| panic.downcast_ref::<&str>().map(|s| s.to_string()))
+                .or_else(|| panic.downcast_ref::<&str>().map(ToString::to_string))
                 .unwrap_or_else(|| "non-string panic".to_string());
             let message = self.redact(message.as_bytes());
             eprintln!("cleanup failed: {message}");

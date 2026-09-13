@@ -186,7 +186,6 @@ pub(crate) fn quorum_for(api_base_url: &str) -> Result<QuorumPublicKey> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use turnkey_client::generated::immutable::models::v1::KeyValue;
 
     #[test]
     fn import_name_must_be_a_non_blank_non_uuid_label() {

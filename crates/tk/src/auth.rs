@@ -60,7 +60,7 @@ pub enum AuthCommand {
 pub struct LoginArgs {
     /// Name for the new profile.
     name: String,
-    /// Existing P256 credential JSON file (public_key, private_key, curve).
+    /// Existing P256 credential JSON file (public key, private key, curve).
     #[arg(long)]
     api_key_file: PathBuf,
 }
@@ -122,7 +122,7 @@ struct Profile {
     api_key_file: PathBuf,
 }
 
-enum CredentialSource {
+pub enum CredentialSource {
     Environment,
     Profile(String),
 }
@@ -136,7 +136,8 @@ pub struct ApiBaseUrl(String);
 
 impl ApiBaseUrl {
     fn parse(raw: String) -> Result<Self> {
-        let url = Url::parse(&raw).map_err(|_| InvalidInput("invalid API base URL".into()))?;
+        let url =
+            Url::parse(&raw).map_err(|error| Malformed::new("invalid API base URL", error))?;
         if !matches!(url.scheme(), "https" | "http")
             || url.host_str().is_none()
             || !url.username().is_empty()
@@ -167,7 +168,7 @@ pub struct ResolvedAuth {
     pub org_id: Uuid,
     pub api_base_url: ApiBaseUrl,
     pub stamper: TurnkeyP256ApiKey,
-    source: CredentialSource,
+    pub source: CredentialSource,
 }
 
 #[cfg(test)]
@@ -397,6 +398,8 @@ pub async fn secure_create(path: &Path, contents: &[u8]) -> Result<(), SecureCre
     Ok(())
 }
 
+// The decode errors echo private credential bytes, which must not enter the error chain.
+#[allow(clippy::map_err_ignore)]
 fn parse_key(private: &str, public: &str) -> Result<TurnkeyP256ApiKey> {
     let bytes = hex::decode(private)
         .map_err(|_| InvalidInput("private credential must be hexadecimal".into()))?;
@@ -450,6 +453,8 @@ pub async fn resolve(options: &AuthOptions) -> Result<ResolvedAuth> {
                 .into());
             };
             let [org, public, private] = [org, public, private].map(|value| {
+                // The Err payload is the credential bytes, which must not enter the error chain.
+                #[allow(clippy::map_err_ignore)]
                 value.into_string().map_err(|_| {
                     InvalidInput("credential environment value is not valid Unicode".into())
                 })
@@ -462,8 +467,9 @@ pub async fn resolve(options: &AuthOptions) -> Result<ResolvedAuth> {
             }
             let org = match options.organization_id {
                 Some(org) => org,
-                None => Uuid::parse_str(&org)
-                    .map_err(|_| InvalidInput("invalid environment organization ID".into()))?,
+                None => Uuid::parse_str(&org).map_err(|error| {
+                    Malformed::new("invalid environment organization ID", error)
+                })?,
             };
             return Ok(ResolvedAuth {
                 org_id: org,

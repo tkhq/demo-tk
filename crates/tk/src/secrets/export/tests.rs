@@ -1,3 +1,5 @@
+// Asserts on the classified error code.
+#![allow(clippy::disallowed_types)]
 use super::*;
 use crate::errors::{ErrorCode, classify};
 use tempfile::TempDir;

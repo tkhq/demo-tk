@@ -1,4 +1,6 @@
 //! Tests for `tk auth`.
+// Test helpers may panic.
+#![allow(clippy::unwrap_used)]
 
 use assert_cmd::Command;
 use predicates::prelude::*;

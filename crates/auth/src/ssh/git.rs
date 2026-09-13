@@ -36,7 +36,7 @@ impl GitSignInvocation {
                     namespace = Some(
                         iter.next()
                             .ok_or_else(|| anyhow!("missing value after -n"))?
-                            .to_string(),
+                            .clone(),
                     );
                 }
                 "-f" => {
@@ -77,7 +77,7 @@ mod tests {
     use super::GitSignInvocation;
 
     fn args(list: &[&str]) -> Vec<String> {
-        list.iter().map(|s| s.to_string()).collect()
+        list.iter().map(ToString::to_string).collect()
     }
 
     #[test]

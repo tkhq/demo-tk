@@ -1,4 +1,6 @@
 //! Tests for `tk config`.
+// Test helpers may panic.
+#![allow(clippy::expect_used)]
 
 use std::fs;
 use std::path::{Path, PathBuf};
