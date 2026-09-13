@@ -65,9 +65,7 @@ Default guidance for coding-agent runs in this repository.
   API response result.
 - In `tracing` calls, use field shorthand when the variable name matches the
   field name — `%value` for `Display`, `?value` for `Debug` — rather than
-  `value = %value`. Prefer `#[instrument]` on functions over manually built
-  spans: it captures arguments, propagates async context, and keeps the
-  function body clean. Use `#[instrument(skip(arg))]` for noisy or sensitive
+  `value = %value`. Use `#[instrument(skip(arg))]` for noisy or sensitive
   arguments and `#[instrument(level = "debug", ret, err)]` when return or
   error logging helps.
 
@@ -118,9 +116,12 @@ Default guidance for coding-agent runs in this repository.
   block (`let approved = { … };`) names the result without adding a
   signature. A helper must earn its boundary: actual repeated callers
   (extract on the third occurrence, not in anticipation of reuse), a
-  genuinely generic unit, or an intentional `pub` surface. A `.clone()`
-  added only to satisfy an extracted signature means the boundary is
-  wrong — dissolve the helper rather than pay the clone.
+  genuinely generic unit, an intentional `pub` surface, or a name that states
+  intent the body only shows as mechanism. Keep a one-use helper when inlining
+  it would push the caller past about 60 lines, add a level of nesting inside
+  a loop or match arm, or need a labeled block. A `.clone()` added only to
+  satisfy an extracted signature means the boundary is wrong — dissolve the
+  helper rather than pay the clone.
 - Match enums exhaustively when variants require distinct behavior. Use a
   wildcard only when all current and future non-target variants are
   intentionally handled alike.
@@ -141,9 +142,10 @@ Default guidance for coding-agent runs in this repository.
   CLI command in reusable helpers.
 - Preserve typed errors through `anyhow` chains so machine classification can
   downcast them. Add operation and identifier context with `.context()` or
-  `.with_context()`; do not stringify an error with `anyhow!("{error}")`,
-  `bail!("{error}")`, or a formatting-only `map_err`, because that discards its
-  type and source chain.
+  `.with_context()`; do not stringify an error with `anyhow!("{error}")` or
+  `bail!("{error}")`, because that discards its type and source chain.
+  Classify new upstream error variants explicitly rather than adding a
+  wildcard fallback.
 - Use `MissingResource::new` only when a lookup request succeeded but its
   decoded response omitted the expected resource, such as an optional payload
   being `None`. This means callers should verify or re-resolve the identifier
@@ -152,9 +154,6 @@ Default guidance for coding-agent runs in this repository.
   identifier, for example `MissingResource::new("deployment", deployment_id)`.
   Do not use `MissingResource` for unsuccessful HTTP responses; propagate the
   typed `TurnkeyClientError` so its status and response body remain available.
-- Do not assign `ErrorCode` values in command code. Preserve or introduce a
-  typed error and let `crate::errors::classify` own the mapping. Classify new
-  upstream error variants explicitly rather than adding a wildcard fallback.
 - Do not render runtime errors at call sites. Pass the `anyhow::Error` to the
   output boundary so human and JSON modes use the same chain rendering,
   truncation, classification, and HTTP-status behavior.

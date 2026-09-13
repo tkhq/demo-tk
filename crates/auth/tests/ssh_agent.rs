@@ -54,28 +54,26 @@ fn sign_response_expected_frame(signature: &[u8]) -> Vec<u8> {
 fn encode_request_identities_response_matches_expected_frame() {
     let public_key_blob = ed25519_public_key_blob();
 
-    let frame = protocol::encode_request_identities_response(&public_key_blob)
-        .expect("identity response should encode");
+    let frame = protocol::encode_request_identities_response(&public_key_blob);
 
     assert_eq!(frame, request_identities_expected_frame());
 }
 
 #[test]
-fn parse_sign_request_frame_extracts_key_blob_payload_and_flags() {
+fn parse_sign_request_frame_extracts_key_blob_and_payload() {
     let frame = sign_request_frame();
 
     let request = protocol::parse_sign_request_frame(&frame).expect("sign request should parse");
 
     assert_eq!(request.public_key_blob, ed25519_public_key_blob());
     assert_eq!(request.data, b"ssh-agent-challenge");
-    assert_eq!(request.flags, 0x0000_0004);
 }
 
 #[test]
 fn encode_sign_response_matches_expected_frame() {
     let signature = [0x22; 64];
 
-    let frame = protocol::encode_sign_response(&signature).expect("sign response should encode");
+    let frame = protocol::encode_sign_response(&signature);
 
     assert_eq!(frame, sign_response_expected_frame(&signature));
 }

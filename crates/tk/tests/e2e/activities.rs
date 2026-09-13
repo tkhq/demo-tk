@@ -1,20 +1,11 @@
-use crate::run::{Run, id_of, one_api_key, result, user_params};
+use crate::run::{Run, id_of, result};
 use serde_json::json;
 
 #[test]
 #[ignore]
 fn activity_list_paginates_and_get_and_wait_inspect_a_completed_activity() {
     let run = Run::new();
-    let name = run.name("user-activity");
-    let created = run.submit(
-        run.admin().args([
-            "user",
-            "create",
-            "--input-json",
-            &user_params(&name, one_api_key(&run, &name)),
-        ]),
-        "user.create",
-    );
+    let (created, _) = run.create_user_activity("user-activity");
     assert!(
         result(&created, "createUsersResult")["userIds"][0].is_string(),
         "{created}"

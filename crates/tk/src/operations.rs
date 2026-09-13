@@ -1,21 +1,26 @@
 use std::fmt::{self, Display, Formatter};
-use std::io::Read;
+use std::fs;
+use std::io::{self, Read};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Error, Result};
 use clap::{Args, Subcommand};
 use reqwest::{Client, Url};
-use serde::Serialize;
+use serde::ser::SerializeStruct;
+use serde::{Serialize, Serializer};
 use serde_json::{Value, json};
+use tokio::time::{sleep, timeout};
 use turnkey_api_key_stamper::{Stamp, TurnkeyP256ApiKey};
 use turnkey_client::generated::{
     ActivityStatus, GetActivitiesRequest, GetActivityRequest, external::options::v1::Pagination,
 };
 use uuid::Uuid;
 
-use crate::auth::{ResolvedAuth, transport};
-use crate::errors::{ActivityError, ActivityErrorKind, InvalidInput, UnexpectedHttpStatus};
+use crate::auth::{ApiBaseUrl, ResolvedAuth, transport};
+use crate::errors::{
+    ActivityError, ActivityErrorKind, InvalidInput, Malformed, UnexpectedHttpStatus,
+};
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -23,8 +28,8 @@ const MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Args)]
 pub struct RequestArgs {
-    #[arg(long, value_parser = request_path)]
-    path: String,
+    #[arg(long, value_parser = RequestPath::parse)]
+    path: RequestPath,
     #[arg(
         long,
         required_unless_present = "body_file",
@@ -63,16 +68,24 @@ pub enum ActivityCommand {
     },
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[cfg_attr(test, derive(Debug))]
 pub struct OperationOutput {
-    schema_version: u32,
-    reason: &'static str,
     command: &'static str,
-    status: &'static str,
     data: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
     activity: Option<Value>,
+}
+
+/// Record status. A record without an activity is complete; every other
+/// status is read from the activity the record carries.
+#[derive(Serialize)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
+#[serde(rename_all = "lowercase")]
+enum Status {
+    Completed,
+    Rejected,
+    Failed,
+    Pending,
+    Unknown,
 }
 
 impl OperationOutput {
@@ -81,15 +94,8 @@ impl OperationOutput {
             .get("activity")
             .filter(|v| v.is_object())
             .map(|v| json!({"id":v.get("id"),"status":v.get("status")}));
-        let status = activity
-            .as_ref()
-            .map(activity_status)
-            .unwrap_or("completed");
         Self {
-            schema_version: 1,
-            reason: "command_result",
             command,
-            status,
             data,
             activity,
         }
@@ -103,66 +109,104 @@ impl OperationOutput {
         self.data
     }
 
-    pub(crate) fn is_pending(&self) -> bool {
-        self.status == "pending"
+    fn status(&self) -> Status {
+        self.activity.as_ref().map_or(Status::Completed, Status::of)
     }
 
-    fn identity(&self) -> Value {
-        self.activity
-            .clone()
-            .unwrap_or_else(|| json!({"id": null, "status": null}))
+    pub(crate) fn is_pending(&self) -> bool {
+        matches!(self.status(), Status::Pending)
+    }
+}
+
+impl Status {
+    fn of(activity: &Value) -> Self {
+        match activity
+            .get("status")
+            .and_then(Value::as_str)
+            .and_then(ActivityStatus::from_str_name)
+        {
+            Some(ActivityStatus::Completed) => Self::Completed,
+            Some(ActivityStatus::Rejected) => Self::Rejected,
+            Some(ActivityStatus::Failed) => Self::Failed,
+            Some(
+                ActivityStatus::Created
+                | ActivityStatus::Pending
+                | ActivityStatus::ConsensusNeeded
+                | ActivityStatus::AuthenticatorsNeeded,
+            ) => Self::Pending,
+            Some(ActivityStatus::Unspecified) | None => Self::Unknown,
+        }
+    }
+}
+
+impl Serialize for OperationOutput {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut record = serializer
+            .serialize_struct("OperationOutput", 5 + usize::from(self.activity.is_some()))?;
+        record.serialize_field("schemaVersion", &1u32)?;
+        record.serialize_field("reason", "command_result")?;
+        record.serialize_field("command", self.command)?;
+        record.serialize_field("status", &self.status())?;
+        record.serialize_field("data", &self.data)?;
+        if let Some(activity) = &self.activity {
+            record.serialize_field("activity", activity)?;
+        }
+        record.end()
     }
 }
 
 impl Display for OperationOutput {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            serde_json::to_string_pretty(self).map_err(|_| fmt::Error)?
-        )
+        // fmt::Error carries no payload.
+        #[allow(clippy::map_err_ignore)]
+        let rendered = serde_json::to_string_pretty(self).map_err(|_| fmt::Error)?;
+        f.write_str(&rendered)
     }
 }
 
-fn activity_status(activity: &Value) -> &'static str {
-    let Some(status) = activity
-        .get("status")
-        .and_then(Value::as_str)
-        .and_then(ActivityStatus::from_str_name)
-    else {
-        return "unknown";
-    };
-    match status {
-        ActivityStatus::Completed => "completed",
-        ActivityStatus::Rejected => "rejected",
-        ActivityStatus::Failed => "failed",
-        ActivityStatus::Created
-        | ActivityStatus::Pending
-        | ActivityStatus::ConsensusNeeded
-        | ActivityStatus::AuthenticatorsNeeded => "pending",
-        ActivityStatus::Unspecified => "unknown",
-    }
+/// An absolute `/public/v1/` API path with no query, fragment, or traversal,
+/// classified as a read-only query or an activity submission.
+#[derive(Clone, Debug)]
+struct RequestPath {
+    raw: String,
+    kind: RequestKind,
 }
 
-fn request_path(value: &str) -> Result<String, String> {
-    if !value.starts_with("/public/v1/")
-        || value.contains(['?', '#', '\\', '%'])
-        || value.split('/').any(|s| s == ".." || s == ".")
-    {
-        return Err(
-            "path must be an absolute /public/v1/ API path without query, fragment, or traversal"
-                .into(),
-        );
+#[derive(Clone, Debug)]
+enum RequestKind {
+    Query,
+    Submit,
+}
+
+impl RequestPath {
+    fn parse(value: &str) -> Result<Self, String> {
+        if !value.starts_with("/public/v1/")
+            || value.contains(['?', '#', '\\', '%'])
+            || value.split('/').any(|s| s == ".." || s == ".")
+        {
+            return Err(
+                "path must be an absolute /public/v1/ API path without query, fragment, or traversal"
+                    .into(),
+            );
+        }
+        let kind = if value.starts_with("/public/v1/query/") {
+            RequestKind::Query
+        } else {
+            RequestKind::Submit
+        };
+        Ok(Self {
+            raw: value.into(),
+            kind,
+        })
     }
-    Ok(value.into())
 }
 
 fn url(base: &str, path: &str) -> Result<Url> {
     Url::parse(&format!("{}{path}", base.trim_end_matches('/')))
-        .map_err(|_| InvalidInput("invalid request URL".into()).into())
+        .map_err(|error| Malformed::new("invalid request URL", error).into())
 }
 
-fn client() -> Result<Client> {
+pub(crate) fn client() -> Result<Client> {
     transport(Client::builder())
         .build()
         .context("could not initialize HTTP client")
@@ -194,7 +238,7 @@ async fn post(
                 .with_source(error)
                 .into()
             } else {
-                anyhow::Error::new(error).context("API request failed")
+                Error::new(error).context("API request failed")
             }
         })?;
     let status = response.status();
@@ -233,59 +277,25 @@ fn encode<T: Serialize>(value: &T) -> Result<String> {
     serde_json::to_string(value).context("could not encode request")
 }
 
-pub fn envelope<T: Serialize>(kind: &str, organization_id: &str, parameters: &T) -> Result<Value> {
-    Ok(envelope_at(
-        kind,
-        organization_id,
-        &timestamp_ms()?,
-        parameters,
-    ))
-}
-
-pub(crate) fn envelope_at<T: Serialize>(
-    kind: &str,
-    organization_id: &str,
-    timestamp_ms: &str,
-    parameters: &T,
-) -> Value {
-    json!({
+fn envelope<T: Serialize>(kind: &str, organization_id: Uuid, parameters: &T) -> Result<Value> {
+    let timestamp_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .context("system clock precedes Unix epoch")?
+        .as_millis()
+        .to_string();
+    Ok(json!({
         "type": kind,
         "timestampMs": timestamp_ms,
         "organizationId": organization_id,
         "parameters": parameters,
         "generateAppProofs": null,
-    })
-}
-
-pub(crate) fn timestamp_ms() -> Result<String> {
-    Ok(SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .context("system clock precedes Unix epoch")?
-        .as_millis()
-        .to_string())
-}
-
-fn validate_body(body: &str, org: &str) -> Result<(), InvalidInput> {
-    let value: Value =
-        serde_json::from_str(body).map_err(|_| InvalidInput("body must be valid JSON".into()))?;
-    if !value.is_object() {
-        return Err(InvalidInput("body must be a JSON object".into()));
-    }
-    let body_org = value
-        .get("organizationId")
-        .and_then(Value::as_str)
-        .and_then(|id| Uuid::parse_str(id).ok());
-    if body_org.is_none_or(|id| Uuid::parse_str(org) != Ok(id)) {
-        return Err(InvalidInput(
-            "body organizationId must match selected organization".into(),
-        ));
-    }
-    Ok(())
+    }))
 }
 
 pub struct PreparedRequest {
-    path: String,
+    path: RequestPath,
     body: String,
+    organization_id: Option<Uuid>,
     stamp_only: bool,
 }
 
@@ -295,23 +305,28 @@ impl RequestArgs {
             (Some(body), _) => body,
             (None, Some(path)) if path.as_os_str() == "-" => {
                 let mut body = String::new();
-                std::io::stdin()
+                io::stdin()
                     .read_to_string(&mut body)
-                    .map_err(|_| InvalidInput("could not read UTF-8 request body".into()))?;
+                    .map_err(|error| Malformed::new("could not read UTF-8 request body", error))?;
                 body
             }
-            (None, Some(path)) => std::fs::read_to_string(path)
-                .map_err(|_| InvalidInput("could not read UTF-8 request body".into()))?,
+            (None, Some(path)) => fs::read_to_string(path)
+                .map_err(|error| Malformed::new("could not read UTF-8 request body", error))?,
             (None, None) => unreachable!("clap requires exactly one body source"),
         };
         let value: Value = serde_json::from_str(&body)
-            .map_err(|_| InvalidInput("body must be valid JSON".into()))?;
+            .map_err(|error| Malformed::new("body must be valid JSON", error))?;
         if !value.is_object() {
             return Err(InvalidInput("body must be a JSON object".into()).into());
         }
+        let organization_id = value
+            .get("organizationId")
+            .and_then(Value::as_str)
+            .and_then(|id| Uuid::parse_str(id).ok());
         Ok(PreparedRequest {
             path: self.path,
             body,
+            organization_id,
             stamp_only: self.stamp_only,
         })
     }
@@ -321,8 +336,14 @@ impl PreparedRequest {
     pub async fn run(self, auth: &ResolvedAuth) -> Result<OperationOutput> {
         let command = "request";
         let body = self.body;
-        validate_body(&body, &auth.org_id)?;
-        let endpoint = url(&auth.api_base_url, &self.path)?;
+        if self.organization_id != Some(auth.org_id) {
+            return Err(InvalidInput(
+                "body organizationId must match selected organization".into(),
+            )
+            .into());
+        }
+        let RequestPath { raw, kind } = self.path;
+        let endpoint = url(auth.api_base_url.as_str(), &raw)?;
         if self.stamp_only {
             let stamp = auth
                 .stamper
@@ -333,12 +354,11 @@ impl PreparedRequest {
                 json!({"url":endpoint.as_str(),"method":"POST","header":{"name":stamp.name,"value":stamp.value},"body":body}),
             ));
         }
-        let query = self.path.starts_with("/public/v1/query/");
-        let value = post(&client()?, endpoint, body, &auth.stamper, !query).await?;
-        if query {
-            Ok(OperationOutput::result(command, value))
-        } else {
-            submission_result(command, value)
+        let mutation = matches!(kind, RequestKind::Submit);
+        let value = post(&client()?, endpoint, body, &auth.stamper, mutation).await?;
+        match kind {
+            RequestKind::Query => Ok(OperationOutput::result(command, value)),
+            RequestKind::Submit => submission_result(command, value),
         }
     }
 }
@@ -359,21 +379,29 @@ fn submission_result(command: &'static str, data: Value) -> Result<OperationOutp
 }
 
 fn terminal(output: OperationOutput, submitted: bool) -> Result<OperationOutput> {
-    let failure = match output.status {
-        "rejected" => (ActivityErrorKind::NotCompleted, "activity rejected"),
-        "failed" => (ActivityErrorKind::NotCompleted, "activity failed"),
-        "unknown" if submitted => (
+    let Some(activity) = output.activity else {
+        return Ok(output);
+    };
+    let (kind, message) = match Status::of(&activity) {
+        Status::Completed | Status::Pending => {
+            return Ok(OperationOutput {
+                activity: Some(activity),
+                ..output
+            });
+        }
+        Status::Rejected => (ActivityErrorKind::NotCompleted, "activity rejected"),
+        Status::Failed => (ActivityErrorKind::NotCompleted, "activity failed"),
+        Status::Unknown if submitted => (
             ActivityErrorKind::SubmissionUnknown,
             "unknown activity status; inspect activity before resubmitting",
         ),
-        "unknown" => (
+        Status::Unknown => (
             ActivityErrorKind::MalformedResponse,
             "unknown activity status",
         ),
-        _ => return Ok(output),
     };
-    Err(ActivityError::new(failure.0, failure.1)
-        .with_activity(output.identity())
+    Err(ActivityError::new(kind, message)
+        .with_activity(activity)
         .into())
 }
 
@@ -381,7 +409,7 @@ pub(crate) fn observed(command: &'static str, data: Value) -> Result<OperationOu
     terminal(OperationOutput::result(command, data), false)
 }
 
-fn with_target(error: anyhow::Error, target: Value) -> anyhow::Error {
+fn with_target(error: Error, target: Value) -> Error {
     match error.downcast::<ActivityError>() {
         Ok(activity) if activity.activity().is_none() => activity.with_activity(target).into(),
         Ok(activity) => activity.into(),
@@ -389,12 +417,12 @@ fn with_target(error: anyhow::Error, target: Value) -> anyhow::Error {
     }
 }
 
-async fn query_activity(http: &Client, auth: &ResolvedAuth, id: &str) -> Result<Value> {
+pub(crate) async fn query_activity(http: &Client, auth: &ResolvedAuth, id: &str) -> Result<Value> {
     let body = encode(&GetActivityRequest {
-        organization_id: auth.org_id.clone(),
+        organization_id: auth.org_id.to_string(),
         activity_id: id.into(),
     })?;
-    let endpoint = url(&auth.api_base_url, "/public/v1/query/get_activity")?;
+    let endpoint = url(auth.api_base_url.as_str(), "/public/v1/query/get_activity")?;
     let value = post(http, endpoint, body, &auth.stamper, false).await?;
     let matches = value
         .pointer("/activity/id")
@@ -408,10 +436,6 @@ async fn query_activity(http: &Client, auth: &ResolvedAuth, id: &str) -> Result<
         .into());
     }
     Ok(value)
-}
-
-pub(crate) async fn get_activity(auth: &ResolvedAuth, id: &str) -> Result<Value> {
-    query_activity(&client()?, auth, id).await
 }
 
 pub async fn run_activity(args: ActivityCommand, auth: &ResolvedAuth) -> Result<OperationOutput> {
@@ -442,7 +466,7 @@ async fn list(
     cursor: Option<String>,
 ) -> Result<OperationOutput> {
     let request = GetActivitiesRequest {
-        organization_id: auth.org_id.clone(),
+        organization_id: auth.org_id.to_string(),
         filter_by_status: vec![],
         filter_by_type: vec![],
         pagination_options: Some(Pagination {
@@ -451,7 +475,10 @@ async fn list(
             after: cursor.unwrap_or_default(),
         }),
     };
-    let endpoint = url(&auth.api_base_url, "/public/v1/query/list_activities")?;
+    let endpoint = url(
+        auth.api_base_url.as_str(),
+        "/public/v1/query/list_activities",
+    )?;
     let response = post(http, endpoint, encode(&request)?, &auth.stamper, false).await?;
     let items = response
         .get("activities")
@@ -481,12 +508,12 @@ async fn wait(
 ) -> Result<OperationOutput> {
     let command = "activity.wait";
     let mut last: Option<Value> = None;
-    let result = tokio::time::timeout(Duration::from_secs(seconds), async {
+    let result = timeout(Duration::from_secs(seconds), async {
         loop {
             match query_activity(http, auth, id).await {
                 Ok(value) => {
                     let output = OperationOutput::result(command, value);
-                    if output.status != "pending" {
+                    if !output.is_pending() {
                         return terminal(output, false);
                     }
                     last = output.activity;
@@ -499,7 +526,7 @@ async fn wait(
                     return Err(with_target(error, target));
                 }
             }
-            tokio::time::sleep(POLL_INTERVAL).await;
+            sleep(POLL_INTERVAL).await;
         }
     })
     .await;
@@ -514,7 +541,7 @@ async fn wait(
     }
 }
 
-fn transient(error: &anyhow::Error) -> bool {
+fn transient(error: &Error) -> bool {
     error.chain().any(|cause| {
         cause
             .downcast_ref::<UnexpectedHttpStatus>()
@@ -561,12 +588,12 @@ async fn vote(
         };
         let body = encode(&envelope(
             kind,
-            &auth.org_id,
+            auth.org_id,
             &json!({ "fingerprint": fingerprint }),
         )?)?;
         let response = post(
             http,
-            url(&auth.api_base_url, path)?,
+            url(auth.api_base_url.as_str(), path)?,
             body,
             &auth.stamper,
             true,
@@ -589,7 +616,7 @@ async fn vote(
             query_activity(http, auth, id).await?
         };
         let output = OperationOutput::result(command, data);
-        if !approve && output.status == "rejected" {
+        if !approve && matches!(output.status(), Status::Rejected) {
             Ok(output)
         } else {
             terminal(output, true)
@@ -606,35 +633,24 @@ pub async fn submit_activity<T: Serialize>(
     kind: &str,
     parameters: &T,
 ) -> Result<OperationOutput> {
-    let body = encode(&envelope(kind, &auth.org_id, parameters)?)?;
-    let value = submit_bytes(
+    let body = encode(&envelope(kind, auth.org_id, parameters)?)?;
+    let endpoint = url(
+        auth.api_base_url.as_str(),
         &format!("/public/v1/submit/{endpoint}"),
-        body,
-        &auth.api_base_url,
-        &auth.stamper,
-    )
-    .await?;
+    )?;
+    let value = post(&client()?, endpoint, body, &auth.stamper, true).await?;
     submission_result(command, value)
-}
-
-pub(crate) async fn submit_bytes(
-    path: &str,
-    body: String,
-    api_base_url: &str,
-    stamper: &TurnkeyP256ApiKey,
-) -> Result<Value> {
-    post(&client()?, url(api_base_url, path)?, body, stamper, true).await
 }
 
 pub(crate) async fn query<T: Serialize>(
     path: &str,
     request: &T,
-    api_base_url: &str,
+    api_base_url: &ApiBaseUrl,
     stamper: &TurnkeyP256ApiKey,
 ) -> Result<Value> {
     post(
         &client()?,
-        url(api_base_url, path)?,
+        url(api_base_url.as_str(), path)?,
         encode(request)?,
         stamper,
         false,

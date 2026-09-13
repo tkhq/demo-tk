@@ -1,44 +1,43 @@
 //! Turnkey-backed signing client helpers.
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Error, Result, anyhow};
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
-use turnkey_client::generated::immutable::common::v1::HashFunction;
-use turnkey_client::generated::immutable::common::v1::PayloadEncoding;
+use turnkey_client::generated::immutable::common::v1::{HashFunction, PayloadEncoding};
 use turnkey_client::generated::{GetActivityRequest, GetPrivateKeyRequest, SignRawPayloadIntentV2};
 use turnkey_client::{TurnkeyClient, TurnkeyClientError};
 
-use crate::config::Config;
+use crate::config::{Config, ConfigKey};
 use crate::errors::MissingResource;
 
 /// Turnkey-backed signer for fetching public keys and producing Ed25519 signatures.
-pub struct TurnkeySigner {
+pub(crate) struct TurnkeySigner {
     client: TurnkeyClient<TurnkeyP256ApiKey>,
     config: Config,
 }
 
+pub(crate) fn build_client(config: &Config) -> Result<TurnkeyClient<TurnkeyP256ApiKey>> {
+    let api_key =
+        TurnkeyP256ApiKey::from_strings(&config.api_private_key, Some(&config.api_public_key))
+            .context("failed to load Turnkey API key")?;
+
+    TurnkeyClient::builder()
+        .api_key(api_key)
+        .base_url(&config.api_base_url)
+        .build()
+        .context("failed to build Turnkey client")
+}
+
 impl TurnkeySigner {
-    /// Builds a signer from resolved auth configuration.
-    pub fn new(config: Config) -> Result<Self> {
-        let api_key =
-            TurnkeyP256ApiKey::from_strings(&config.api_private_key, Some(&config.api_public_key))
-                .context("failed to load Turnkey API key")?;
-
-        let client = TurnkeyClient::builder()
-            .api_key(api_key)
-            .base_url(&config.api_base_url)
-            .build()
-            .context("failed to build Turnkey client")?;
-
-        Ok(Self { client, config })
+    pub(crate) fn new(client: TurnkeyClient<TurnkeyP256ApiKey>, config: Config) -> Self {
+        Self { client, config }
     }
 
-    /// Fetches the configured private key's raw public key bytes.
-    pub async fn get_public_key(&self) -> Result<Vec<u8>> {
+    pub(crate) async fn get_public_key(&self) -> Result<[u8; 32]> {
         let private_key_id = self.required_private_key_id()?;
         let response = self
             .client
             .get_private_key(GetPrivateKeyRequest {
-                organization_id: self.config.organization_id.clone(),
+                organization_id: self.config.organization_id.to_string(),
                 private_key_id: private_key_id.to_string(),
             })
             .await
@@ -51,22 +50,12 @@ impl TurnkeySigner {
         decode_public_key(&private_key.public_key)
     }
 
-    /// Signs a raw Ed25519 payload through Turnkey and returns the 64-byte signature.
-    pub async fn sign_ed25519(&self, payload: &[u8]) -> Result<Vec<u8>> {
-        self.sign_raw_ed25519_payload(payload).await
-    }
-
-    /// Signs a raw SSH authentication payload through Turnkey and returns the 64-byte signature.
-    pub async fn sign_ssh_auth_payload(&self, payload: &[u8]) -> Result<Vec<u8>> {
-        self.sign_raw_ed25519_payload(payload).await
-    }
-
-    async fn sign_raw_ed25519_payload(&self, payload: &[u8]) -> Result<Vec<u8>> {
+    pub(crate) async fn sign_ed25519(&self, payload: &[u8]) -> Result<[u8; 64]> {
         let private_key_id = self.required_private_key_id()?;
         match self
             .client
             .sign_raw_payload(
-                self.config.organization_id.clone(),
+                self.config.organization_id.to_string(),
                 self.client.current_timestamp(),
                 SignRawPayloadIntentV2 {
                     sign_with: private_key_id.to_string(),
@@ -81,73 +70,66 @@ impl TurnkeySigner {
                 decode_signature_parts(&response.result.r, &response.result.s, &response.result.v)
             }
             Err(TurnkeyClientError::ActivityRequiresApproval(activity_id)) => {
-                Err(self.approval_required_error(&activity_id).await)
+                Err(self.approval_required_error(activity_id).await)
             }
             Err(other) => Err(map_turnkey_error(other)),
         }
     }
 
-    async fn approval_required_error(&self, activity_id: &str) -> anyhow::Error {
-        let context = match self.get_activity_fingerprint(activity_id).await {
-            Ok(fingerprint) => format!(
-                "signing requires additional approval (fingerprint: {fingerprint}, activity id: {activity_id})"
-            ),
-            Err(_) => format!("signing requires additional approval (activity id: {activity_id})"),
-        };
-        anyhow::Error::new(TurnkeyClientError::ActivityRequiresApproval(
-            activity_id.to_string(),
-        ))
-        .context(context)
-    }
-
-    async fn get_activity_fingerprint(&self, activity_id: &str) -> Result<String> {
-        let response = self
+    async fn approval_required_error(&self, activity_id: String) -> Error {
+        let fingerprint = self
             .client
             .get_activity(GetActivityRequest {
-                organization_id: self.config.organization_id.clone(),
-                activity_id: activity_id.to_string(),
+                organization_id: self.config.organization_id.to_string(),
+                activity_id: activity_id.clone(),
             })
             .await
-            .map_err(map_turnkey_error)?;
-
-        let activity = response
-            .activity
-            .ok_or_else(|| anyhow!("Turnkey did not return an activity object"))?;
-
-        if activity.fingerprint.is_empty() {
-            return Err(anyhow!("Turnkey activity fingerprint was empty"));
-        }
-
-        Ok(activity.fingerprint)
+            .ok()
+            .and_then(|response| response.activity)
+            .map(|activity| activity.fingerprint)
+            .filter(|fingerprint| !fingerprint.is_empty());
+        let context = match fingerprint {
+            Some(fingerprint) => format!(
+                "signing requires additional approval (fingerprint: {fingerprint}, activity id: {activity_id})"
+            ),
+            None => format!("signing requires additional approval (activity id: {activity_id})"),
+        };
+        Error::new(TurnkeyClientError::ActivityRequiresApproval(activity_id)).context(context)
     }
 
     fn required_private_key_id(&self) -> Result<&str> {
-        if self.config.private_key_id.is_empty() {
-            return Err(anyhow!(
-                "missing required config value: turnkey.privateKeyId"
-            ));
-        }
-
-        Ok(&self.config.private_key_id)
+        self.config
+            .private_key_id
+            .as_deref()
+            .ok_or_else(|| anyhow!("missing required config value: {}", ConfigKey::PrivateKeyId))
     }
 }
 
-fn map_turnkey_error(error: TurnkeyClientError) -> anyhow::Error {
-    anyhow::Error::new(error).context("Turnkey API request failed")
+fn map_turnkey_error(error: TurnkeyClientError) -> Error {
+    Error::new(error).context("Turnkey API request failed")
 }
 
-fn decode_public_key(encoded: &str) -> Result<Vec<u8>> {
+fn decode_public_key(encoded: &str) -> Result<[u8; 32]> {
     let trimmed = encoded.trim().trim_start_matches("0x");
-    hex::decode(trimmed).map_err(|_| anyhow!("expected hex-encoded Turnkey public key"))
+    let public_key = hex::decode(trimmed).context("expected hex-encoded Turnkey public key")?;
+    <[u8; 32]>::try_from(public_key).map_err(|public_key| {
+        anyhow!(
+            "expected 32-byte Ed25519 public key from Turnkey, got {} bytes",
+            public_key.len()
+        )
+    })
 }
 
-fn decode_signature_parts(r: &str, s: &str, v: &str) -> Result<Vec<u8>> {
+fn decode_signature_parts(r: &str, s: &str, v: &str) -> Result<[u8; 64]> {
     let r = decode_hex(r).context("failed to decode Turnkey signature field r")?;
     let s = decode_hex(s).context("failed to decode Turnkey signature field s")?;
     let v = decode_hex(v).context("failed to decode Turnkey signature field v")?;
 
     if r.len() == 32 && s.len() == 32 && v.len() == 1 {
-        return Ok([r, s].concat());
+        let mut signature = [0u8; 64];
+        signature[..32].copy_from_slice(&r);
+        signature[32..].copy_from_slice(&s);
+        return Ok(signature);
     }
 
     Err(anyhow!(
@@ -172,20 +154,54 @@ fn decode_hex(value: &str) -> Result<Vec<u8>> {
 mod tests {
     use super::{TurnkeyClientError, TurnkeySigner, decode_public_key, decode_signature_parts};
     use crate::config::Config;
+    use serde_json::{Value, json};
     use turnkey_api_key_stamper::TurnkeyP256ApiKey;
+    use turnkey_client::TurnkeyClient;
+    use uuid::{Uuid, uuid};
     use wiremock::matchers::{header_exists, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn test_signer(server: &MockServer) -> TurnkeySigner {
+    const ORGANIZATION_ID: Uuid = uuid!("11111111-2222-4333-8444-555555555555");
+
+    fn test_signer(server: &MockServer, private_key_id: Option<String>) -> TurnkeySigner {
         let api_key = TurnkeyP256ApiKey::generate();
-        TurnkeySigner::new(Config {
-            organization_id: "org-id".to_string(),
+        let config = Config {
+            organization_id: ORGANIZATION_ID,
             api_public_key: hex::encode(api_key.compressed_public_key()),
             api_private_key: hex::encode(api_key.private_key()),
-            private_key_id: "pk-id".to_string(),
+            private_key_id,
             api_base_url: server.uri(),
+        };
+        let client = TurnkeyClient::builder()
+            .api_key(api_key)
+            .base_url(&config.api_base_url)
+            .build()
+            .expect("client should build");
+        TurnkeySigner::new(client, config)
+    }
+
+    async fn signer_with_sign_response(response: Value) -> (MockServer, TurnkeySigner) {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/public/v1/submit/sign_raw_payload"))
+            .and(header_exists("X-Stamp"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(response))
+            .mount(&server)
+            .await;
+        let signer = test_signer(&server, Some("pk-id".to_string()));
+        (server, signer)
+    }
+
+    fn consensus_needed_response() -> Value {
+        json!({
+            "activity": {
+                "id": "consensus-activity-id",
+                "organizationId": ORGANIZATION_ID.to_string(),
+                "fingerprint": "consensus-fingerprint",
+                "status": "ACTIVITY_STATUS_CONSENSUS_NEEDED",
+                "type": "ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2"
+            }
         })
-        .expect("signer should build")
     }
 
     #[test]
@@ -210,54 +226,43 @@ mod tests {
 
     #[tokio::test]
     async fn sign_returns_signature_on_immediate_success() {
-        let server = MockServer::start().await;
         let payload = b"ssh-agent-challenge";
         let signature = [0x55; 64];
+        let (server, signer) = signer_with_sign_response(json!({
+            "activity": {
+                "id": "activity-id",
+                "organizationId": ORGANIZATION_ID.to_string(),
+                "fingerprint": "fingerprint",
+                "status": "ACTIVITY_STATUS_COMPLETED",
+                "type": "ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2",
+                "result": {
+                    "signRawPayloadResult": {
+                        "r": hex::encode(&signature[..32]),
+                        "s": hex::encode(&signature[32..]),
+                        "v": "00"
+                    }
+                }
+            }
+        }))
+        .await;
 
-        Mock::given(method("POST"))
-            .and(path("/public/v1/submit/sign_raw_payload"))
-            .and(header_exists("X-Stamp"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({
-                        "activity": {
-                            "id": "activity-id",
-                            "organizationId": "org-id",
-                            "fingerprint": "fingerprint",
-                            "status": "ACTIVITY_STATUS_COMPLETED",
-                            "type": "ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2",
-                            "result": {
-                                "signRawPayloadResult": {
-                                    "r": hex::encode(&signature[..32]),
-                                    "s": hex::encode(&signature[32..]),
-                                    "v": "00"
-                                }
-                            }
-                        }
-                    }))
-                    .insert_header("Content-Type", "application/json"),
-            )
-            .mount(&server)
-            .await;
-
-        let signer = test_signer(&server);
         let result = signer
-            .sign_ssh_auth_payload(payload)
+            .sign_ed25519(payload)
             .await
             .expect("ssh auth payload should sign");
 
-        assert_eq!(result, signature.to_vec());
+        assert_eq!(result, signature);
 
         let requests = server
             .received_requests()
             .await
             .expect("request recording should be enabled");
         assert_eq!(requests.len(), 1);
-        let body: serde_json::Value = requests[0]
+        let body: Value = requests[0]
             .body_json()
             .expect("request body should be valid JSON");
         assert_eq!(body["type"], "ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2");
-        assert_eq!(body["organizationId"], "org-id");
+        assert_eq!(body["organizationId"], ORGANIZATION_ID.to_string());
         assert_eq!(body["parameters"]["signWith"], "pk-id");
         assert_eq!(body["parameters"]["payload"], hex::encode(payload));
         assert_eq!(
@@ -272,30 +277,15 @@ mod tests {
 
     #[tokio::test]
     async fn sign_returns_error_when_consensus_needed() {
-        let server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/public/v1/submit/sign_raw_payload"))
-            .and(header_exists("X-Stamp"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "activity": {
-                    "id": "consensus-activity-id",
-                    "organizationId": "org-id",
-                    "fingerprint": "consensus-fingerprint",
-                    "status": "ACTIVITY_STATUS_CONSENSUS_NEEDED",
-                    "type": "ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2"
-                }
-            })))
-            .mount(&server)
-            .await;
+        let (server, signer) = signer_with_sign_response(consensus_needed_response()).await;
 
         Mock::given(method("POST"))
             .and(path("/public/v1/query/get_activity"))
             .and(header_exists("X-Stamp"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "activity": {
                     "id": "consensus-activity-id",
-                    "organizationId": "org-id",
+                    "organizationId": ORGANIZATION_ID.to_string(),
                     "status": "ACTIVITY_STATUS_CONSENSUS_NEEDED",
                     "type": "ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2",
                     "intent": null,
@@ -313,18 +303,14 @@ mod tests {
             .mount(&server)
             .await;
 
-        let signer = test_signer(&server);
         let error = signer
             .sign_ed25519(b"test-payload")
             .await
             .expect_err("sign should fail when consensus needed");
 
-        let message = error.to_string();
-        assert!(
-            message.contains("approval")
-                && message.contains("consensus-fingerprint")
-                && message.contains("consensus-activity-id"),
-            "error should mention approval and contain both activity fingerprint and id: {message}"
+        assert_eq!(
+            error.to_string(),
+            "signing requires additional approval (fingerprint: consensus-fingerprint, activity id: consensus-activity-id)"
         );
         assert!(matches!(
             error.downcast_ref::<TurnkeyClientError>(),
@@ -334,22 +320,7 @@ mod tests {
 
     #[tokio::test]
     async fn sign_falls_back_to_activity_id_when_fingerprint_lookup_fails() {
-        let server = MockServer::start().await;
-
-        Mock::given(method("POST"))
-            .and(path("/public/v1/submit/sign_raw_payload"))
-            .and(header_exists("X-Stamp"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "activity": {
-                    "id": "consensus-activity-id",
-                    "organizationId": "org-id",
-                    "fingerprint": "consensus-fingerprint",
-                    "status": "ACTIVITY_STATUS_CONSENSUS_NEEDED",
-                    "type": "ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2"
-                }
-            })))
-            .mount(&server)
-            .await;
+        let (server, signer) = signer_with_sign_response(consensus_needed_response()).await;
 
         Mock::given(method("POST"))
             .and(path("/public/v1/query/get_activity"))
@@ -358,7 +329,6 @@ mod tests {
             .mount(&server)
             .await;
 
-        let signer = test_signer(&server);
         let error = signer
             .sign_ed25519(b"test-payload")
             .await
@@ -373,15 +343,7 @@ mod tests {
     #[tokio::test]
     async fn sign_requires_private_key_id() {
         let server = MockServer::start().await;
-        let api_key = TurnkeyP256ApiKey::generate();
-        let signer = TurnkeySigner::new(Config {
-            organization_id: "org-id".to_string(),
-            api_public_key: hex::encode(api_key.compressed_public_key()),
-            api_private_key: hex::encode(api_key.private_key()),
-            private_key_id: String::new(),
-            api_base_url: server.uri(),
-        })
-        .expect("signer should build");
+        let signer = test_signer(&server, None);
 
         let error = signer
             .sign_ed25519(b"test-payload")
