@@ -233,7 +233,6 @@ fn encode<T: Serialize>(value: &T) -> Result<String> {
     serde_json::to_string(value).context("could not encode request")
 }
 
-/// Wraps parameters in an activity envelope with the current timestamp.
 pub fn envelope<T: Serialize>(kind: &str, organization_id: &str, parameters: &T) -> Result<Value> {
     Ok(envelope_at(
         kind,
@@ -243,7 +242,6 @@ pub fn envelope<T: Serialize>(kind: &str, organization_id: &str, parameters: &T)
     ))
 }
 
-/// Builds an activity envelope with an explicit timestamp.
 pub(crate) fn envelope_at<T: Serialize>(
     kind: &str,
     organization_id: &str,
@@ -379,7 +377,6 @@ fn terminal(output: OperationOutput, submitted: bool) -> Result<OperationOutput>
         .into())
 }
 
-/// Converts an activity result into a record or typed error.
 pub(crate) fn observed(command: &'static str, data: Value) -> Result<OperationOutput> {
     terminal(OperationOutput::result(command, data), false)
 }
@@ -620,7 +617,6 @@ pub async fn submit_activity<T: Serialize>(
     submission_result(command, value)
 }
 
-/// Submits already-serialized request bytes unchanged.
 pub(crate) async fn submit_bytes(
     path: &str,
     body: String,

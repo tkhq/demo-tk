@@ -6,7 +6,6 @@ use crate::outcome::Outcome;
 use crate::output::StdCtx;
 use turnkey_auth::config::{self, ConfigKey, RedactedConfig};
 
-/// Arguments for the `tk config` subcommand.
 #[derive(Debug, ClapArgs)]
 #[command(about, long_about = None)]
 pub struct Args {

@@ -18,7 +18,6 @@ fn mock(route_path: &str, status: u16, body: Value) -> Mock {
         .respond_with(ResponseTemplate::new(status).set_body_json(body))
 }
 
-/// A submission that never answers `pending` leaves no recovery key.
 #[tokio::test]
 async fn a_submission_that_fails_leaves_no_recipient_key_on_disk() {
     let server = MockServer::start().await;
@@ -48,7 +47,6 @@ async fn a_submission_that_fails_leaves_no_recipient_key_on_disk() {
     assert!(!PendingExport::path(dir.path(), &binding, secret_id).exists());
 }
 
-/// State bound to another endpoint cannot finish this export.
 #[tokio::test]
 async fn state_written_against_another_endpoint_is_refused() {
     let server = MockServer::start().await;

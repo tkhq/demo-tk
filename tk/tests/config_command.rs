@@ -1,3 +1,5 @@
+//! Tests for `tk config`.
+
 use std::fs;
 
 use assert_cmd::Command;

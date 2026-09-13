@@ -4,7 +4,6 @@ use crate::commands::{agent, git_sign, public_key};
 use crate::outcome::Outcome;
 use crate::output::StdCtx;
 
-/// Top-level arguments for `tk ssh`.
 #[derive(Debug, ClapArgs)]
 #[command(about = "SSH related commands.", long_about = None)]
 pub struct Args {
@@ -12,7 +11,6 @@ pub struct Args {
     command: Command,
 }
 
-/// Runs the `tk ssh` subcommand tree.
 pub async fn run(ctx: &mut StdCtx, args: Args) -> anyhow::Result<Outcome> {
     match args.command {
         Command::Agent(args) => agent::run(ctx, args).await,

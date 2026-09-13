@@ -1,3 +1,5 @@
+//! Git SSH signing helpers backed by Turnkey.
+
 use anyhow::anyhow;
 
 use crate::config::Config;

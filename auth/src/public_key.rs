@@ -1,3 +1,5 @@
+//! Public-key helpers backed by Turnkey.
+
 use crate::config::Config;
 use crate::ssh::encode_public_key_line;
 use crate::turnkey::TurnkeySigner;

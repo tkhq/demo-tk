@@ -10,7 +10,6 @@ use serde::Serialize;
 use crate::outcome::Outcome;
 use crate::output::StdCtx;
 
-/// Top-level arguments for `tk ssh agent`.
 #[derive(Debug, ClapArgs)]
 #[command(
     about = "Manage a background SSH agent over a Unix socket.",
@@ -21,7 +20,6 @@ pub struct Args {
     command: Command,
 }
 
-/// Runs the `tk ssh agent` subcommand.
 pub async fn run(_ctx: &mut StdCtx, args: Args) -> anyhow::Result<Outcome> {
     match args.command {
         Command::Start(args) => daemon::start(args).await,
@@ -83,7 +81,6 @@ enum Command {
     InternalRun(InternalRunArgs),
 }
 
-/// Arguments for starting the SSH agent.
 #[derive(Debug, ClapArgs)]
 pub struct StartArgs {
     /// Unix socket path to bind for SSH agent connections.
@@ -95,7 +92,6 @@ pub struct StartArgs {
     pub pid_file: Option<PathBuf>,
 }
 
-/// Arguments for stopping the SSH agent.
 #[derive(Debug, ClapArgs)]
 pub struct StopArgs {
     /// Unix socket path bound for SSH agent connections.
@@ -107,7 +103,6 @@ pub struct StopArgs {
     pub pid_file: Option<PathBuf>,
 }
 
-/// Arguments for checking the SSH agent status.
 #[derive(Debug, ClapArgs)]
 pub struct StatusArgs {
     /// Unix socket path bound for SSH agent connections.
@@ -119,7 +114,6 @@ pub struct StatusArgs {
     pub pid_file: Option<PathBuf>,
 }
 
-/// Arguments for the internal SSH agent entrypoint.
 #[derive(Debug, ClapArgs)]
 pub struct InternalRunArgs {
     /// Unix socket path to bind for SSH agent connections.

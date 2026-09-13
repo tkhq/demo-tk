@@ -1,3 +1,5 @@
+//! Tests for Git SSH signing.
+
 use std::process::Stdio;
 
 use predicates::prelude::*;

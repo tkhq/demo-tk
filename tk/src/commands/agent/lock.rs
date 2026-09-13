@@ -46,8 +46,6 @@ pub(super) async fn is_lock_held_by_other(path: &Path) -> anyhow::Result<bool> {
 }
 
 fn open_lock_file(path: &Path) -> anyhow::Result<File> {
-    // Open the lock file without truncating it.
-    // The file contents do not matter: `flock` just cares about the file descriptor.
     std::fs::OpenOptions::new()
         .create(true)
         .read(true)
@@ -58,7 +56,6 @@ fn open_lock_file(path: &Path) -> anyhow::Result<File> {
 }
 
 fn try_lock_exclusive(file: &File) -> anyhow::Result<bool> {
-    // Try to take the lock without blocking.
     // SAFETY: `flock` only inspects the raw file descriptor borrowed from
     // `file`.
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
@@ -67,8 +64,6 @@ fn try_lock_exclusive(file: &File) -> anyhow::Result<bool> {
     } else {
         let error = std::io::Error::last_os_error();
         match error.raw_os_error() {
-            // Another process already holds the lock, so report "not acquired"
-            // instead of treating it as a hard error.
             Some(libc::EWOULDBLOCK) => Ok(false),
             _ => Err(error).context("failed to acquire ssh-agent lock"),
         }

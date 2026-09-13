@@ -1,5 +1,3 @@
-//! `tk secret` lists, imports, and exports secrets.
-
 mod export;
 mod import;
 mod input;
@@ -140,7 +138,6 @@ impl SecretCommand {
     }
 }
 
-/// A secret command result with value-only human output.
 pub struct SecretOutput {
     record: OperationOutput,
     plain: Option<Zeroizing<String>>,

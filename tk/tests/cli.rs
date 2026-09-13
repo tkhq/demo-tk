@@ -1,3 +1,5 @@
+//! Tests for top-level CLI parsing.
+
 use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::tempdir;

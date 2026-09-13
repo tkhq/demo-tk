@@ -12,6 +12,10 @@ Default guidance for coding-agent runs in this repository.
 
 ## Coding style
 
+- Lints live in `[workspace.lints]` in the root `Cargo.toml`, and every crate
+  opts in with `[lints] workspace = true`. Add a lint there, not as a
+  crate-level `#![deny(...)]`. An `#![allow(...)]` belongs only in the one file
+  that needs the exception, with a comment saying why.
 - Prefer raw string literals (`r#"..."#`) over escaped quotation marks (`\"`) or
   escaped newlines (`\n`) for any nontrivial string or multi-line output (e.g.
   `human_message` bodies, help text, JSON fixtures, test goldens). Lay the text
@@ -35,6 +39,12 @@ Default guidance for coding-agent runs in this repository.
   so it doesn't collide with `anyhow::Result`, and `std::fmt::Write` may need
   `as _` where `std::io::Write` is also in scope. Merge imports from the same
   module where practical.
+- Write a comment — `///`, `//!`, or `//` — only where `missing_docs` demands
+  one or where the code holds an invariant a reader cannot recover from it.
+  Reaching for a comment to explain *why* means reshaping the code so the
+  reason is the code. Clap field and variant docs are `--help` text and stay.
+- A module's doc is a `//!` in its own root file, never a `///` on the `mod`.
+  Public docs are one line.
 - In doc comments and module docs, describe responsibilities, contracts, and
   relationships without naming specific source files or inventorying current
   consumers. File paths and call-site lists go stale when code moves. When a

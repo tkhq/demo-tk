@@ -185,9 +185,6 @@ fn emit<M: Serialize + Display>(ctx: &mut StdCtx, result: anyhow::Result<M>) -> 
     match result {
         Ok(message) => match ctx.shell().emit(&message) {
             Ok(()) => ExitCode::SUCCESS,
-            // The command succeeded but its output never reached the user,
-            // and it may be the only copy of a value the command consumed.
-            // A zero exit would tell a wrapper script otherwise.
             Err(emit_error) => {
                 let mut stderr = std::io::stderr();
                 let _ = writeln!(stderr, "error: failed to write CLI output: {emit_error}");

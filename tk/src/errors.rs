@@ -7,7 +7,6 @@ use turnkey_client::TurnkeyClientError;
 #[error("{0}")]
 pub struct InvalidInput(pub String);
 
-/// A persisted or API value that failed to parse.
 #[derive(Debug, thiserror::Error)]
 #[error("{summary}")]
 pub struct Malformed {
@@ -85,7 +84,6 @@ impl ActivityError {
     }
 }
 
-/// Returns recovery details for an observed activity.
 pub fn error_details(error: &anyhow::Error) -> Option<Value> {
     error
         .downcast_ref::<ActivityError>()

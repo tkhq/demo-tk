@@ -1,3 +1,5 @@
+//! Tests for the SSH agent wire protocol.
+
 use turnkey_auth::ssh::protocol;
 
 fn encode_string(bytes: &[u8], output: &mut Vec<u8>) {

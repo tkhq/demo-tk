@@ -1,3 +1,5 @@
+//! Tests for `tk agent`.
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 

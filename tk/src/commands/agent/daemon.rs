@@ -21,7 +21,6 @@ const START_TIMEOUT: Duration = Duration::from_secs(4);
 const STOP_TIMEOUT: Duration = Duration::from_secs(4);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 
-/// Starts the background SSH agent.
 pub async fn start(args: StartArgs) -> anyhow::Result<Outcome> {
     let socket = resolve_socket_path(args.socket)?;
     let pid_file = resolve_pid_file(&socket, args.pid_file)?;
@@ -73,7 +72,6 @@ pub async fn start(args: StartArgs) -> anyhow::Result<Outcome> {
     }
 }
 
-/// Stops the background SSH agent.
 pub async fn stop(args: StopArgs) -> anyhow::Result<Outcome> {
     let socket = resolve_socket_path(args.socket)?;
     let pid_file = resolve_pid_file(&socket, args.pid_file)?;
@@ -97,7 +95,6 @@ pub async fn stop(args: StopArgs) -> anyhow::Result<Outcome> {
     Ok(Outcome::AgentStopped(AgentStopped {}))
 }
 
-/// Reports the background SSH agent status.
 pub async fn status(args: StatusArgs) -> anyhow::Result<Outcome> {
     let socket = resolve_socket_path(args.socket)?;
     let pid_file = resolve_pid_file(&socket, args.pid_file)?;
@@ -128,7 +125,6 @@ pub async fn status(args: StatusArgs) -> anyhow::Result<Outcome> {
     }))
 }
 
-/// Runs the hidden in-process SSH agent daemon.
 pub async fn internal_run(args: InternalRunArgs) -> anyhow::Result<Outcome> {
     let lock_file = resolve_lock_file(&args.pid_file);
     let _lock = AgentLock::acquire(&lock_file)
@@ -145,12 +141,10 @@ pub async fn internal_run(args: InternalRunArgs) -> anyhow::Result<Outcome> {
 async fn wait_for_startup(socket: &Path, child: &mut tokio::process::Child) -> anyhow::Result<()> {
     let iterations = START_TIMEOUT.as_millis() / POLL_INTERVAL.as_millis();
     for _ in 0..iterations {
-        // First, see whether the agent is already answering on the socket
         if probe_agent_socket(socket).await.is_ok() {
             return Ok(());
         }
 
-        // If it exited before coming up, surface that immediately
         if let Some(status) = child
             .try_wait()
             .context("failed to poll background ssh-agent status")?
@@ -158,7 +152,6 @@ async fn wait_for_startup(socket: &Path, child: &mut tokio::process::Child) -> a
             return Err(anyhow!("background ssh-agent exited early: {status}"));
         }
 
-        // Otherwise, wait a moment and try again until the timeout expires
         sleep(POLL_INTERVAL).await;
     }
 
@@ -266,8 +259,6 @@ async fn path_exists(path: &Path) -> anyhow::Result<bool> {
 async fn remove_socket_if_present(path: &Path) -> anyhow::Result<()> {
     use std::os::unix::fs::FileTypeExt;
 
-    // Only unlink an existing socket file. If something else is at this path,
-    // leave it alone so we do not delete user data by mistake.
     match fs::symlink_metadata(path).await {
         Ok(metadata) if metadata.file_type().is_socket() => {
             fs::remove_file(path)
@@ -288,8 +279,6 @@ async fn probe_agent_socket(socket: &Path) -> anyhow::Result<()> {
     let mut stream = UnixStream::connect(socket)
         .await
         .with_context(|| format!("failed to connect to ssh-agent socket {}", socket.display()))?;
-    // Send the smallest useful agent request: if the daemon can parse this and
-    // return a valid agent frame, we know the socket is serving requests.
     let request = protocol::encode_agent_frame(protocol::SSH_AGENTC_REQUEST_IDENTITIES, &[]);
     stream
         .write_all(&request)
@@ -308,8 +297,6 @@ async fn probe_agent_socket(socket: &Path) -> anyhow::Result<()> {
         .await
         .context("failed to read readiness probe body")?;
 
-    // We expect either a normal identities reply or a generic failure to indicate the
-    // agent is alive; any other frame type means we connected to something unexpected.
     match body.first().copied() {
         Some(protocol::SSH_AGENT_IDENTITIES_ANSWER | protocol::SSH_AGENT_FAILURE) => Ok(()),
         Some(message_type) => Err(anyhow!(

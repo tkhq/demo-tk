@@ -1,3 +1,5 @@
+//! Tests for shared operation helpers.
+
 use assert_cmd::Command;
 use serde_json::{Value, json};
 use tempfile::TempDir;

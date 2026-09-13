@@ -1,3 +1,5 @@
+//! Git signing invocation parsing.
+
 use anyhow::{Result, anyhow};
 use std::path::PathBuf;
 
