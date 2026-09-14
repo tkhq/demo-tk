@@ -27,6 +27,7 @@ mod api_keys;
 mod gpg;
 mod identity;
 mod policies;
+mod private_keys;
 mod request;
 mod secrets;
 mod ssh;
