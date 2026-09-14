@@ -62,17 +62,18 @@ candidate records in the shape below.
 Order by payoff over blast radius: a one-file change that removes a duplicate
 outranks a five-file change that tightens a type.
 
-**3. Apply.** Spawn fixers serially, never two at once. With 20 or fewer
-candidates, one fixer per candidate. Above 20, one fixer per file, given every
-candidate in that file. A fixer receives its candidates, the merged file path
-for context, and:
+**3. Apply.** Spawn fixers in parallel when their changes touch disjoint files,
+and combine candidates that touch the same file into one fixer, in rank order.
+A fixer receives its candidates, the files it owns, the merged file path for
+context, and:
 
-> Apply these refactors completely, including every call site they touch. Preserve
-> behavior, public signatures, serialized shapes, and error text. Do not add doc
-> comments to items you did not create. Then run `cargo fmt --all`, `cargo clippy
-> --workspace --all-targets --locked -- -D warnings`, and `cargo test --workspace
-> --locked`. If a test fails, revert your change with `git checkout -- <files>`
-> and report why. Return one paragraph per candidate. Do not commit.
+> Apply these refactors completely, including every call site they touch,
+> editing only these files: <file list>. Preserve behavior, public signatures,
+> serialized shapes, and error text. Do not add doc comments to items you did
+> not create. Then run `cargo fmt --all`, `cargo clippy --workspace
+> --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked`.
+> If a test fails, revert your change with `git checkout -- <files>` and report
+> why. Return one paragraph per candidate. Do not commit.
 
 **4. Re-scan.** Go to step 1 with fresh reviewers. Stop when the ranked list is
 empty, or after round 4. After round 4, report the open candidates instead of
@@ -95,7 +96,7 @@ change: Store `Uuid` in `TurnkeySigner`; call `.to_string()` once at the wire ca
 
 - A payoff sentence with "cleaner", "clearer", "more idiomatic", or "better"
 - Applying a candidate the reviewer rated as marginal to have something to do
-- Running fixers in parallel
+- Running two fixers on the same file at once
 - Skipping `cargo test` because clippy passed
 - Stopping because the remaining candidates are small, rather than because there are none
 - Committing, amending, or pushing

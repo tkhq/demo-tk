@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     collections::BTreeMap,
+    fmt::{self, Display, Formatter},
     io::{self, ErrorKind},
+    mem,
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
@@ -20,7 +22,8 @@ use turnkey_client::generated::GetWhoamiRequest;
 use uuid::Uuid;
 
 use crate::{
-    errors::{InvalidInput, Malformed},
+    errors::{InvalidInput, Malformed, OrganizationMismatch},
+    gpg::registry::{GpgKeyEntry, GpgKeyTable, KeyName, SelectError, SigningKeyName, StoredGpgKey},
     operations::OperationOutput,
 };
 
@@ -102,6 +105,10 @@ struct Registry {
     active_profile: Option<String>,
     #[serde(default)]
     profiles: BTreeMap<String, Profile>,
+    /// `OpenPGP` keys by fingerprint, shared by every profile because a key
+    /// belongs to an organization.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    gpg_keys: BTreeMap<String, StoredGpgKey>,
 }
 
 impl Default for Registry {
@@ -110,6 +117,7 @@ impl Default for Registry {
             version: 1,
             active_profile: None,
             profiles: BTreeMap::new(),
+            gpg_keys: BTreeMap::new(),
         }
     }
 }
@@ -122,9 +130,34 @@ struct Profile {
     api_key_file: PathBuf,
 }
 
+#[derive(Debug)]
 pub enum CredentialSource {
     Environment,
     Profile(String),
+}
+
+impl Display for CredentialSource {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Environment => "environment",
+            Self::Profile(_) => "profile",
+        })
+    }
+}
+
+#[derive(Debug)]
+pub enum SelectedIdentity {
+    OrganizationIdFlag,
+    Credential(CredentialSource),
+}
+
+impl Display for SelectedIdentity {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OrganizationIdFlag => f.write_str("--organization-id"),
+            Self::Credential(source) => Display::fmt(source, f),
+        }
+    }
 }
 
 /// An HTTP(S) origin, optionally with a path prefix, that carries no
@@ -442,63 +475,144 @@ const ENV_BUNDLE: [&str; 3] = [
 ];
 
 pub async fn resolve(options: &AuthOptions) -> Result<ResolvedAuth> {
-    if options.profile.is_none() {
-        let bundle = ENV_BUNDLE.map(std::env::var_os);
-        if bundle.iter().any(Option::is_some) {
-            let [org, public, private] = bundle;
-            let (Some(org), Some(public), Some(private)) = (org, public, private) else {
-                return Err(InvalidInput(
-                    "partial credential environment: organization ID, public key, and private key are all required".into(),
-                )
-                .into());
-            };
-            let [org, public, private] = [org, public, private].map(|value| {
-                // The Err payload is the credential bytes, which must not enter the error chain.
-                #[allow(clippy::map_err_ignore)]
-                value.into_string().map_err(|_| {
-                    InvalidInput("credential environment value is not valid Unicode".into())
-                })
-            });
-            let (org, public, private) = (org?, public?, private?);
-            if org.is_empty() || public.is_empty() || private.is_empty() {
-                return Err(
-                    InvalidInput("credential environment fields must not be empty".into()).into(),
-                );
-            }
-            let org = match options.organization_id {
-                Some(org) => org,
-                None => Uuid::parse_str(&org).map_err(|error| {
-                    Malformed::new("invalid environment organization ID", error)
-                })?,
-            };
-            return Ok(ResolvedAuth {
-                org_id: org,
-                api_base_url: endpoint(options, DEFAULT_URL.into())?,
-                stamper: parse_key(&private, &public)?,
-                source: CredentialSource::Environment,
-            });
-        }
+    if let Some(auth) = resolve_environment(options)? {
+        return Ok(auth);
     }
     let path = registry_path(options)?;
     let registry = load(&path).await?;
-    let Some(name) = options
+    resolve_in_registry(options, &path, registry).await
+}
+
+async fn resolve_in_registry(
+    options: &AuthOptions,
+    path: &Path,
+    mut registry: Registry,
+) -> Result<ResolvedAuth> {
+    let name = options
         .profile
-        .as_ref()
-        .or(registry.active_profile.as_ref())
-    else {
-        return Err(InvalidInput("no selected identity; use --profile or tk login".into()).into());
-    };
-    let profile = registry.profiles.get(name).ok_or_else(|| {
+        .clone()
+        .or(registry.active_profile)
+        .ok_or_else(|| InvalidInput("no selected identity; use --profile or tk login".into()))?;
+    let profile = registry.profiles.remove(&name).ok_or_else(|| {
         InvalidInput(format!(
             "profile {name} does not exist in {}",
             path.display()
         ))
     })?;
+    resolve_profile(options, name, profile).await
+}
+
+async fn resolve_for_organization(
+    options: &AuthOptions,
+    organization_id: Uuid,
+    path: &Path,
+    registry: Registry,
+) -> Result<ResolvedAuth> {
+    let mismatch = |actual, identity| OrganizationMismatch {
+        expected: organization_id,
+        actual,
+        identity,
+    };
+    if let Some(actual) = options.organization_id
+        && actual != organization_id
+    {
+        return Err(mismatch(actual, SelectedIdentity::OrganizationIdFlag).into());
+    }
+    let checked = |auth: ResolvedAuth| -> Result<ResolvedAuth> {
+        if auth.org_id != organization_id {
+            return Err(mismatch(auth.org_id, SelectedIdentity::Credential(auth.source)).into());
+        }
+        Ok(auth)
+    };
+    if options.profile.is_some() {
+        return checked(resolve_in_registry(options, path, registry).await?);
+    }
+    if let Some(auth) = resolve_environment(options)? {
+        return checked(auth);
+    }
+    let active_profile = registry.active_profile;
+    let mut candidates: Vec<(String, Profile)> = registry
+        .profiles
+        .into_iter()
+        .filter(|(_, profile)| profile.organization_id == organization_id)
+        .collect();
+    let chosen = match candidates.len() {
+        0 => {
+            return Err(InvalidInput(format!(
+                "no profile holds a credential for organization {organization_id}; run tk login <name> --organization-id {organization_id} --api-key-file <path>"
+            ))
+            .into());
+        }
+        1 => 0,
+        _ => candidates
+            .iter()
+            .position(|(name, _)| Some(name) == active_profile.as_ref())
+            .ok_or_else(|| {
+                let names: Vec<&str> = candidates.iter().map(|(name, _)| name.as_str()).collect();
+                InvalidInput(format!(
+                    "profiles {} all hold a credential for organization {organization_id}; select one with --profile, TK_PROFILE, or tk profile use",
+                    names.join(", ")
+                ))
+            })?,
+    };
+    let (name, profile) = candidates.swap_remove(chosen);
+    resolve_profile(options, name, profile).await
+}
+
+fn resolve_environment(options: &AuthOptions) -> Result<Option<ResolvedAuth>> {
+    if options.profile.is_some() {
+        return Ok(None);
+    }
+    let bundle = ENV_BUNDLE.map(std::env::var_os);
+    if bundle.iter().all(Option::is_none) {
+        return Ok(None);
+    }
+    let [org, public, private] = bundle;
+    let (Some(org), Some(public), Some(private)) = (org, public, private) else {
+        return Err(InvalidInput(
+            "partial credential environment: organization ID, public key, and private key are all required".into(),
+        )
+        .into());
+    };
+    let [org, public, private] = [org, public, private].map(|value| {
+        // The Err payload is the credential bytes, which must not enter the error chain.
+        #[allow(clippy::map_err_ignore)]
+        value
+            .into_string()
+            .map_err(|_| InvalidInput("credential environment value is not valid Unicode".into()))
+    });
+    let (org, public, private) = (org?, public?, private?);
+    if org.is_empty() || public.is_empty() || private.is_empty() {
+        return Err(InvalidInput("credential environment fields must not be empty".into()).into());
+    }
+    let org = match options.organization_id {
+        Some(org) => org,
+        None => Uuid::parse_str(&org)
+            .map_err(|error| Malformed::new("invalid environment organization ID", error))?,
+    };
+    Ok(Some(ResolvedAuth {
+        org_id: org,
+        api_base_url: endpoint(options, DEFAULT_URL.into())?,
+        stamper: parse_key(&private, &public)?,
+        source: CredentialSource::Environment,
+    }))
+}
+
+async fn resolve_profile(
+    options: &AuthOptions,
+    name: String,
+    profile: Profile,
+) -> Result<ResolvedAuth> {
+    let Profile {
+        organization_id,
+        api_base_url,
+        api_key_file,
+    } = profile;
     Ok(ResolvedAuth {
-        org_id: options.organization_id.unwrap_or(profile.organization_id),
-        api_base_url: endpoint(options, profile.api_base_url.clone())?,
-        stamper: read_key(&profile.api_key_file).await?,
-        source: CredentialSource::Profile(name.clone()),
+        org_id: options.organization_id.unwrap_or(organization_id),
+        api_base_url: endpoint(options, api_base_url)?,
+        stamper: read_key(&api_key_file).await?,
+        source: CredentialSource::Profile(name),
     })
 }
 
@@ -506,13 +620,70 @@ fn profile_missing(name: &str) -> InvalidInput {
     InvalidInput(format!("profile {name} does not exist"))
 }
 
+pub async fn load_gpg_keys(options: &AuthOptions) -> Result<GpgKeyTable> {
+    let path = registry_path(options)?;
+    let registry = load(&path).await?;
+    GpgKeyTable::from_stored(registry.gpg_keys, &path)
+}
+
+pub async fn open_gpg_key(
+    options: &AuthOptions,
+    key: Option<KeyName>,
+) -> Result<Result<(GpgKeyEntry, TurnkeyClient<TurnkeyP256ApiKey>), SelectError>> {
+    let path = registry_path(options)?;
+    let mut registry = load(&path).await?;
+    let table = GpgKeyTable::from_stored(mem::take(&mut registry.gpg_keys), &path)?;
+    let entry = match table.select(key) {
+        Ok(entry) => entry,
+        Err(error) => return Ok(Err(error)),
+    };
+    let auth = resolve_for_organization(options, entry.organization_id, &path, registry)
+        .await
+        .with_context(|| {
+            format!(
+                "select a credential for OpenPGP key {}",
+                entry.fingerprint()
+            )
+        })?;
+    let client = build_turnkey_client(auth.stamper, &auth.api_base_url)?;
+    Ok(Ok((entry, client)))
+}
+
+pub async fn register_gpg_key(options: &AuthOptions, entry: GpgKeyEntry) -> Result<()> {
+    let path = registry_path(options)?;
+    let _lock = registry_lock(&path).await?;
+    let mut registry = load(&path).await?;
+    let mut table = GpgKeyTable::from_stored(registry.gpg_keys, &path)?;
+    table.insert(entry);
+    registry.gpg_keys = table.into_stored();
+    save(&path, &registry).await
+}
+
+pub async fn remove_gpg_key(
+    options: &AuthOptions,
+    name: SigningKeyName,
+) -> Result<Result<GpgKeyEntry, SelectError>> {
+    let path = registry_path(options)?;
+    let _lock = registry_lock(&path).await?;
+    let mut registry = load(&path).await?;
+    let mut table = GpgKeyTable::from_stored(registry.gpg_keys, &path)?;
+    let removed = match table.remove(name) {
+        Ok(entry) => entry,
+        Err(error) => return Ok(Err(error)),
+    };
+    registry.gpg_keys = table.into_stored();
+    save(&path, &registry).await?;
+    Ok(Ok(removed))
+}
+
 pub async fn run_auth(command: AuthCommand, options: &AuthOptions) -> Result<OperationOutput> {
     match command {
         AuthCommand::Status => {
             let auth = resolve(options).await?;
-            let (source, profile) = match &auth.source {
-                CredentialSource::Environment => ("environment", None),
-                CredentialSource::Profile(name) => ("profile", Some(name)),
+            let source = auth.source.to_string();
+            let profile = match &auth.source {
+                CredentialSource::Environment => None,
+                CredentialSource::Profile(name) => Some(name),
             };
             Ok(OperationOutput::result(
                 "auth.status",
