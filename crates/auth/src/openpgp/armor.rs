@@ -1,6 +1,6 @@
 //! ASCII armor for `OpenPGP` objects (RFC 4880 section 6).
 
-use std::fmt::{self, Display, Formatter, Write as _};
+use std::fmt::{self, Display, Formatter};
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 
@@ -10,7 +10,6 @@ const CRC24_POLY: u32 = 0x0086_4cfb;
 const ARMOR_LINE_LENGTH: usize = 64;
 
 /// The armor header label (RFC 4880 6.2).
-#[derive(Clone, Copy)]
 pub(crate) enum BlockType {
     PublicKeyBlock,
     Signature,
@@ -42,25 +41,24 @@ fn crc24(data: &[u8]) -> u32 {
 
 /// Lines are `\n` separated and the result ends with a newline.
 pub(crate) fn armor(block_type: BlockType, data: &[u8]) -> String {
-    let mut out = format!("-----BEGIN PGP {block_type}-----");
-    out.push('\n');
-    out.push('\n');
-
     let encoded = STANDARD.encode(data);
+    let mut body = String::new();
     let mut rest = encoded.as_str();
     while !rest.is_empty() {
         let (line, tail) = rest.split_at(rest.len().min(ARMOR_LINE_LENGTH));
-        out.push_str(line);
-        out.push('\n');
+        body.push_str(line);
+        body.push('\n');
         rest = tail;
     }
 
     let crc = crc24(data);
-    out.push('=');
-    out.push_str(&STANDARD.encode([(crc >> 16) as u8, (crc >> 8) as u8, crc as u8]));
-    out.push('\n');
-    // Writing to a String cannot fail.
-    let _ = write!(out, "-----END PGP {block_type}-----");
-    out.push('\n');
-    out
+    let checksum = STANDARD.encode([(crc >> 16) as u8, (crc >> 8) as u8, crc as u8]);
+
+    format!(
+        r#"-----BEGIN PGP {block_type}-----
+
+{body}={checksum}
+-----END PGP {block_type}-----
+"#
+    )
 }

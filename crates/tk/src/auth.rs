@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
     collections::BTreeMap,
+    fmt::{self, Display, Formatter},
     io::{self, ErrorKind},
+    mem,
     path::{Path, PathBuf},
     time::{Duration, SystemTime},
 };
@@ -21,7 +23,7 @@ use uuid::Uuid;
 
 use crate::{
     errors::{InvalidInput, Malformed, OrganizationMismatch},
-    gpg::registry::{GpgKeyEntry, GpgKeyTable, SelectError, SigningKeyName, StoredGpgKey},
+    gpg::registry::{GpgKeyEntry, GpgKeyTable, KeyName, SelectError, SigningKeyName, StoredGpgKey},
     operations::OperationOutput,
 };
 
@@ -128,9 +130,34 @@ struct Profile {
     api_key_file: PathBuf,
 }
 
+#[derive(Debug)]
 pub enum CredentialSource {
     Environment,
     Profile(String),
+}
+
+impl Display for CredentialSource {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Environment => "environment",
+            Self::Profile(_) => "profile",
+        })
+    }
+}
+
+#[derive(Debug)]
+pub enum SelectedIdentity {
+    OrganizationIdFlag,
+    Credential(CredentialSource),
+}
+
+impl Display for SelectedIdentity {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OrganizationIdFlag => f.write_str("--organization-id"),
+            Self::Credential(source) => Display::fmt(source, f),
+        }
+    }
 }
 
 /// An HTTP(S) origin, optionally with a path prefix, that carries no
@@ -453,12 +480,20 @@ pub async fn resolve(options: &AuthOptions) -> Result<ResolvedAuth> {
     }
     let path = registry_path(options)?;
     let registry = load(&path).await?;
+    resolve_in_registry(options, &path, registry).await
+}
+
+async fn resolve_in_registry(
+    options: &AuthOptions,
+    path: &Path,
+    mut registry: Registry,
+) -> Result<ResolvedAuth> {
     let name = options
         .profile
         .clone()
-        .or(registry.active_profile.clone())
+        .or(registry.active_profile)
         .ok_or_else(|| InvalidInput("no selected identity; use --profile or tk login".into()))?;
-    let profile = registry.profiles.get(&name).ok_or_else(|| {
+    let profile = registry.profiles.remove(&name).ok_or_else(|| {
         InvalidInput(format!(
             "profile {name} does not exist in {}",
             path.display()
@@ -467,14 +502,11 @@ pub async fn resolve(options: &AuthOptions) -> Result<ResolvedAuth> {
     resolve_profile(options, name, profile).await
 }
 
-/// Credentials for `organization_id`, the owner of a key about to be used.
-/// An explicit identity (the environment bundle, `--profile`, `TK_PROFILE`,
-/// or `--organization-id`) must belong to that organization. Without one,
-/// the registry's profiles for the organization are searched: the only one,
-/// or the active profile when several qualify.
-pub async fn resolve_for_organization(
+async fn resolve_for_organization(
     options: &AuthOptions,
     organization_id: Uuid,
+    path: &Path,
+    registry: Registry,
 ) -> Result<ResolvedAuth> {
     let mismatch = |actual, identity| OrganizationMismatch {
         expected: organization_id,
@@ -484,56 +516,49 @@ pub async fn resolve_for_organization(
     if let Some(actual) = options.organization_id
         && actual != organization_id
     {
-        return Err(mismatch(actual, "--organization-id").into());
+        return Err(mismatch(actual, SelectedIdentity::OrganizationIdFlag).into());
     }
-    // An explicit profile or the environment bundle resolves as any other
-    // command does and is then checked against the organization.
-    let explicit = match options.profile {
-        Some(_) => Some(resolve(options).await?),
-        None => resolve_environment(options)?,
-    };
-    if let Some(auth) = explicit {
+    let checked = |auth: ResolvedAuth| -> Result<ResolvedAuth> {
         if auth.org_id != organization_id {
-            let identity = match auth.source {
-                CredentialSource::Environment => "environment",
-                CredentialSource::Profile(_) => "profile",
-            };
-            return Err(mismatch(auth.org_id, identity).into());
+            return Err(mismatch(auth.org_id, SelectedIdentity::Credential(auth.source)).into());
         }
-        return Ok(auth);
+        Ok(auth)
+    };
+    if options.profile.is_some() {
+        return checked(resolve_in_registry(options, path, registry).await?);
     }
-    let path = registry_path(options)?;
-    let registry = load(&path).await?;
-    let candidates: Vec<(&String, &Profile)> = registry
+    if let Some(auth) = resolve_environment(options)? {
+        return checked(auth);
+    }
+    let active_profile = registry.active_profile;
+    let mut candidates: Vec<(String, Profile)> = registry
         .profiles
-        .iter()
+        .into_iter()
         .filter(|(_, profile)| profile.organization_id == organization_id)
         .collect();
-    let (name, profile) = match candidates.as_slice() {
-        [] => {
+    let chosen = match candidates.len() {
+        0 => {
             return Err(InvalidInput(format!(
                 "no profile holds a credential for organization {organization_id}; run tk login <name> --organization-id {organization_id} --api-key-file <path>"
             ))
             .into());
         }
-        [one] => *one,
-        several => several
+        1 => 0,
+        _ => candidates
             .iter()
-            .copied()
-            .find(|(name, _)| Some(*name) == registry.active_profile.as_ref())
+            .position(|(name, _)| Some(name) == active_profile.as_ref())
             .ok_or_else(|| {
-                let names: Vec<&str> = several.iter().map(|(name, _)| name.as_str()).collect();
+                let names: Vec<&str> = candidates.iter().map(|(name, _)| name.as_str()).collect();
                 InvalidInput(format!(
                     "profiles {} all hold a credential for organization {organization_id}; select one with --profile, TK_PROFILE, or tk profile use",
                     names.join(", ")
                 ))
             })?,
     };
-    resolve_profile(options, name.clone(), profile).await
+    let (name, profile) = candidates.swap_remove(chosen);
+    resolve_profile(options, name, profile).await
 }
 
-/// The `TURNKEY_*` bundle, which an explicit `--profile` disables. `None`
-/// when no bundle variable is set.
 fn resolve_environment(options: &AuthOptions) -> Result<Option<ResolvedAuth>> {
     if options.profile.is_some() {
         return Ok(None);
@@ -576,13 +601,18 @@ fn resolve_environment(options: &AuthOptions) -> Result<Option<ResolvedAuth>> {
 async fn resolve_profile(
     options: &AuthOptions,
     name: String,
-    profile: &Profile,
+    profile: Profile,
 ) -> Result<ResolvedAuth> {
+    let Profile {
+        organization_id,
+        api_base_url,
+        api_key_file,
+    } = profile;
     Ok(ResolvedAuth {
-        org_id: options.organization_id.unwrap_or(profile.organization_id),
-        api_base_url: endpoint(options, profile.api_base_url.clone())?,
-        stamper: read_key(&profile.api_key_file).await?,
-        source: CredentialSource::Profile(name.clone()),
+        org_id: options.organization_id.unwrap_or(organization_id),
+        api_base_url: endpoint(options, api_base_url)?,
+        stamper: read_key(&api_key_file).await?,
+        source: CredentialSource::Profile(name),
     })
 }
 
@@ -590,11 +620,33 @@ fn profile_missing(name: &str) -> InvalidInput {
     InvalidInput(format!("profile {name} does not exist"))
 }
 
-/// Reading the table needs no credential.
 pub async fn load_gpg_keys(options: &AuthOptions) -> Result<GpgKeyTable> {
     let path = registry_path(options)?;
     let registry = load(&path).await?;
     GpgKeyTable::from_stored(registry.gpg_keys, &path)
+}
+
+pub async fn open_gpg_key(
+    options: &AuthOptions,
+    key: Option<KeyName>,
+) -> Result<Result<(GpgKeyEntry, TurnkeyClient<TurnkeyP256ApiKey>), SelectError>> {
+    let path = registry_path(options)?;
+    let mut registry = load(&path).await?;
+    let table = GpgKeyTable::from_stored(mem::take(&mut registry.gpg_keys), &path)?;
+    let entry = match table.select(key) {
+        Ok(entry) => entry,
+        Err(error) => return Ok(Err(error)),
+    };
+    let auth = resolve_for_organization(options, entry.organization_id, &path, registry)
+        .await
+        .with_context(|| {
+            format!(
+                "select a credential for OpenPGP key {}",
+                entry.fingerprint()
+            )
+        })?;
+    let client = build_turnkey_client(auth.stamper, &auth.api_base_url)?;
+    Ok(Ok((entry, client)))
 }
 
 pub async fn register_gpg_key(options: &AuthOptions, entry: GpgKeyEntry) -> Result<()> {
@@ -628,9 +680,10 @@ pub async fn run_auth(command: AuthCommand, options: &AuthOptions) -> Result<Ope
     match command {
         AuthCommand::Status => {
             let auth = resolve(options).await?;
-            let (source, profile) = match &auth.source {
-                CredentialSource::Environment => ("environment", None),
-                CredentialSource::Profile(name) => ("profile", Some(name)),
+            let source = auth.source.to_string();
+            let profile = match &auth.source {
+                CredentialSource::Environment => None,
+                CredentialSource::Profile(name) => Some(name),
             };
             Ok(OperationOutput::result(
                 "auth.status",

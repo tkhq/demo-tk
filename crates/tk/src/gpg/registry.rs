@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
+use std::mem;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -21,7 +22,7 @@ const LONG_KEY_ID_CHARS: usize = 16;
 /// fingerprint, at least a long key ID. `GnuPG`'s grouping into fours and
 /// trailing "!" are normalized away.
 #[derive(Clone, Debug)]
-#[cfg_attr(test, derive(PartialEq, Eq))]
+#[cfg_attr(test, derive(PartialEq))]
 pub struct SigningKeyName(String);
 
 #[derive(Debug, thiserror::Error)]
@@ -52,7 +53,7 @@ impl Display for SigningKeyName {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub enum KeyName {
     Suffix(SigningKeyName),
     UserId(String),
@@ -91,7 +92,7 @@ impl Display for KeyName {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub enum Scope {
     Registry,
     Wallet(Uuid),
@@ -106,7 +107,6 @@ impl Display for Scope {
     }
 }
 
-/// States the fact alone; the entry point adds the remediation.
 #[derive(Debug, thiserror::Error)]
 pub enum SelectError {
     #[error("{scope} holds no OpenPGP keys")]
@@ -125,28 +125,41 @@ pub fn select<T>(
     key: impl Fn(&T) -> &OpenPgpKey,
     requested: Option<KeyName>,
 ) -> Result<T, SelectError> {
-    let keys: Vec<T> = keys.into_iter().collect();
+    select_split(scope, keys, key, requested).0
+}
+
+fn select_split<T>(
+    scope: Scope,
+    keys: impl IntoIterator<Item = T>,
+    key: impl Fn(&T) -> &OpenPgpKey,
+    requested: Option<KeyName>,
+) -> (Result<T, SelectError>, Vec<T>) {
+    let mut keys: Vec<T> = keys.into_iter().collect();
     let count = keys.len();
     if count == 0 {
-        return Err(SelectError::Empty { scope });
+        return (Err(SelectError::Empty { scope }), keys);
     }
     let Some(requested) = requested else {
         return match <[T; 1]>::try_from(keys) {
-            Ok([only]) => Ok(only),
-            Err(_) => Err(SelectError::Unnamed { scope, count }),
+            Ok([only]) => (Ok(only), Vec::new()),
+            Err(keys) => (Err(SelectError::Unnamed { scope, count }), keys),
         };
     };
-    let mut matching = keys.into_iter().filter(|item| requested.matches(key(item)));
-    let Some(found) = matching.next() else {
-        return Err(SelectError::NoMatch { scope, requested });
+    let mut matching = keys
+        .iter()
+        .enumerate()
+        .filter(|(_, item)| requested.matches(key(item)))
+        .map(|(index, _)| index);
+    let Some(index) = matching.next() else {
+        return (Err(SelectError::NoMatch { scope, requested }), keys);
     };
     if matching.next().is_some() {
-        return Err(SelectError::Ambiguous { scope, requested });
+        return (Err(SelectError::Ambiguous { scope, requested }), keys);
     }
-    Ok(found)
+    let found = keys.remove(index);
+    (Ok(found), keys)
 }
 
-#[derive(Clone)]
 pub struct GpgKeyEntry {
     pub organization_id: Uuid,
     pub wallet_id: Uuid,
@@ -197,12 +210,9 @@ impl From<GpgKeyEntry> for StoredGpgKey {
     }
 }
 
-#[derive(Default)]
 pub struct GpgKeyTable(BTreeMap<Fingerprint, GpgKeyEntry>);
 
 impl GpgKeyTable {
-    /// Rejects an entry whose key does not produce its fingerprint; `path`
-    /// names the file in the error.
     pub fn from_stored(
         stored: BTreeMap<String, StoredGpgKey>,
         path: &Path,
@@ -210,13 +220,13 @@ impl GpgKeyTable {
         let mut table = BTreeMap::new();
         for (key, entry) in stored {
             let malformed = |reason: &str| {
-                InvalidInput(format!(
+                format!(
                     "invalid gpg_keys entry {key} in {}: {reason}",
                     path.display()
-                ))
+                )
             };
             let fingerprint: Fingerprint = key.parse().map_err(|error| {
-                Malformed::new(malformed("the key is not a fingerprint").0, error)
+                Malformed::new(malformed("the key is not a fingerprint"), error)
             })?;
             let StoredGpgKey {
                 organization_id,
@@ -228,12 +238,12 @@ impl GpgKeyTable {
             } = entry;
             let point = parse_point_hex(&public_key).map_err(|error| {
                 Malformed::new(
-                    malformed("public_key is not an uncompressed P-256 point").0,
+                    malformed("public_key is not an uncompressed P-256 point"),
                     error,
                 )
             })?;
             let user_id = UserId::parse(user_id).map_err(|error| {
-                Malformed::new(malformed("user_id is not an OpenPGP user ID").0, error)
+                Malformed::new(malformed("user_id is not an OpenPGP user ID"), error)
             })?;
             let entry = GpgKeyEntry {
                 organization_id,
@@ -245,11 +255,16 @@ impl GpgKeyTable {
                 },
             };
             if entry.fingerprint() != fingerprint {
+                return Err(InvalidInput(malformed(
+                    "public_key and created do not produce this fingerprint",
+                ))
+                .into());
+            }
+            if table.insert(fingerprint, entry).is_some() {
                 return Err(
-                    malformed("public_key and created do not produce this fingerprint").into(),
+                    InvalidInput(malformed("duplicates the fingerprint of another entry")).into(),
                 );
             }
-            table.insert(fingerprint, entry);
         }
         Ok(Self(table))
     }
@@ -279,18 +294,14 @@ impl GpgKeyTable {
     }
 
     pub fn remove(&mut self, name: SigningKeyName) -> Result<GpgKeyEntry, SelectError> {
-        let requested: KeyName = name.into();
-        let (fingerprint, _) = select(
+        let (selected, kept) = select_split(
             Scope::Registry,
-            self.0.iter(),
+            mem::take(&mut self.0),
             |(_, entry)| &entry.key,
-            Some(requested.clone()),
-        )?;
-        let fingerprint = *fingerprint;
-        self.0.remove(&fingerprint).ok_or(SelectError::NoMatch {
-            scope: Scope::Registry,
-            requested,
-        })
+            Some(name.into()),
+        );
+        self.0 = kept.into_iter().collect();
+        selected.map(|(_, entry)| entry)
     }
 }
 

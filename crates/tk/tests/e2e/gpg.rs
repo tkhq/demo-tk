@@ -1,9 +1,13 @@
 use std::env;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{self, Stdio};
+use std::str;
 
 use assert_cmd::Command;
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use crate::run::{Run, result};
 
@@ -64,7 +68,7 @@ fn import_into_gpg(run: &Run, gpg: &Path, armored: &str) -> PathBuf {
     fs::create_dir(&gnupghome).unwrap();
     let key_file = run.home.path().join("key.asc");
     fs::write(&key_file, armored).unwrap();
-    let imported = std::process::Command::new(gpg)
+    let imported = process::Command::new(gpg)
         .env("GNUPGHOME", &gnupghome)
         .args(["--batch", "--import"])
         .arg(&key_file)
@@ -101,7 +105,6 @@ fn create_wallet(run: &Run) -> String {
         .to_string()
 }
 
-/// The wallet's accounts, sorted by path.
 fn wallet_accounts(run: &Run, wallet: &str) -> Vec<Value> {
     let accounts = run.ok(run
         .admin()
@@ -128,7 +131,6 @@ fn gpg_keys_create_list_export_sign_remove_and_add() {
     assert_eq!(second["keyIndex"], 2);
     let second_fingerprint = second["fingerprint"].as_str().unwrap().to_string();
 
-    // One key is one wallet account, at the signing path of its index.
     let accounts = wallet_accounts(&run, &wallet);
     let paths: Vec<&str> = accounts
         .iter()
@@ -160,7 +162,6 @@ fn gpg_keys_create_list_export_sign_remove_and_add() {
         })
     );
 
-    // Both creates registered their keys. The registry lists by fingerprint.
     let mut expected = vec![
         registered(&run, &wallet, &created, account_id),
         registered(&run, &wallet, &second, second_account_id),
@@ -172,7 +173,6 @@ fn gpg_keys_create_list_export_sign_remove_and_add() {
         json!({"reason": "gpg_keys_registered", "keys": expected})
     );
 
-    // Two registered keys and no --key is ambiguous, before any request.
     let ambiguous = run.err(run.admin_offline().args(["gpg", "keys", "export"]));
     assert_eq!(ambiguous["code"], "invalid_input");
 
@@ -204,8 +204,6 @@ fn gpg_keys_create_list_export_sign_remove_and_add() {
     let signature = signed["armored"].as_str().unwrap();
     assert!(signature.starts_with("-----BEGIN PGP SIGNATURE-----\n"));
 
-    // Forgetting a key leaves its account in the wallet and makes the other
-    // key the only one, so sign needs no --key.
     let removed = run.ok(run
         .admin_offline()
         .args(["gpg", "keys", "remove", &second_fingerprint]));
@@ -224,7 +222,6 @@ fn gpg_keys_create_list_export_sign_remove_and_add() {
     assert_eq!(unnamed["fingerprint"], fingerprint);
     assert_eq!(wallet_accounts(&run, &wallet).len(), 3);
 
-    // An existing key is registered again from its wallet.
     let added = run.ok(run.admin().args([
         "gpg",
         "keys",
@@ -247,7 +244,10 @@ fn gpg_keys_create_list_export_sign_remove_and_add() {
         })
     );
     let both = run.ok(run.admin_offline().args(["gpg", "keys", "list"]));
-    assert_eq!(both["keys"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        both,
+        json!({"reason": "gpg_keys_registered", "keys": expected})
+    );
 
     let Some(gpg) = locate("gpg") else {
         eprintln!("skipping GnuPG verification: gpg is not on PATH");
@@ -256,7 +256,7 @@ fn gpg_keys_create_list_export_sign_remove_and_add() {
     let gnupghome = import_into_gpg(&run, &gpg, armored);
     let signature_file = run.home.path().join("payload.txt.asc");
     fs::write(&signature_file, signature).unwrap();
-    let verified = std::process::Command::new(&gpg)
+    let verified = process::Command::new(&gpg)
         .env("GNUPGHOME", &gnupghome)
         .args(["--batch", "--verify"])
         .arg(&signature_file)
@@ -266,7 +266,6 @@ fn gpg_keys_create_list_export_sign_remove_and_add() {
     assert!(verified.success(), "GnuPG rejected the tk signature");
 }
 
-/// With no explicit identity, the key's organization selects the profile.
 #[test]
 #[ignore]
 fn gpg_key_organization_selects_the_profile() {
@@ -288,12 +287,9 @@ fn gpg_key_organization_selects_the_profile() {
         .arg(&key_file));
     assert_eq!(login["command"], "auth.login");
 
-    // Created through the active profile, so the entry carries its org.
     let created = create_key_with(&run, &mut run.cli(), &wallet, USER_ID);
     let fingerprint = created["fingerprint"].as_str().unwrap().to_string();
 
-    // With no active profile and no bundle, an ordinary command has no
-    // identity, but the registered key still finds the profile for its org.
     let logout = run.ok(run.cli().args(["auth", "logout"]));
     assert_eq!(logout["command"], "auth.logout");
     let no_identity = run.err(run.cli().args(["auth", "whoami"]));
@@ -305,16 +301,9 @@ fn gpg_key_organization_selects_the_profile() {
     assert_eq!(signed["reason"], "gpg_signature_created");
     assert_eq!(signed["fingerprint"], fingerprint);
 
-    // An explicit organization that is not the key's is rejected before any
-    // request.
     let mismatched = run.err(
         run.cli()
-            .args([
-                "--organization-id",
-                &uuid::Uuid::nil().to_string(),
-                "gpg",
-                "sign",
-            ])
+            .args(["--organization-id", &Uuid::nil().to_string(), "gpg", "sign"])
             .arg(&payload),
     );
     assert_eq!(mismatched["code"], "invalid_input");
@@ -334,9 +323,7 @@ fn gpg_shim_signs_and_git_verifies() {
     let exported = run.ok(run.admin().args(["gpg", "keys", "export"]));
     let gnupghome = import_into_gpg(&run, &gpg, exported["armored"].as_str().unwrap());
 
-    // The shim receives no tk flags, so the identity travels in the
-    // environment and the key in the registry the create wrote under HOME.
-    let shim_env = |cmd: &mut std::process::Command| {
+    let shim_env = |cmd: &mut process::Command| {
         // Mirror the runner's environment exactly: its removals matter too,
         // since a host RUST_LOG or TK_PROFILE would reach the shim otherwise.
         for (name, value) in run.admin().get_envs() {
@@ -355,22 +342,19 @@ fn gpg_shim_signs_and_git_verifies() {
             .env("GNUPGHOME", &gnupghome);
     };
 
-    let mut shim = std::process::Command::new(env!("CARGO_BIN_EXE_tk"));
+    let mut shim = process::Command::new(env!("CARGO_BIN_EXE_tk"));
     shim_env(&mut shim);
     let output = shim
         .args(["--status-fd=2", "-bsau", &fingerprint])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
         .spawn()
         .and_then(|mut child| {
-            use std::io::Write;
             child.stdin.take().unwrap().write_all(b"hello from git\n")?;
             child.wait_with_output()
         })
         .unwrap();
-    // Run::output makes this check for every command it spawns. This test
-    // spawns the binary itself, so it makes the check itself.
     for (stream, raw) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
         assert_eq!(
             run.redact(raw),
@@ -381,10 +365,7 @@ fn gpg_shim_signs_and_git_verifies() {
     assert!(output.status.success(), "{}", run.redact(&output.stderr));
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.starts_with("-----BEGIN PGP SIGNATURE-----\n"));
-    let status_lines: Vec<&str> = std::str::from_utf8(&output.stderr)
-        .unwrap()
-        .lines()
-        .collect();
+    let status_lines: Vec<&str> = str::from_utf8(&output.stderr).unwrap().lines().collect();
     assert_eq!(status_lines.len(), 2);
     assert_eq!(status_lines[0], "[GNUPG:] BEGIN_SIGNING");
     let sig_created = status_lines[1];
@@ -394,7 +375,7 @@ fn gpg_shim_signs_and_git_verifies() {
     let repo = run.home.path().join("repo");
     fs::create_dir(&repo).unwrap();
     let git = |config: &[&str], args: &[&str]| {
-        let mut cmd = std::process::Command::new(&git);
+        let mut cmd = process::Command::new(&git);
         shim_env(&mut cmd);
         cmd.current_dir(&repo)
             .args([
@@ -449,8 +430,6 @@ fn gpg_shim_signs_and_git_verifies() {
     );
     git_ok(&[], &["verify-commit", "HEAD"]);
 
-    // A key git names that is not registered fails the commit rather than
-    // signing with another key.
     let other = "FEDCBA9876543210FEDCBA9876543210FEDCBA98";
     let refused = git(
         &[&format!("user.signingkey={other}")],

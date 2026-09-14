@@ -72,19 +72,20 @@ and line are duplicates regardless of rule; keep the one whose rule is an
 collapse into one record listing every line. Order by rule violations first,
 then dead code, then slop.
 
-**4. Fix.** Spawn fixer agents serially, never two at once. With 20 or fewer
-findings, one fixer per finding. Above 20, one fixer per file, given every
-finding in that file. A fixer receives its findings, the merged file path for
-context, the rule text each violates, and this instruction:
+**4. Fix.** Spawn fixers in parallel when their fixes touch disjoint files, and
+combine findings that touch the same file into one fixer. A fixer receives its
+findings, the files it owns, the merged file path for context, the rule text
+each violates, and this instruction:
 
 > Fix these findings completely. Make whatever refactor the fix genuinely needs,
-> including changes outside the cited lines. Do not add doc comments to items you
-> did not create. Delete a unit test as covered by an e2e test only when, by
-> reading the e2e test, every assertion of the unit test is provably covered; you
-> cannot run the e2e suite. Then run `cargo fmt --all`, `cargo clippy --workspace
-> --all-targets --locked -- -D warnings`, and `cargo test --workspace --locked`.
-> Return one paragraph per finding saying what changed, including any change
-> beyond the cited lines. Do not commit.
+> including changes outside the cited lines, editing only these files:
+> <file list>. Do not add doc comments to items you did not create. Delete a
+> unit test as covered by an e2e test only when, by reading the e2e test, every
+> assertion of the unit test is provably covered; you cannot run the e2e suite.
+> Then run `cargo fmt --all`, `cargo clippy --workspace --all-targets --locked
+> -- -D warnings`, and `cargo test --workspace --locked`. Return one paragraph
+> per finding saying what changed, including any change beyond the cited lines.
+> Do not commit.
 
 If a fixer reports a finding was wrong, record why in the round file and carry
 it forward as adjudicated.
@@ -119,7 +120,7 @@ Stop and re-read this skill if you notice yourself:
 
 - Reporting findings to the user instead of fixing them
 - Fixing findings yourself inline instead of spawning a fixer
-- Running two fixers at once
+- Running two fixers on the same file at once
 - Letting a fixer tell you the tree is clean instead of re-sweeping
 - Keeping a hedged finding because "it's probably right"
 - Overriding an `AGENTS.md` rule because the fix looks worse; the rule is the

@@ -71,15 +71,6 @@ pub(crate) struct AdminLogin {
     pub(crate) record: Value,
 }
 
-pub(crate) fn bare_cli(home: &Path) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_tk"));
-    for name in SCRUBBED {
-        cmd.env_remove(name);
-    }
-    cmd.env("HOME", home);
-    cmd
-}
-
 pub(crate) fn result<'v>(record: &'v Value, key: &str) -> &'v Value {
     &record["data"]["activity"]["result"][key]
 }
@@ -192,9 +183,13 @@ impl Run {
         &self.config.public_key
     }
 
-    pub(crate) fn cli_at(&self, base: &str) -> Command {
-        let mut cmd = bare_cli(self.home.path());
-        cmd.arg("--message-format=json")
+    fn cli_at(&self, base: &str) -> Command {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_tk"));
+        for name in SCRUBBED {
+            cmd.env_remove(name);
+        }
+        cmd.env("HOME", self.home.path())
+            .arg("--message-format=json")
             .arg("--api-base-url")
             .arg(base);
         cmd

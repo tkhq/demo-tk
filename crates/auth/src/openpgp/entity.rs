@@ -33,7 +33,6 @@ const TAG_PUBLIC_KEY: u8 = 6;
 const TAG_USER_ID: u8 = 13;
 
 /// The raw big endian scalars of a P-256 ECDSA signature.
-#[derive(Clone, Copy)]
 pub struct EcdsaSignature {
     /// The `r` scalar.
     pub r: [u8; 32],
@@ -71,8 +70,7 @@ impl UserId {
         Ok(Self(value))
     }
 
-    /// The user ID as packet bytes.
-    pub fn as_bytes(&self) -> &[u8] {
+    fn as_bytes(&self) -> &[u8] {
         self.0.as_bytes()
     }
 
@@ -103,10 +101,7 @@ impl SigningKey {
     }
 }
 
-/// A Turnkey backed `OpenPGP` identity: one P-256 signing key and its user
-/// ID. The key certifies and signs. It does not decrypt, so it carries no
-/// subkey.
-#[derive(Clone)]
+/// A Turnkey backed `OpenPGP` identity: one P-256 key that certifies and signs, plus its user ID.
 pub struct OpenPgpKey {
     /// The identity's user ID.
     pub user_id: UserId,
@@ -117,30 +112,28 @@ pub struct OpenPgpKey {
 async fn build_signature(
     object: SignedObject,
     hashed_subpackets: Vec<u8>,
-    unhashed_subpackets: Vec<u8>,
+    key: SigningKey,
     data_to_hash: &[u8],
-    signing_point: UncompressedPoint,
     signer: &dyn SignDigest,
 ) -> Result<Vec<u8>> {
+    let issuer = key.fingerprint();
     let hashed = hashed_portion(object, &hashed_subpackets);
     let digest_bytes = digest(data_to_hash, &hashed);
     let signature = signer
-        .sign_digest(signing_point, digest_bytes)
+        .sign_digest(key.point, digest_bytes)
         .await
         .with_context(|| format!("failed to sign the {object} digest"))?;
 
     Ok(signature_packet(
         hashed,
-        &unhashed_subpackets,
+        &issuer_key_id_subpacket(issuer),
         &digest_bytes,
         &signature.r,
         &signature.s,
     ))
 }
 
-/// An armored public key block: primary key, User ID, and a self signature
-/// over the User ID made with the key itself. The clock is never read, so
-/// exporting the same key twice yields the same bytes.
+/// A byte-for-byte reproducible armored public key block: primary key, User ID, and self signature.
 pub async fn export_public_key(key: &OpenPgpKey, signer: &dyn SignDigest) -> Result<String> {
     let primary = primary_key_packet(key.signing.point, key.signing.created);
     let user_id_bytes = key.user_id.as_bytes();
@@ -172,9 +165,8 @@ pub async fn export_public_key(key: &OpenPgpKey, signer: &dyn SignDigest) -> Res
     let self_signature = build_signature(
         SignedObject::UserId,
         self_hashed,
-        issuer_key_id_subpacket(primary.fingerprint),
+        key.signing,
         &self_signed_data,
-        key.signing.point,
         signer,
     )
     .await?;
@@ -196,15 +188,7 @@ pub async fn detached_signature(
     let fingerprint = key.fingerprint();
     let mut hashed = creation_time_subpacket(now);
     hashed.extend_from_slice(&issuer_fingerprint_subpacket(fingerprint));
-    build_signature(
-        SignedObject::Document,
-        hashed,
-        issuer_key_id_subpacket(fingerprint),
-        data,
-        key.point,
-        signer,
-    )
-    .await
+    build_signature(SignedObject::Document, hashed, key, data, signer).await
 }
 
 /// Wraps a signature packet in an ASCII armored signature block.

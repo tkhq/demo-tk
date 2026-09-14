@@ -17,10 +17,9 @@ const P256_OID: [u8; 8] = [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
 pub(crate) const POINT_LEN: usize = 65;
 const UNCOMPRESSED_PREFIX: u8 = 0x04;
 
-/// An uncompressed SEC1 P-256 point, `04 || X || Y`. Proof of length and
-/// prefix only, not that the point lies on the curve.
+/// A SEC1 P-256 point, `04 || X || Y`, proven by length and prefix only, not to lie on the curve.
 #[derive(Clone, Copy)]
-#[cfg_attr(test, derive(Debug, PartialEq, Eq))]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub struct UncompressedPoint([u8; POINT_LEN]);
 
 impl UncompressedPoint {
@@ -43,7 +42,8 @@ impl TryFrom<[u8; POINT_LEN]> for UncompressedPoint {
 
 /// Accepts an optional `0x` prefix.
 pub fn parse_point_hex(address: &str) -> Result<UncompressedPoint, OpenPgpError> {
-    let bytes = hex::decode(address.trim().trim_start_matches("0x"))?;
+    let trimmed = address.trim();
+    let bytes = hex::decode(trimmed.strip_prefix("0x").unwrap_or(trimmed))?;
     let actual = bytes.len();
     let bytes: [u8; POINT_LEN] = bytes
         .try_into()
@@ -51,9 +51,8 @@ pub fn parse_point_hex(address: &str) -> Result<UncompressedPoint, OpenPgpError>
     bytes.try_into()
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
 /// The 20 byte SHA-1 fingerprint of an `OpenPGP` public key packet.
-#[cfg_attr(test, derive(Debug))]
 pub struct Fingerprint([u8; 20]);
 
 impl Fingerprint {
@@ -147,13 +146,16 @@ mod tests {
     fn parse_point_hex_rejects_bad_input_and_strips_a_0x_prefix() {
         let error = parse_point_hex("0400").expect_err("short input should be rejected");
         assert!(matches!(error, OpenPgpError::PointLength { actual: 2 }));
-        // The right length with a compressed point prefix (0x02) instead of 0x04.
         let compressed = format!("02{}", "11".repeat(64));
         let error = parse_point_hex(&compressed).expect_err("compressed point should be rejected");
         assert!(matches!(error, OpenPgpError::CompressedPoint));
         let error = parse_point_hex("zz").expect_err("non hex input should be rejected");
         assert!(matches!(error, OpenPgpError::NotHex(_)));
         let with_prefix = format!("0x{}", hex::encode(generator_point().as_bytes()));
+        let doubled_prefix = format!("0x{with_prefix}");
+        let error =
+            parse_point_hex(&doubled_prefix).expect_err("doubled 0x prefix should be rejected");
+        assert!(matches!(error, OpenPgpError::NotHex(_)));
         assert_eq!(
             parse_point_hex(&with_prefix).expect("prefixed input should parse"),
             generator_point()

@@ -2,6 +2,7 @@
 //! registered entry carries the key, and its organization selects the
 //! credential.
 
+use std::borrow::Cow;
 use std::fmt::{self, Display, Formatter};
 use std::io::{self, Read};
 use std::path::PathBuf;
@@ -26,10 +27,10 @@ use crate::outcome::Outcome;
 use registry::{GpgKeyEntry, KeyName, Scope, SelectError, SigningKeyName};
 use signer::TurnkeySigner;
 
-pub mod keys;
+mod keys;
 pub mod registry;
 pub mod shim;
-pub mod signer;
+mod signer;
 
 #[derive(Debug, Subcommand)]
 pub enum GpgCommand {
@@ -111,11 +112,11 @@ pub struct SignArgs {
 #[derive(Serialize)]
 #[cfg_attr(test, derive(Default))]
 #[serde(rename_all = "camelCase")]
-pub struct KeySummary {
-    pub key_index: u32,
-    pub fingerprint: String,
-    pub user_id: String,
-    pub created: u32,
+struct KeySummary {
+    key_index: u32,
+    fingerprint: String,
+    user_id: String,
+    created: u32,
 }
 
 impl Display for KeySummary {
@@ -128,16 +129,14 @@ impl Display for KeySummary {
     }
 }
 
-/// The record of `keys create` and `keys add`; the outcome reason tells
-/// them apart, and a create prefixes this text with "created and".
 #[derive(Serialize)]
 #[cfg_attr(test, derive(Default))]
 #[serde(rename_all = "camelCase")]
 pub struct KeyRegistered {
-    pub organization_id: Uuid,
-    pub wallet_id: Uuid,
+    organization_id: Uuid,
+    wallet_id: Uuid,
     #[serde(flatten)]
-    pub key: KeySummary,
+    key: KeySummary,
 }
 
 impl Display for KeyRegistered {
@@ -196,7 +195,7 @@ impl Display for RegisteredKey {
 #[cfg_attr(test, derive(Default))]
 #[serde(rename_all = "camelCase")]
 pub struct KeysRegistered {
-    pub keys: Vec<RegisteredKey>,
+    keys: Vec<RegisteredKey>,
 }
 
 impl Display for KeysRegistered {
@@ -209,8 +208,8 @@ impl Display for KeysRegistered {
 #[cfg_attr(test, derive(Default))]
 #[serde(rename_all = "camelCase")]
 pub struct KeysListed {
-    pub wallet_id: Uuid,
-    pub keys: Vec<KeySummary>,
+    wallet_id: Uuid,
+    keys: Vec<KeySummary>,
 }
 
 impl Display for KeysListed {
@@ -239,8 +238,8 @@ fn write_lines(f: &mut Formatter<'_>, items: &[impl Display], empty: impl Displa
 #[cfg_attr(test, derive(Default))]
 #[serde(rename_all = "camelCase")]
 pub struct PublicKeyExported {
-    pub fingerprint: String,
-    pub armored: String,
+    fingerprint: String,
+    armored: String,
 }
 
 impl Display for PublicKeyExported {
@@ -254,9 +253,9 @@ impl Display for PublicKeyExported {
 #[cfg_attr(test, derive(Default))]
 #[serde(rename_all = "camelCase")]
 pub struct SignatureCreated {
-    pub fingerprint: String,
-    pub armored: String,
-    pub output: Option<PathBuf>,
+    fingerprint: String,
+    armored: String,
+    output: Option<PathBuf>,
 }
 
 impl Display for SignatureCreated {
@@ -268,142 +267,42 @@ impl Display for SignatureCreated {
     }
 }
 
-/// Adds the remediation; the entry point supplies `unnamed_remedy` because
-/// the way to name one key among several differs between git and tk.
-pub fn selection_error(error: SelectError, unnamed_remedy: &str) -> anyhow::Error {
-    match &error {
+fn selection_error(error: SelectError, unnamed_remedy: &str) -> anyhow::Error {
+    let remedy: Cow<'_, str> = match &error {
         SelectError::Empty {
             scope: Scope::Registry,
-        } => InvalidInput(format!(
-            "{error}; create one with tk gpg keys create or register one with tk gpg keys add"
-        ))
-        .into(),
+        } => "create one with tk gpg keys create or register one with tk gpg keys add".into(),
         SelectError::Empty {
             scope: Scope::Wallet(_),
-        } => InvalidInput(format!("{error}; create one with tk gpg keys create")).into(),
-        SelectError::Unnamed { .. } => InvalidInput(format!("{error}; {unnamed_remedy}")).into(),
+        } => "create one with tk gpg keys create".into(),
+        SelectError::Unnamed { .. } => unnamed_remedy.into(),
         SelectError::NoMatch {
             scope: Scope::Registry,
             requested,
-        } => InvalidInput(format!(
-            "{error}; register it with tk gpg keys add --wallet-id <wallet> --key {requested}"
-        ))
-        .into(),
+        } => format!("register it with tk gpg keys add --wallet-id <wallet> --key {requested}")
+            .into(),
         SelectError::NoMatch {
             scope: Scope::Wallet(_),
             requested,
-        } => MissingResource::new("OpenPGP key", requested.to_string()).into(),
-        SelectError::Ambiguous { .. } => {
-            InvalidInput(format!("{error}; use a longer fingerprint")).into()
-        }
-    }
+        } => return MissingResource::new("OpenPGP key", requested.to_string()).into(),
+        SelectError::Ambiguous { .. } => "use a longer fingerprint".into(),
+    };
+    InvalidInput(format!("{error}; {remedy}")).into()
 }
 
-pub(super) async fn client_for_entry(
+async fn open_wallet(
     options: &AuthOptions,
-    entry: &GpgKeyEntry,
-) -> Result<(TurnkeyClient<TurnkeyP256ApiKey>, String)> {
-    let auth = auth::resolve_for_organization(options, entry.organization_id)
-        .await
-        .with_context(|| {
-            format!(
-                "select a credential for OpenPGP key {}",
-                entry.fingerprint()
-            )
-        })?;
-    Ok((
-        build_turnkey_client(auth.stamper, &auth.api_base_url)?,
-        auth.org_id.to_string(),
-    ))
+    wallet_id: Uuid,
+) -> Result<(Uuid, TurnkeyClient<TurnkeyP256ApiKey>, keys::WalletKeys)> {
+    let auth = auth::resolve(options).await?;
+    let client = build_turnkey_client(auth.stamper, &auth.api_base_url)?;
+    let wallet = keys::read_wallet(&client, auth.org_id, wallet_id).await?;
+    Ok((auth.org_id, client, wallet))
 }
 
 pub async fn run(command: GpgCommand, options: &AuthOptions) -> Result<Outcome> {
-    // Everything local that can fail, the registry read and the payload to
-    // sign, happens before the first credential read.
     match command {
-        GpgCommand::Keys {
-            command: KeysCommand::List(ListArgs { wallet_id: None }),
-        } => {
-            let table = auth::load_gpg_keys(options).await?;
-            Ok(Outcome::GpgKeysRegistered(KeysRegistered {
-                keys: table.into_entries().map(RegisteredKey::from).collect(),
-            }))
-        }
-        GpgCommand::Keys {
-            command: KeysCommand::Remove(RemoveArgs { key }),
-        } => {
-            let removed = auth::remove_gpg_key(options, key)
-                .await?
-                .map_err(|error| selection_error(error, "name one with a fingerprint"))?;
-            Ok(Outcome::GpgKeyRemoved(removed.into()))
-        }
-        GpgCommand::Keys {
-            command:
-                KeysCommand::List(ListArgs {
-                    wallet_id: Some(wallet_id),
-                }),
-        } => {
-            let auth = auth::resolve(options).await?;
-            let client = build_turnkey_client(auth.stamper, &auth.api_base_url)?;
-            let existing = keys::read_wallet(&client, auth.org_id, wallet_id)
-                .await?
-                .keys;
-            Ok(Outcome::GpgKeysListed(KeysListed {
-                wallet_id,
-                keys: existing.into_iter().map(KeySummary::from).collect(),
-            }))
-        }
-        GpgCommand::Keys {
-            command: KeysCommand::Create(CreateArgs { wallet_id, user_id }),
-        } => {
-            let auth = auth::resolve(options).await?;
-            let client = build_turnkey_client(auth.stamper, &auth.api_base_url)?;
-            let occupied = keys::read_wallet(&client, auth.org_id, wallet_id)
-                .await?
-                .occupied;
-            let index = keys::next_free_index(&occupied);
-            let key = keys::create_key(&client, auth.org_id, wallet_id, index, user_id).await?;
-            let key = register(options, auth.org_id, wallet_id, key).await?;
-            Ok(Outcome::GpgKeyCreated(KeyRegistered {
-                organization_id: auth.org_id,
-                wallet_id,
-                key,
-            }))
-        }
-        GpgCommand::Keys {
-            command: KeysCommand::Add(AddArgs { wallet_id, key }),
-        } => {
-            let auth = auth::resolve(options).await?;
-            let client = build_turnkey_client(auth.stamper, &auth.api_base_url)?;
-            let existing = keys::read_wallet(&client, auth.org_id, wallet_id)
-                .await?
-                .keys;
-            let key = registry::select(
-                Scope::Wallet(wallet_id),
-                existing,
-                |key| &key.key,
-                key.map(KeyName::from),
-            )
-            .map_err(|error| selection_error(error, "name one with --key"))?;
-            let key = register(options, auth.org_id, wallet_id, key).await?;
-            Ok(Outcome::GpgKeyRegistered(KeyRegistered {
-                organization_id: auth.org_id,
-                wallet_id,
-                key,
-            }))
-        }
-        GpgCommand::Keys {
-            command: KeysCommand::Export(KeyArgs { key }),
-        } => {
-            let entry = select_registered(options, key).await?;
-            let (client, org_id) = client_for_entry(options, &entry).await?;
-            let signer = TurnkeySigner::new(&client, &org_id);
-            let armored = export_public_key(&entry.key, &signer).await?;
-            Ok(Outcome::GpgPublicKeyExported(PublicKeyExported {
-                fingerprint: entry.fingerprint().to_string(),
-                armored,
-            }))
-        }
+        GpgCommand::Keys { command } => run_keys(command, options).await,
         GpgCommand::Sign(SignArgs {
             key: KeyArgs { key },
             file,
@@ -413,7 +312,6 @@ pub async fn run(command: GpgCommand, options: &AuthOptions) -> Result<Outcome> 
                 Some(path) => fs::read(path)
                     .await
                     .with_context(|| format!("read {} to sign", path.display()))?,
-                // Stdin has no async reader in this build of tokio.
                 None => {
                     let mut bytes = Vec::new();
                     io::stdin()
@@ -422,11 +320,8 @@ pub async fn run(command: GpgCommand, options: &AuthOptions) -> Result<Outcome> 
                     bytes
                 }
             };
-            let entry = select_registered(options, key).await?;
-            let (client, org_id) = client_for_entry(options, &entry).await?;
-            let signer = TurnkeySigner::new(&client, &org_id);
-            // A detached signature is dated by the clock, unlike the self
-            // signature in an export.
+            let (entry, client) = select_registered(options, key).await?;
+            let signer = TurnkeySigner::new(&client, entry.organization_id);
             let now = unix_now()?;
             let packet = detached_signature(entry.key.signing, &data, &signer, now).await?;
             let armored = armor_signature(&packet);
@@ -444,13 +339,83 @@ pub async fn run(command: GpgCommand, options: &AuthOptions) -> Result<Outcome> 
     }
 }
 
+async fn run_keys(command: KeysCommand, options: &AuthOptions) -> Result<Outcome> {
+    match command {
+        KeysCommand::List(ListArgs { wallet_id: None }) => {
+            let table = auth::load_gpg_keys(options).await?;
+            Ok(Outcome::GpgKeysRegistered(KeysRegistered {
+                keys: table.into_entries().map(RegisteredKey::from).collect(),
+            }))
+        }
+        KeysCommand::Remove(RemoveArgs { key }) => {
+            let removed = auth::remove_gpg_key(options, key)
+                .await?
+                .map_err(|error| selection_error(error, "name one with a fingerprint"))?;
+            Ok(Outcome::GpgKeyRemoved(removed.into()))
+        }
+        KeysCommand::List(ListArgs {
+            wallet_id: Some(wallet_id),
+        }) => {
+            let (
+                _,
+                _,
+                keys::WalletKeys {
+                    keys: existing,
+                    occupied: _,
+                },
+            ) = open_wallet(options, wallet_id).await?;
+            Ok(Outcome::GpgKeysListed(KeysListed {
+                wallet_id,
+                keys: existing.into_iter().map(KeySummary::from).collect(),
+            }))
+        }
+        KeysCommand::Create(CreateArgs { wallet_id, user_id }) => {
+            let (organization_id, client, keys::WalletKeys { keys: _, occupied }) =
+                open_wallet(options, wallet_id).await?;
+            let index = keys::next_free_index(&occupied);
+            let key = keys::create_key(&client, organization_id, wallet_id, index, user_id).await?;
+            Ok(Outcome::GpgKeyCreated(
+                register(options, organization_id, wallet_id, key).await?,
+            ))
+        }
+        KeysCommand::Add(AddArgs { wallet_id, key }) => {
+            let (
+                organization_id,
+                _,
+                keys::WalletKeys {
+                    keys: existing,
+                    occupied: _,
+                },
+            ) = open_wallet(options, wallet_id).await?;
+            let key = registry::select(
+                Scope::Wallet(wallet_id),
+                existing,
+                |key| &key.key,
+                key.map(KeyName::from),
+            )
+            .map_err(|error| selection_error(error, "name one with --key"))?;
+            Ok(Outcome::GpgKeyRegistered(
+                register(options, organization_id, wallet_id, key).await?,
+            ))
+        }
+        KeysCommand::Export(KeyArgs { key }) => {
+            let (entry, client) = select_registered(options, key).await?;
+            let signer = TurnkeySigner::new(&client, entry.organization_id);
+            let armored = export_public_key(&entry.key, &signer).await?;
+            Ok(Outcome::GpgPublicKeyExported(PublicKeyExported {
+                fingerprint: entry.fingerprint().to_string(),
+                armored,
+            }))
+        }
+    }
+}
+
 async fn select_registered(
     options: &AuthOptions,
     key: Option<SigningKeyName>,
-) -> Result<GpgKeyEntry> {
-    auth::load_gpg_keys(options)
+) -> Result<(GpgKeyEntry, TurnkeyClient<TurnkeyP256ApiKey>)> {
+    auth::open_gpg_key(options, key.map(KeyName::from))
         .await?
-        .select(key.map(KeyName::from))
         .map_err(|error| selection_error(error, "name one with --key"))
 }
 
@@ -459,7 +424,7 @@ async fn register(
     organization_id: Uuid,
     wallet_id: Uuid,
     key: keys::GpgKey,
-) -> Result<KeySummary> {
+) -> Result<KeyRegistered> {
     let keys::GpgKey {
         index,
         account_id,
@@ -471,14 +436,18 @@ async fn register(
         wallet_account_id: account_id,
         key,
     };
-    let summary = KeySummary {
-        key_index: index,
-        fingerprint: entry.fingerprint().to_string(),
-        user_id: entry.key.user_id.as_str().to_owned(),
-        created: entry.key.signing.created,
+    let registered = KeyRegistered {
+        organization_id: entry.organization_id,
+        wallet_id: entry.wallet_id,
+        key: KeySummary {
+            key_index: index,
+            fingerprint: entry.fingerprint().to_string(),
+            user_id: entry.key.user_id.as_str().to_owned(),
+            created: entry.key.signing.created,
+        },
     };
     auth::register_gpg_key(options, entry).await?;
-    Ok(summary)
+    Ok(registered)
 }
 
 /// Unix seconds as the `u32` `OpenPGP` creation time field, which overflows in

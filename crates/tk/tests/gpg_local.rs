@@ -1,12 +1,13 @@
 //! `tk gpg` paths that need no live API: the git shim's passthrough and the
 //! failures the registered key table produces before any request, plus one
 //! malformed account listing the live API cannot produce on demand.
+// Test helpers may panic.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs;
 use std::io::Error;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::process::Output;
 
 use assert_cmd::Command;
 use serde_json::{Value, json};
@@ -17,7 +18,20 @@ use wiremock::{
     matchers::{method, path},
 };
 
-use crate::run::bare_cli;
+const SCRUBBED: [&str; 12] = [
+    "HOME",
+    "TK_CONFIG",
+    "TK_PROFILE",
+    "TK_NON_INTERACTIVE",
+    "TK_GPG_PROGRAM",
+    "TURNKEY_TK_CONFIG_PATH",
+    "TURNKEY_ORGANIZATION_ID",
+    "TURNKEY_API_PUBLIC_KEY",
+    "TURNKEY_API_PRIVATE_KEY",
+    "TURNKEY_PRIVATE_KEY_ID",
+    "TURNKEY_API_BASE_URL",
+    "RUST_LOG",
+];
 
 const STAND_IN: &str = r#"#!/bin/sh
 printf '%s\n' "$@"
@@ -66,7 +80,12 @@ fn stand_in(home: &TempDir) -> PathBuf {
 }
 
 fn tk(home: &TempDir) -> Command {
-    bare_cli(home.path())
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_tk"));
+    for name in SCRUBBED {
+        cmd.env_remove(name);
+    }
+    cmd.env("HOME", home.path());
+    cmd
 }
 
 fn tk_with_bundle(home: &TempDir, org: &str) -> Command {
@@ -81,34 +100,43 @@ fn tk_with_bundle(home: &TempDir, org: &str) -> Command {
     cmd
 }
 
-/// Writes a registry holding one key under `fingerprint`, owned by
-/// [`KEY_ORG`], with no profiles.
-fn registry_with_key(home: &TempDir, fingerprint: &str) -> PathBuf {
+fn registry_with_keys(home: &TempDir, fingerprints: &[&str]) -> PathBuf {
     let dir = home.path().join(".config/turnkey");
     fs::create_dir_all(&dir).expect("the config dir should be creatable");
     let path = dir.join("tk.config.toml");
-    fs::write(
-        &path,
-        format!(
-            r#"version = 1
-
+    let entries = fingerprints
+        .iter()
+        .enumerate()
+        .map(|(index, fingerprint)| {
+            let account = index + 1;
+            format!(
+                r#"
 [gpg_keys."{fingerprint}"]
 organization_id = "{KEY_ORG}"
 wallet_id = "{WALLET}"
-wallet_account_id = "account-1"
+wallet_account_id = "account-{account}"
 user_id = "Ada <ada@example.com>"
 public_key = "{POINT}"
 created = 1700000000
 "#
-        ),
-    )
-    .expect("the registry should be writable");
+            )
+        })
+        .collect::<String>();
+    fs::write(&path, format!("version = 1\n{entries}")).expect("the registry should be writable");
     path
 }
 
-fn stderr_of(output: Output) -> String {
+fn assert_shim_failure(build: impl FnOnce(&TempDir) -> (Command, String)) {
+    let home = tempdir().expect("temp home should be creatable");
+    let (mut cmd, expected) = build(&home);
+    let output = cmd.output().expect("tk should run");
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert_eq!(output.stdout, b"", "the signature stream must stay clean");
-    String::from_utf8(output.stderr).expect("the shim reports the failure")
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("the shim reports the failure"),
+        expected
+    );
 }
 
 #[test]
@@ -144,7 +172,8 @@ fn a_missing_program_names_the_environment_variable() {
     assert_eq!(
         String::from_utf8(output.stderr).expect("the shim reports the failure"),
         format!(
-            "error: cannot run {}: {}; install GnuPG or set TK_GPG_PROGRAM\n",
+            r#"error: cannot run {}: {}; install GnuPG or set TK_GPG_PROGRAM
+"#,
             program.display(),
             Error::from_raw_os_error(NOT_FOUND)
         )
@@ -153,71 +182,84 @@ fn a_missing_program_names_the_environment_variable() {
 
 #[test]
 fn an_empty_key_table_is_one_line_naming_the_registering_commands() {
-    let home = tempdir().expect("temp home should be creatable");
-    let output = tk(&home).args(SIGN_ARGS).output().expect("tk should run");
-
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
-    assert_eq!(
-        stderr_of(output),
-        "error: the registry holds no OpenPGP keys; create one with tk gpg keys create or register one with tk gpg keys add\n"
-    );
+    assert_shim_failure(|home| {
+        let mut cmd = tk(home);
+        cmd.args(SIGN_ARGS);
+        (
+            cmd,
+            r#"error: the registry holds no OpenPGP keys; create one with tk gpg keys create or register one with tk gpg keys add
+"#
+            .to_string(),
+        )
+    });
 }
 
 #[test]
 fn a_key_entry_whose_fingerprint_does_not_match_its_fields_is_rejected() {
-    let home = tempdir().expect("temp home should be creatable");
-    let wrong = "FEDCBA9876543210FEDCBA9876543210FEDCBA98";
-    let path = registry_with_key(&home, wrong);
-    let output = tk(&home).args(SIGN_ARGS).output().expect("tk should run");
-
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
-    assert_eq!(
-        stderr_of(output),
-        format!(
-            "error: invalid gpg_keys entry {wrong} in {}: public_key and created do not produce this fingerprint\n",
-            path.display()
+    assert_shim_failure(|home| {
+        let wrong = "FEDCBA9876543210FEDCBA9876543210FEDCBA98";
+        let path = registry_with_keys(home, &[wrong]);
+        let mut cmd = tk(home);
+        cmd.args(SIGN_ARGS);
+        (
+            cmd,
+            format!(
+                r#"error: invalid gpg_keys entry {wrong} in {}: public_key and created do not produce this fingerprint
+"#,
+                path.display()
+            ),
         )
-    );
+    });
 }
 
-/// The environment bundle is an explicit identity, so it must belong to the
-/// key's organization. This fails before any request.
+#[test]
+fn two_entries_spelling_one_fingerprint_are_rejected() {
+    assert_shim_failure(|home| {
+        let lowercase = FINGERPRINT.to_ascii_lowercase();
+        let path = registry_with_keys(home, &[FINGERPRINT, &lowercase]);
+        let mut cmd = tk(home);
+        cmd.args(SIGN_ARGS);
+        (
+            cmd,
+            format!(
+                r#"error: invalid gpg_keys entry {lowercase} in {}: duplicates the fingerprint of another entry
+"#,
+                path.display()
+            ),
+        )
+    });
+}
+
 #[test]
 fn a_bundle_for_another_organization_is_rejected_before_any_request() {
-    let home = tempdir().expect("temp home should be creatable");
-    registry_with_key(&home, FINGERPRINT);
-    let output = tk_with_bundle(&home, OTHER_ORG)
-        .args(["--status-fd=2", "-bsau", FINGERPRINT])
-        .output()
-        .expect("tk should run");
-
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
-    assert_eq!(
-        stderr_of(output),
-        format!(
-            "error: select a credential for OpenPGP key {FINGERPRINT}: the selected identity (environment) belongs to organization {OTHER_ORG}, not {KEY_ORG}\n"
+    assert_shim_failure(|home| {
+        registry_with_keys(home, &[FINGERPRINT]);
+        let mut cmd = tk_with_bundle(home, OTHER_ORG);
+        cmd.args(["--status-fd=2", "-bsau", FINGERPRINT]);
+        (
+            cmd,
+            format!(
+                r#"error: select a credential for OpenPGP key {FINGERPRINT}: the selected identity (environment) belongs to organization {OTHER_ORG}, not {KEY_ORG}
+"#
+            ),
         )
-    );
+    });
 }
 
-/// With no explicit identity, the key's organization selects the profile.
-/// No profile holds one here, so the shim says which login is missing.
 #[test]
 fn a_key_whose_organization_has_no_profile_names_the_missing_login() {
-    let home = tempdir().expect("temp home should be creatable");
-    registry_with_key(&home, FINGERPRINT);
-    let output = tk(&home)
-        .args(["--status-fd=2", "-bsau", FINGERPRINT])
-        .output()
-        .expect("tk should run");
-
-    assert_eq!(output.status.code(), Some(1), "{output:?}");
-    assert_eq!(
-        stderr_of(output),
-        format!(
-            "error: select a credential for OpenPGP key {FINGERPRINT}: no profile holds a credential for organization {KEY_ORG}; run tk login <name> --organization-id {KEY_ORG} --api-key-file <path>\n"
+    assert_shim_failure(|home| {
+        registry_with_keys(home, &[FINGERPRINT]);
+        let mut cmd = tk(home);
+        cmd.args(["--status-fd=2", "-bsau", FINGERPRINT]);
+        (
+            cmd,
+            format!(
+                r#"error: select a credential for OpenPGP key {FINGERPRINT}: no profile holds a credential for organization {KEY_ORG}; run tk login <name> --organization-id {KEY_ORG} --api-key-file <path>
+"#
+            ),
         )
-    );
+    });
 }
 
 /// A server that returns a full page and repeats the cursor would page for

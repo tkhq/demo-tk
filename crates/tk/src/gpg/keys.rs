@@ -1,20 +1,23 @@
 //! `OpenPGP` keys held as Turnkey wallet accounts: one P-256 account with an
 //! uncompressed address per key index, named with the `OpenPGP` user ID.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 use anyhow::{Context, Result};
 use tracing::debug;
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 use turnkey_auth::openpgp::entity::{OpenPgpKey, SigningKey, UserId};
 use turnkey_auth::openpgp::key::parse_point_hex;
-use turnkey_client::TurnkeyClient;
 use turnkey_client::generated::{
-    CreateWalletAccountsIntent, GetWalletAccountsRequest, GetWalletAccountsResponse,
-    WalletAccountParams,
-    external::{data::v1::WalletAccount, options::v1::Pagination},
+    CreateWalletAccountsIntent, CreateWalletAccountsResult, GetWalletAccountsRequest,
+    GetWalletAccountsResponse, WalletAccountParams,
+    external::{
+        data::v1::{Timestamp, WalletAccount},
+        options::v1::Pagination,
+    },
     immutable::common::v1::{AddressFormat, Curve, PathFormat},
 };
+use turnkey_client::{ActivityResult, TurnkeyClient};
 use uuid::Uuid;
 
 use crate::errors::{ActivityError, ActivityErrorKind, MissingResource};
@@ -22,19 +25,19 @@ use crate::gpg::KeySummary;
 
 /// The BIP-32 purpose reserved for `OpenPGP` keys: `0x504750`, ASCII "PGP".
 /// Changing it would orphan every key already created.
-const PATH_NAMESPACE: u32 = 5261136;
+const PATH_PREFIX: &str = "m/5261136'/0'/";
 
 /// The API caps a page at 100.
 const PAGE_SIZE: u32 = 100;
 
 fn signing_path(index: u32) -> String {
-    format!("m/{PATH_NAMESPACE}'/0'/{index}'/0'")
+    format!("{PATH_PREFIX}{index}'/0'")
 }
 
-/// The key index of a signing account's path; `None` for any other path.
 fn parse_path(path: &str) -> Option<u32> {
-    let tail = path.strip_prefix(&format!("m/{PATH_NAMESPACE}'/0'/"))?;
-    tail.strip_suffix("'/0'")?.parse().ok()
+    let tail = path.strip_prefix(PATH_PREFIX)?;
+    let index: u32 = tail.strip_suffix("'/0'")?.parse().ok()?;
+    (signing_path(index) == path).then_some(index)
 }
 
 pub struct GpgKey {
@@ -92,8 +95,6 @@ pub async fn read_wallet(
         let last = page.last().map(|account| account.wallet_account_id.clone());
         accounts.extend(page);
         match last {
-            // A cursor that does not move would page over the same accounts
-            // for ever, so it is reported rather than followed.
             Some(last) if full && last == after => {
                 return Err(ActivityError::new(
                     ActivityErrorKind::MalformedResponse,
@@ -109,12 +110,9 @@ pub async fn read_wallet(
     }
 }
 
-/// A signing account this feature could not have made (wrong curve or
-/// address format, unnamed, or not named with a user ID) is skipped rather
-/// than reported, but still occupies its index.
 fn sort_accounts(accounts: Vec<WalletAccount>) -> Result<WalletKeys> {
     let mut occupied = BTreeSet::new();
-    let mut keys: BTreeMap<u32, GpgKey> = BTreeMap::new();
+    let mut keys: Vec<GpgKey> = Vec::new();
 
     for account in accounts {
         let WalletAccount {
@@ -170,34 +168,25 @@ fn sort_accounts(accounts: Vec<WalletAccount>) -> Result<WalletKeys> {
         let point = parse_point_hex(&address).map_err(|error| {
             malformed("with an address that is not a P-256 point").with_source(error)
         })?;
-        let created: u32 = created_at
-            .ok_or_else(|| malformed("without created_at.seconds"))?
-            .seconds
-            .parse()
-            .map_err(|error| {
-                malformed("with a non numeric created_at.seconds").with_source(error)
-            })?;
-        keys.insert(
+        let Timestamp { seconds, nanos: _ } =
+            created_at.ok_or_else(|| malformed("without created_at.seconds"))?;
+        let created: u32 = seconds.parse().map_err(|error| {
+            malformed("with a non numeric created_at.seconds").with_source(error)
+        })?;
+        keys.push(GpgKey {
             index,
-            GpgKey {
-                index,
-                account_id: wallet_account_id,
-                key: OpenPgpKey {
-                    user_id,
-                    signing: SigningKey { point, created },
-                },
+            account_id: wallet_account_id,
+            key: OpenPgpKey {
+                user_id,
+                signing: SigningKey { point, created },
             },
-        );
+        });
     }
+    keys.sort_by_key(|key| key.index);
 
-    Ok(WalletKeys {
-        keys: keys.into_values().collect(),
-        occupied,
-    })
+    Ok(WalletKeys { keys, occupied })
 }
 
-/// Creates the signing account, then reads the wallet back for the creation
-/// time the fingerprint depends on.
 pub async fn create_key(
     client: &TurnkeyClient<TurnkeyP256ApiKey>,
     organization_id: Uuid,
@@ -205,7 +194,12 @@ pub async fn create_key(
     index: u32,
     user_id: UserId,
 ) -> Result<GpgKey> {
-    client
+    let ActivityResult {
+        result: CreateWalletAccountsResult { addresses },
+        activity_id: _,
+        status: _,
+        app_proofs: _,
+    } = client
         .create_wallet_accounts(
             organization_id.to_string(),
             client.current_timestamp(),
@@ -225,12 +219,34 @@ pub async fn create_key(
         .map_err(anyhow::Error::new)
         .with_context(|| format!("create OpenPGP key {index} in wallet {wallet_id}"))?;
 
+    let malformed = |reason: String| {
+        ActivityError::new(
+            ActivityErrorKind::MalformedResponse,
+            format!(
+                "create_wallet_accounts for {wallet_id} {} {reason}",
+                signing_path(index)
+            ),
+        )
+    };
+    let [address] = addresses.as_slice() else {
+        return Err(malformed(format!("returned {} addresses", addresses.len())).into());
+    };
+    let point = parse_point_hex(address).map_err(|error| {
+        malformed("returned an address that is not a P-256 point".to_string()).with_source(error)
+    })?;
+
     read_wallet(client, organization_id, wallet_id)
         .await?
         .keys
         .into_iter()
-        .find(|key| key.index == index)
-        .ok_or_else(|| MissingResource::new("OpenPGP key", index.to_string()).into())
+        .find(|key| key.key.signing.point.as_bytes() == point.as_bytes())
+        .ok_or_else(|| {
+            MissingResource::new(
+                "OpenPGP key",
+                format!("{wallet_id} {}", signing_path(index)),
+            )
+            .into()
+        })
 }
 
 pub fn next_free_index(occupied: &BTreeSet<u32>) -> u32 {
@@ -243,8 +259,6 @@ pub fn next_free_index(occupied: &BTreeSet<u32>) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use turnkey_client::generated::external::data::v1::Timestamp;
-
     use super::*;
     use crate::errors::assert_malformed_response;
 
@@ -335,6 +349,8 @@ mod tests {
             "m/5261136'/1'/0'/0'",
             "m/5261136'/0'/x'/0'",
             "m/5261136'/0'/0'/0",
+            "m/5261136'/0'/00'/0'",
+            "m/5261136'/0'/+0'/0'",
         ] {
             assert_eq!(parse_path(path), None, "{path} should not parse");
         }

@@ -1,10 +1,12 @@
 // This module defines ErrorCode and owns its classification.
 #![allow(clippy::disallowed_types)]
+use crate::auth::SelectedIdentity;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::error::Error;
 pub use turnkey_auth::errors::MissingResource;
 use turnkey_client::TurnkeyClientError;
+use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
 #[error("{0}")]
@@ -27,13 +29,12 @@ impl Malformed {
     }
 }
 
-/// `identity` names the source of the selection.
 #[derive(Debug, thiserror::Error)]
 #[error("the selected identity ({identity}) belongs to organization {actual}, not {expected}")]
 pub struct OrganizationMismatch {
-    pub expected: uuid::Uuid,
-    pub actual: uuid::Uuid,
-    pub identity: &'static str,
+    pub expected: Uuid,
+    pub actual: Uuid,
+    pub identity: SelectedIdentity,
 }
 
 #[cfg(test)]
@@ -160,13 +161,10 @@ impl Classification {
 
 pub fn classify(error: &anyhow::Error) -> Classification {
     for cause in error.chain() {
-        if cause.downcast_ref::<InvalidInput>().is_some() {
-            return Classification::new(ErrorCode::InvalidInput, None);
-        }
-        if cause.downcast_ref::<Malformed>().is_some() {
-            return Classification::new(ErrorCode::InvalidInput, None);
-        }
-        if cause.downcast_ref::<OrganizationMismatch>().is_some() {
+        if cause.downcast_ref::<InvalidInput>().is_some()
+            || cause.downcast_ref::<Malformed>().is_some()
+            || cause.downcast_ref::<OrganizationMismatch>().is_some()
+        {
             return Classification::new(ErrorCode::InvalidInput, None);
         }
         if cause.downcast_ref::<MissingResource>().is_some() {

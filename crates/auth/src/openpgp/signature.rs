@@ -24,7 +24,7 @@ pub(crate) enum SignedObject {
 }
 
 impl SignedObject {
-    pub(crate) fn type_octet(self) -> u8 {
+    fn type_octet(self) -> u8 {
         match self {
             Self::UserId => 0x13,
             Self::Document => 0x00,

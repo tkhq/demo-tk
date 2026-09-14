@@ -9,6 +9,7 @@ use turnkey_client::generated::{
     immutable::common::v1::{HashFunction, PayloadEncoding},
 };
 use turnkey_client::{ActivityResult, TurnkeyClient};
+use uuid::Uuid;
 
 use crate::errors::{ActivityError, ActivityErrorKind};
 
@@ -16,11 +17,11 @@ use crate::errors::{ActivityError, ActivityErrorKind};
 /// [`HashFunction::NoOp`].
 pub struct TurnkeySigner<'c> {
     client: &'c TurnkeyClient<TurnkeyP256ApiKey>,
-    org_id: &'c str,
+    org_id: Uuid,
 }
 
 impl<'c> TurnkeySigner<'c> {
-    pub fn new(client: &'c TurnkeyClient<TurnkeyP256ApiKey>, org_id: &'c str) -> Self {
+    pub fn new(client: &'c TurnkeyClient<TurnkeyP256ApiKey>, org_id: Uuid) -> Self {
         Self { client, org_id }
     }
 }
