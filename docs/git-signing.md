@@ -20,6 +20,18 @@ After this setup, Git can use `tk git-sign` through the configured SSH signing p
 
 ## GPG signing
 
-Point Git at `tk` as its `gpg.program` and set `user.signingkey` to the
-fingerprint of a registered Turnkey OpenPGP key. See
-[GPG signing](./gpg-signing.md) for the full setup.
+First create and register a Turnkey OpenPGP key and import it into your local
+keyring, as described in [GPG signing](./gpg-signing.md). That setup leaves
+the key's fingerprint in `$FINGERPRINT`.
+
+```bash
+# Point git at tk as the GPG program.
+git config --global gpg.format openpgp
+git config --global gpg.program tk
+git config --global user.signingkey "$FINGERPRINT"
+git config --global commit.gpgsign true
+
+# Sign and verify a commit. `git tag -s` works the same way.
+git commit -S --allow-empty -m test
+git verify-commit HEAD
+```
