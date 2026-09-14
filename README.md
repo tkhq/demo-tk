@@ -21,7 +21,12 @@ The installed binary is named `tk`.
 ## Commands
 
 ```bash
-tk config
+tk login NAME --organization-id ORG_UUID --api-key-file ./key.json
+tk auth status
+tk profile show NAME
+tk api-key generate --output ./agent-key.json
+tk ssh keys add --private-key-id PRIVATE_KEY_ID
+tk ssh keys list
 tk ssh public-key
 tk ssh git-sign
 tk ssh agent
@@ -37,31 +42,32 @@ tk gpg sign
 
 `tk` resolves configuration in this order:
 
-1. Environment variables
-2. Global config file
-3. Built in defaults
+1. An explicit `--profile` (or `TK_PROFILE`)
+2. A complete `TURNKEY_*` environment bundle
+3. The active profile in the identity registry
 
-The default global config file path is:
-
-```bash
-~/.config/turnkey/tk.toml
-```
-
-Set `TURNKEY_TK_CONFIG_PATH` to override the config file location.
-
-You can inspect or update config with:
+The identity registry is stored at:
 
 ```bash
-tk config list
-tk config get turnkey.organizationId
-tk config set turnkey.organizationId "<org-id>"
-tk config set turnkey.apiPublicKey "<api-public-key>"
-tk config set turnkey.apiPrivateKey "<api-private-key>"
-tk config set turnkey.privateKeyId "<ed25519-private-key-id>"
-tk config set turnkey.apiBaseUrl "https://api.turnkey.com"
+~/.config/turnkey/tk.config.toml
 ```
 
-`tk config list` prints the fully resolved effective configuration, so environment-variable overrides appear in its output. Secret values such as `turnkey.apiPrivateKey` are redacted in both `config list` and `config get`.
+Use `--config` or `TK_CONFIG` to select another registry path. Profiles hold
+credentials and organizations; registered OpenPGP and SSH keys live in the
+registry tables and are independent of any one profile.
+
+Create and register a credential, then save a profile and register its SSH key:
+
+```bash
+tk api-key generate --output ./agent-key.json
+tk login agent --organization-id <org-id> --api-key-file ./agent-key.json
+tk ssh keys add --private-key-id <ed25519-private-key-id>
+tk ssh keys list
+```
+
+`tk ssh keys add` captures the public key and organization locally. Subsequent
+SSH signing and agent operations use this registry without a network lookup to
+discover the key.
 
 ### Environment Overrides
 
@@ -69,11 +75,21 @@ tk config set turnkey.apiBaseUrl "https://api.turnkey.com"
 export TURNKEY_ORGANIZATION_ID="<org-id>"
 export TURNKEY_API_PUBLIC_KEY="<api-public-key>"
 export TURNKEY_API_PRIVATE_KEY="<api-private-key>"
-export TURNKEY_PRIVATE_KEY_ID="<ed25519-private-key-id>"
 export TURNKEY_API_BASE_URL="https://api.turnkey.com" # optional
+export TK_CONFIG="$HOME/.config/turnkey/tk.config.toml" # optional
 ```
 
-These environment variables override values stored in the global config file. This can be helpful for CI.
+The environment bundle is useful for CI. Register the SSH key once in the CI
+environment, then configure Git to select it by its registered public key:
+
+```bash
+tk ssh keys add --private-key-id "$TURNKEY_SSH_KEY_ID"
+git config --global gpg.ssh.program "$(command -v tk)"
+git config --global user.signingkey "key::$(tk ssh public-key)"
+```
+
+`tk.toml`, `TURNKEY_TK_CONFIG_PATH`, and `TURNKEY_PRIVATE_KEY_ID` are no longer
+read.
 
 ### GPG Environment
 

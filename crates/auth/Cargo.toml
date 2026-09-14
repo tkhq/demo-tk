@@ -4,7 +4,7 @@ version = "0.0.0-alpha.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-description = "Turnkey backed auth library for SSH, Git signing, and related workflows"
+description = "Wire-format and protocol support for Turnkey-backed authentication"
 repository = "https://github.com/tkhq/rust-sdk"
 homepage = "https://turnkey.com"
 
@@ -16,16 +16,10 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 base64 = { workspace = true }
 hex = { workspace = true }
-serde = { workspace = true, features = ["derive"] }
 sha1 = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "rt", "signal", "time"] }
-toml = { workspace = true }
-turnkey_api_key_stamper = { workspace = true }
-turnkey_client = { workspace = true }
-uuid = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
-serde_json = { workspace = true }
 tempfile = { workspace = true }
-wiremock = { workspace = true }

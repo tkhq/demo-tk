@@ -25,6 +25,9 @@ use crate::{
     errors::{InvalidInput, Malformed, OrganizationMismatch},
     gpg::registry::{GpgKeyEntry, GpgKeyTable, KeyName, SelectError, SigningKeyName, StoredGpgKey},
     operations::OperationOutput,
+    ssh::registry::{
+        SelectError as SshSelectError, SshKeyEntry, SshKeyName, SshKeyTable, StoredSshKey,
+    },
 };
 
 const DEFAULT_URL: &str = "https://api.turnkey.com";
@@ -45,6 +48,24 @@ pub struct AuthOptions {
     /// Override the API base URL.
     #[arg(long, global = true)]
     api_base_url: Option<String>,
+}
+
+impl AuthOptions {
+    pub(crate) fn config(&self) -> Option<&Path> {
+        self.config.as_deref()
+    }
+
+    pub(crate) fn profile(&self) -> Option<&str> {
+        self.profile.as_deref()
+    }
+
+    pub(crate) fn organization_id(&self) -> Option<Uuid> {
+        self.organization_id
+    }
+
+    pub(crate) fn api_base_url(&self) -> Option<&str> {
+        self.api_base_url.as_deref()
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -78,6 +99,14 @@ pub enum ProfileCommand {
     Use { name: String },
     /// Remove a profile entry; credential files are kept.
     Delete { name: String },
+    /// Update the organization or API endpoint of a saved profile.
+    Set(ProfileSetArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct ProfileSetArgs {
+    /// Saved profile to update.
+    name: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -109,6 +138,9 @@ struct Registry {
     /// belongs to an organization.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     gpg_keys: BTreeMap<String, StoredGpgKey>,
+    /// SSH keys by OpenSSH fingerprint.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    ssh_keys: BTreeMap<String, StoredSshKey>,
 }
 
 impl Default for Registry {
@@ -118,6 +150,7 @@ impl Default for Registry {
             active_profile: None,
             profiles: BTreeMap::new(),
             gpg_keys: BTreeMap::new(),
+            ssh_keys: BTreeMap::new(),
         }
     }
 }
@@ -168,7 +201,7 @@ impl Display for SelectedIdentity {
 pub struct ApiBaseUrl(String);
 
 impl ApiBaseUrl {
-    fn parse(raw: String) -> Result<Self> {
+    pub fn parse(raw: String) -> Result<Self> {
         let url =
             Url::parse(&raw).map_err(|error| Malformed::new("invalid API base URL", error))?;
         if !matches!(url.scheme(), "https" | "http")
@@ -502,7 +535,16 @@ async fn resolve_in_registry(
     resolve_profile(options, name, profile).await
 }
 
-async fn resolve_for_organization(
+pub async fn resolve_for_organization(
+    options: &AuthOptions,
+    organization_id: Uuid,
+) -> Result<ResolvedAuth> {
+    let path = registry_path(options)?;
+    let registry = load(&path).await?;
+    resolve_organization_in_registry(options, organization_id, &path, registry).await
+}
+
+async fn resolve_organization_in_registry(
     options: &AuthOptions,
     organization_id: Uuid,
     path: &Path,
@@ -557,6 +599,32 @@ async fn resolve_for_organization(
     };
     let (name, profile) = candidates.swap_remove(chosen);
     resolve_profile(options, name, profile).await
+}
+
+/// The organization explicitly selected for an agent snapshot, if any.
+pub async fn explicit_organization(options: &AuthOptions) -> Result<Option<(Uuid, String)>> {
+    if let Some(organization_id) = options.organization_id {
+        return Ok(Some((organization_id, "--organization-id".into())));
+    }
+    if let Some(name) = &options.profile {
+        let path = registry_path(options)?;
+        let registry = load(&path).await?;
+        let profile = registry
+            .profiles
+            .get(name)
+            .ok_or_else(|| profile_missing(name))?;
+        return Ok(Some((profile.organization_id, format!("profile {name}"))));
+    }
+    if ENV_BUNDLE
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+    {
+        let auth = resolve_environment(options)?.ok_or_else(|| {
+            InvalidInput("the credential environment did not select an organization".into())
+        })?;
+        return Ok(Some((auth.org_id, "the environment bundle".into())));
+    }
+    Ok(None)
 }
 
 fn resolve_environment(options: &AuthOptions) -> Result<Option<ResolvedAuth>> {
@@ -637,7 +705,7 @@ pub async fn open_gpg_key(
         Ok(entry) => entry,
         Err(error) => return Ok(Err(error)),
     };
-    let auth = resolve_for_organization(options, entry.organization_id, &path, registry)
+    let auth = resolve_organization_in_registry(options, entry.organization_id, &path, registry)
         .await
         .with_context(|| {
             format!(
@@ -672,6 +740,40 @@ pub async fn remove_gpg_key(
         Err(error) => return Ok(Err(error)),
     };
     registry.gpg_keys = table.into_stored();
+    save(&path, &registry).await?;
+    Ok(Ok(removed))
+}
+
+/// Reading the SSH table needs no credential.
+pub async fn load_ssh_keys(options: &AuthOptions) -> Result<SshKeyTable> {
+    let path = registry_path(options)?;
+    let registry = load(&path).await?;
+    SshKeyTable::from_stored(registry.ssh_keys, &path)
+}
+
+pub async fn register_ssh_key(options: &AuthOptions, entry: SshKeyEntry) -> Result<()> {
+    let path = registry_path(options)?;
+    let _lock = registry_lock(&path).await?;
+    let mut registry = load(&path).await?;
+    let mut table = SshKeyTable::from_stored(registry.ssh_keys, &path)?;
+    table.insert(entry);
+    registry.ssh_keys = table.into_stored();
+    save(&path, &registry).await
+}
+
+pub async fn remove_ssh_key(
+    options: &AuthOptions,
+    name: SshKeyName,
+) -> Result<Result<SshKeyEntry, SshSelectError>> {
+    let path = registry_path(options)?;
+    let _lock = registry_lock(&path).await?;
+    let mut registry = load(&path).await?;
+    let mut table = SshKeyTable::from_stored(registry.ssh_keys, &path)?;
+    let removed = match table.remove(name) {
+        Ok(entry) => entry,
+        Err(error) => return Ok(Err(error)),
+    };
+    registry.ssh_keys = table.into_stored();
     save(&path, &registry).await?;
     Ok(Ok(removed))
 }
@@ -826,6 +928,24 @@ pub async fn run_profile(
             Ok(OperationOutput::result(
                 "profile.delete",
                 json!({"name": name, "credentialFilesDeleted": false}),
+            ))
+        }
+        ProfileCommand::Set(ProfileSetArgs { name }) => {
+            let profile = registry
+                .profiles
+                .get_mut(&name)
+                .ok_or_else(|| profile_missing(&name))?;
+            if let Some(organization_id) = options.organization_id {
+                profile.organization_id = organization_id;
+            }
+            if let Some(api_base_url) = &options.api_base_url {
+                profile.api_base_url = ApiBaseUrl::parse(api_base_url.clone())?.into();
+            }
+            let record = serde_json::to_value(&*profile)?;
+            save(&path, &registry).await?;
+            Ok(OperationOutput::result(
+                "profile.set",
+                json!({"name": name, "profile": record}),
             ))
         }
     }

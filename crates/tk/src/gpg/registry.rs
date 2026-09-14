@@ -5,7 +5,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt::{self, Display, Formatter};
-use std::mem;
 use std::path::Path;
 use std::str::FromStr;
 
@@ -92,7 +91,7 @@ impl Display for KeyName {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum Scope {
     Registry,
     Wallet(Uuid),
@@ -125,39 +124,15 @@ pub fn select<T>(
     key: impl Fn(&T) -> &OpenPgpKey,
     requested: Option<KeyName>,
 ) -> Result<T, SelectError> {
-    select_split(scope, keys, key, requested).0
-}
-
-fn select_split<T>(
-    scope: Scope,
-    keys: impl IntoIterator<Item = T>,
-    key: impl Fn(&T) -> &OpenPgpKey,
-    requested: Option<KeyName>,
-) -> (Result<T, SelectError>, Vec<T>) {
-    let mut keys: Vec<T> = keys.into_iter().collect();
-    let count = keys.len();
-    if count == 0 {
-        return (Err(SelectError::Empty { scope }), keys);
-    }
-    let Some(requested) = requested else {
-        return match <[T; 1]>::try_from(keys) {
-            Ok([only]) => (Ok(only), Vec::new()),
-            Err(keys) => (Err(SelectError::Unnamed { scope, count }), keys),
-        };
-    };
-    let mut matching = keys
-        .iter()
-        .enumerate()
-        .filter(|(_, item)| requested.matches(key(item)))
-        .map(|(index, _)| index);
-    let Some(index) = matching.next() else {
-        return (Err(SelectError::NoMatch { scope, requested }), keys);
-    };
-    if matching.next().is_some() {
-        return (Err(SelectError::Ambiguous { scope, requested }), keys);
-    }
-    let found = keys.remove(index);
-    (Ok(found), keys)
+    crate::registry::select(
+        keys,
+        requested,
+        |requested, item| requested.matches(key(item)),
+        || SelectError::Empty { scope },
+        |count| SelectError::Unnamed { scope, count },
+        |requested| SelectError::NoMatch { scope, requested },
+        |requested| SelectError::Ambiguous { scope, requested },
+    )
 }
 
 pub struct GpgKeyEntry {
@@ -294,14 +269,17 @@ impl GpgKeyTable {
     }
 
     pub fn remove(&mut self, name: SigningKeyName) -> Result<GpgKeyEntry, SelectError> {
-        let (selected, kept) = select_split(
+        let fingerprint = select(
             Scope::Registry,
-            mem::take(&mut self.0),
-            |(_, entry)| &entry.key,
+            self.0.values(),
+            |entry| &entry.key,
             Some(name.into()),
-        );
-        self.0 = kept.into_iter().collect();
-        selected.map(|(_, entry)| entry)
+        )?
+        .fingerprint();
+        self.0.remove(&fingerprint).ok_or(SelectError::NoMatch {
+            scope: Scope::Registry,
+            requested: KeyName::Suffix(SigningKeyName(fingerprint.to_string())),
+        })
     }
 }
 

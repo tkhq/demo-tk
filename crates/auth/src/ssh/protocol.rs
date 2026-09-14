@@ -11,6 +11,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::time::{Duration, timeout};
 
+use super::agent::AgentIdentity;
+
 const SSH_ED25519_ALGORITHM: &str = "ssh-ed25519";
 const CONNECTION_IO_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_AGENT_FRAME_SIZE: usize = 1 << 20;
@@ -78,12 +80,14 @@ pub(crate) async fn write_frame(stream: &mut UnixStream, frame: &[u8]) -> io::Re
     }
 }
 
-/// Encodes a `SSH_AGENT_IDENTITIES_ANSWER` packet for one Ed25519 key.
-pub fn encode_request_identities_response(public_key_blob: &[u8]) -> Vec<u8> {
+/// Encodes an `SSH_AGENT_IDENTITIES_ANSWER` packet for all available identities.
+pub fn encode_request_identities_response(identities: &[AgentIdentity]) -> Vec<u8> {
     let mut payload = Vec::new();
-    payload.extend_from_slice(&1u32.to_be_bytes());
-    payload = encode_string(public_key_blob, payload);
-    payload = encode_string(&[], payload);
+    payload.extend_from_slice(&(identities.len() as u32).to_be_bytes());
+    for identity in identities {
+        payload = encode_string(&identity.public_key.blob(), payload);
+        payload = encode_string(identity.comment.as_bytes(), payload);
+    }
     encode_agent_frame(SSH_AGENT_IDENTITIES_ANSWER, &payload)
 }
 

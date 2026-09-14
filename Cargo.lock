@@ -2555,18 +2555,12 @@ dependencies = [
  "anyhow",
  "base64 0.23.1",
  "hex",
- "serde",
- "serde_json",
  "sha1",
  "sha2 0.11.0",
  "tempfile",
  "thiserror",
  "tokio",
- "toml",
- "turnkey_api_key_stamper",
- "turnkey_client",
- "uuid",
- "wiremock",
+ "tracing",
 ]
 
 [[package]]

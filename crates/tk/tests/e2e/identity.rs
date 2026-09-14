@@ -84,6 +84,61 @@ fn login_creates_registry_and_profile_commands_behave() {
     assert_eq!(show["command"], "profile.show");
     assert_eq!(show["data"], json!({"name": name, "profile": profile}));
 
+    let set = run.ok(run.cli().args([
+        "profile",
+        "set",
+        &name,
+        "--api-base-url",
+        &run.config.api_base_url,
+    ]));
+    assert_eq!(set["command"], "profile.set");
+    assert_eq!(set["data"], json!({"name": name, "profile": profile}));
+    let other_org = uuid::Uuid::nil().to_string();
+    let moved = run.ok(run
+        .cli()
+        .args(["profile", "set", &name, "--organization-id", &other_org]));
+    let mut moved_profile = profile.clone();
+    moved_profile["organization_id"] = json!(other_org);
+    assert_eq!(
+        moved["data"],
+        json!({"name": name, "profile": moved_profile})
+    );
+    assert_eq!(
+        run.ok(run.cli().args(["profile", "show", &name]))["data"],
+        json!({"name": name, "profile": moved_profile})
+    );
+    let restored = run.ok(run.cli().args([
+        "profile",
+        "set",
+        &name,
+        "--organization-id",
+        org,
+        "--api-base-url",
+        &run.config.api_base_url,
+    ]));
+    assert_eq!(restored["data"], json!({"name": name, "profile": profile}));
+    let unknown = run.err(run.cli().args([
+        "profile",
+        "set",
+        "no-such-profile",
+        "--organization-id",
+        org,
+    ]));
+    assert_eq!(unknown["code"], "invalid_input");
+    assert_eq!(unknown["message"], "profile no-such-profile does not exist");
+    let malformed = run.err(run.cli().args([
+        "profile",
+        "set",
+        &name,
+        "--api-base-url",
+        "ftp://api.turnkey.com",
+    ]));
+    assert_eq!(malformed["code"], "invalid_input");
+    assert_eq!(
+        run.ok(run.cli().args(["profile", "show", &name]))["data"],
+        json!({"name": name, "profile": profile})
+    );
+
     let logout = run.ok(run.cli().args(["auth", "logout"]));
     assert_eq!(logout["command"], "auth.logout");
     assert_eq!(

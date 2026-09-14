@@ -19,11 +19,9 @@ fn command(temp: &TempDir) -> Command {
     for name in [
         "TK_CONFIG",
         "TK_PROFILE",
-        "TURNKEY_TK_CONFIG_PATH",
         "TURNKEY_ORGANIZATION_ID",
         "TURNKEY_API_PUBLIC_KEY",
         "TURNKEY_API_PRIVATE_KEY",
-        "TURNKEY_PRIVATE_KEY_ID",
         "TURNKEY_API_BASE_URL",
     ] {
         command.env_remove(name);

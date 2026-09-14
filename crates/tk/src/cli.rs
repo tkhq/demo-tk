@@ -1,14 +1,17 @@
 use crate::auth::{self, AuthCommand, AuthOptions, LoginArgs, ProfileCommand, ResolvedAuth};
-use crate::commands;
 use crate::gpg::{self, GpgCommand};
 use crate::keygen::GenerateArgs;
 use crate::operations::{ActivityCommand, RequestArgs, run_activity};
 use crate::output::{ColorChoice, Ctx, ErrorMessage, MessageFormat, Shell, StdCtx};
 use crate::resources::{ApiKeyCommand, PolicyCommand, PreparedResource, UserCommand};
 use crate::secrets::{PreparedSecret, SecretCommand};
+use crate::ssh::{self, SshCommand};
 use crate::wallets::{PreparedWalletCommand, SignCommand, WalletCommand};
 use anyhow::Result;
-use clap::{ArgAction, Args, Parser, Subcommand, builder::FalseyValueParser, error::ErrorKind};
+use clap::{
+    ArgAction, Args, CommandFactory, Parser, Subcommand, builder::FalseyValueParser,
+    error::ErrorKind,
+};
 use serde::Serialize;
 use std::env;
 use std::ffi::OsString;
@@ -16,7 +19,6 @@ use std::fmt::Display;
 use std::io::{self, Write};
 use std::process::ExitCode;
 use tracing::debug;
-use turnkey_auth::config::DEFAULT_CONFIG_DIR_DISPLAY;
 
 const LONG_ABOUT: &str = r#"CLI for Turnkey backed auth workflows.
 
@@ -101,6 +103,19 @@ impl Cli {
             Ok(args) => args,
             Err(error) => return handle_parse_error(error),
         };
+        if matches!(
+            &args.command,
+            Commands::Profile {
+                command: ProfileCommand::Set(_)
+            }
+        ) && args.auth.organization_id().is_none()
+            && args.auth.api_base_url().is_none()
+        {
+            return handle_parse_error(Cli::command().error(
+                ErrorKind::MissingRequiredArgument,
+                "profile set requires --organization-id or --api-base-url",
+            ));
+        }
         args.run_parsed().await
     }
 
@@ -118,14 +133,7 @@ impl Cli {
         auth::sweep_state().await;
         let options = &self.auth;
         let result = match self.command {
-            Commands::Config(args) => {
-                let result = commands::config::run(args).await;
-                return emit(&mut ctx, result);
-            }
-            Commands::Ssh(args) => {
-                let result = commands::ssh::run(args).await;
-                return emit(&mut ctx, result);
-            }
+            Commands::Ssh { command } => return emit(&mut ctx, ssh::run(command, options).await),
             Commands::ApiKey {
                 command: ApiKeyCommands::Generate(generate),
             } => return emit(&mut ctx, generate.run().await),
@@ -253,10 +261,11 @@ enum Commands {
         #[command(subcommand)]
         command: ActivityCommand,
     },
-    /// Inspect and update persistent auth configuration.
-    Config(commands::config::Args),
     /// SSH related commands.
-    Ssh(commands::ssh::Args),
+    Ssh {
+        #[command(subcommand)]
+        command: SshCommand,
+    },
     /// Send an arbitrary signed API request.
     Request(RequestArgs),
     /// Manage users and user tags.
@@ -322,8 +331,7 @@ impl Commands {
     fn name(&self) -> &'static str {
         match self {
             Commands::Activity { .. } => "activity",
-            Commands::Config(_) => "config",
-            Commands::Ssh(_) => "ssh",
+            Commands::Ssh { .. } => "ssh",
             Commands::Request(_) => "request",
             Commands::User { .. } => "user",
             Commands::Policy { .. } => "policy",
@@ -341,9 +349,8 @@ impl Commands {
 }
 
 fn after_help() -> String {
-    format!(
-        r#"API identity (login, whoami, request, activity, user, policy, api-key, wallet,
-sign, gpg):
+    r#"API identity (login, whoami, request, activity, user, policy, api-key, wallet,
+sign, gpg, ssh):
   Resolved from exactly one source: the TURNKEY_ORGANIZATION_ID,
   TURNKEY_API_PUBLIC_KEY, TURNKEY_API_PRIVATE_KEY environment bundle; else the
   profile named by --profile or TK_PROFILE (an explicit profile always wins);
@@ -351,16 +358,11 @@ sign, gpg):
   The profile registry lives at ~/.config/turnkey/tk.config.toml (override
   with --config or TK_CONFIG). TURNKEY_API_BASE_URL overrides the API endpoint.
 
-Config file (config, ssh):
-  Set TURNKEY_TK_CONFIG_PATH to override the config file location.
-  Otherwise tk uses {DEFAULT_CONFIG_DIR_DISPLAY}/tk.toml.
-  TURNKEY_PRIVATE_KEY_ID names the SSH signing key.
-
 SSH agent:
   tk ssh agent start
-  export SSH_AUTH_SOCK={DEFAULT_CONFIG_DIR_DISPLAY}/ssh-agent.sock
-"#,
-    )
+  export SSH_AUTH_SOCK=~/.config/turnkey/ssh-agent.sock
+"#
+    .to_string()
 }
 
 // Checks that help documents every error code.

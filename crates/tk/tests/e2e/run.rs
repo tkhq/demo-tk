@@ -14,17 +14,16 @@ use tempfile::TempDir;
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 use uuid::Uuid;
 
-const SCRUBBED: [&str; 12] = [
+const SCRUBBED: [&str; 11] = [
     "HOME",
     "TK_CONFIG",
     "TK_PROFILE",
     "TK_NON_INTERACTIVE",
     "TK_GPG_PROGRAM",
-    "TURNKEY_TK_CONFIG_PATH",
+    "TK_SSH_KEYGEN_PROGRAM",
     "TURNKEY_ORGANIZATION_ID",
     "TURNKEY_API_PUBLIC_KEY",
     "TURNKEY_API_PRIVATE_KEY",
-    "TURNKEY_PRIVATE_KEY_ID",
     "TURNKEY_API_BASE_URL",
     "RUST_LOG",
 ];
@@ -69,6 +68,15 @@ pub(crate) struct AdminLogin {
     pub(crate) name: String,
     pub(crate) key_file: PathBuf,
     pub(crate) record: Value,
+}
+
+pub(crate) fn bare_cli(home: &Path) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_tk"));
+    for name in SCRUBBED {
+        cmd.env_remove(name);
+    }
+    cmd.env("HOME", home);
+    cmd
 }
 
 pub(crate) fn result<'v>(record: &'v Value, key: &str) -> &'v Value {
@@ -184,12 +192,8 @@ impl Run {
     }
 
     fn cli_at(&self, base: &str) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_tk"));
-        for name in SCRUBBED {
-            cmd.env_remove(name);
-        }
-        cmd.env("HOME", self.home.path())
-            .arg("--message-format=json")
+        let mut cmd = bare_cli(self.home.path());
+        cmd.arg("--message-format=json")
             .arg("--api-base-url")
             .arg(base);
         cmd
