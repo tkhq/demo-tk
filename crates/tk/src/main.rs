@@ -9,6 +9,7 @@ mod logging;
 mod operations;
 mod outcome;
 mod output;
+mod private_keys;
 mod registry;
 mod resources;
 mod secrets;

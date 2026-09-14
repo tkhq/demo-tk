@@ -3,6 +3,7 @@ use crate::gpg::{self, GpgCommand};
 use crate::keygen::GenerateArgs;
 use crate::operations::{ActivityCommand, RequestArgs, run_activity};
 use crate::output::{ColorChoice, Ctx, ErrorMessage, MessageFormat, Shell, StdCtx};
+use crate::private_keys::{PreparedPrivateKeyCommand, PrivateKeyCommand};
 use crate::resources::{ApiKeyCommand, PolicyCommand, PreparedResource, UserCommand};
 use crate::secrets::{PreparedSecret, SecretCommand};
 use crate::ssh::{self, SshCommand};
@@ -162,6 +163,9 @@ impl Cli {
             Commands::Wallet { command } => {
                 run_prepared(command.prepare(), options, PreparedWalletCommand::run).await
             }
+            Commands::PrivateKey { command } => {
+                run_prepared(command.prepare(), options, PreparedPrivateKeyCommand::run).await
+            }
             Commands::Sign { command } => {
                 run_prepared(command.prepare(), options, PreparedWalletCommand::run).await
             }
@@ -288,6 +292,11 @@ enum Commands {
         #[command(subcommand)]
         command: WalletCommand,
     },
+    /// Manage standalone private keys.
+    PrivateKey {
+        #[command(subcommand)]
+        command: PrivateKeyCommand,
+    },
     /// Sign payloads and serialized transactions.
     Sign {
         #[command(subcommand)]
@@ -337,6 +346,7 @@ impl Commands {
             Commands::Policy { .. } => "policy",
             Commands::ApiKey { .. } => "api-key",
             Commands::Wallet { .. } => "wallet",
+            Commands::PrivateKey { .. } => "private-key",
             Commands::Sign { .. } => "sign",
             Commands::Secret { .. } => "secret",
             Commands::Gpg { .. } => "gpg",
@@ -350,7 +360,7 @@ impl Commands {
 
 fn after_help() -> String {
     r#"API identity (login, whoami, request, activity, user, policy, api-key, wallet,
-sign, gpg, ssh):
+private-key, sign, gpg, ssh):
   Resolved from exactly one source: the TURNKEY_ORGANIZATION_ID,
   TURNKEY_API_PUBLIC_KEY, TURNKEY_API_PRIVATE_KEY environment bundle; else the
   profile named by --profile or TK_PROFILE (an explicit profile always wins);

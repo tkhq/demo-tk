@@ -2,7 +2,7 @@
 
 `tk` provides a unified command surface over the Turnkey public API:
 identity selection, exact-body raw requests, activity inspection and recovery,
-user/policy/API-key management, wallets, and serialized signing. Each command
+user/policy/API-key management, wallets, private keys, and serialized signing. Each command
 emits one record per invocation; pass `--message-format json` for
 newline-delimited machine output. Failures are error records with a stable
 `code` (see `tk --help`), an optional `httpStatus`, and, for activity
@@ -110,3 +110,11 @@ requires explicit encoding and hash-function (or transaction type) inputs.
 `sign transaction` signs an already serialized transaction; it does not
 broadcast. Pending activities (consensus needed) exit zero with status
 `pending` and the activity identity for later `tk activity wait`.
+
+## Private keys
+
+`tk private-key list|get|create|delete` manages standalone (non-HD) private
+keys with the same structured-input rules. `create` takes a `privateKeys` list
+of `privateKeyName`, `curve`, `privateKeyTags`, and `addressFormats`; `delete`
+takes `privateKeyIds` and an optional `deleteWithoutExport`. Sign with a
+private key by passing its ID or address as `signWith` to `tk sign`.
