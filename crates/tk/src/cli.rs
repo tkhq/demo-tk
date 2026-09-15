@@ -1,4 +1,6 @@
-use crate::auth::{self, AuthCommand, AuthOptions, LoginArgs, ProfileCommand, ResolvedAuth};
+use crate::auth::{
+    self, AuthCommand, AuthOptions, LoginArgs, ProfileCommand, ResolvedAuth, SavedProfileCommand,
+};
 use crate::gpg::{self, GpgCommand};
 use crate::keygen::GenerateArgs;
 use crate::operations::{ActivityCommand, RequestArgs, run_activity};
@@ -120,7 +122,7 @@ impl Cli {
         if matches!(
             &args.command,
             Commands::Profile {
-                command: ProfileCommand::Set { .. }
+                command: ProfileCommand::Saved(SavedProfileCommand::Set { .. })
             }
         ) && args.auth.organization_id().is_none()
             && args.auth.api_base_url().is_none()
@@ -191,7 +193,20 @@ impl Cli {
             Commands::Login(login) => auth::run_auth(AuthCommand::Login(login), options).await,
             Commands::Whoami => auth::run_auth(AuthCommand::Whoami, options).await,
             Commands::Auth { command } => auth::run_auth(command, options).await,
-            Commands::Profile { command } => auth::run_profile(command, options).await,
+            Commands::Profile {
+                command: ProfileCommand::Create(create),
+            } => {
+                let Some(organization_id) = options.organization_id() else {
+                    return handle_parse_error(Cli::command().error(
+                        ErrorKind::MissingRequiredArgument,
+                        "profile create requires --organization-id",
+                    ));
+                };
+                auth::create_profile(create, organization_id, options).await
+            }
+            Commands::Profile {
+                command: ProfileCommand::Saved(command),
+            } => auth::run_profile(command, options).await,
         };
         emit(&mut ctx, result)
     }
@@ -317,7 +332,7 @@ enum Commands {
         #[command(subcommand)]
         command: GpgCommand,
     },
-    /// Save an existing API credential as a named profile and select it.
+    /// Verify a saved profile with Turnkey and select it.
     Login(LoginArgs),
     /// Verify the selected identity remotely.
     Whoami,
