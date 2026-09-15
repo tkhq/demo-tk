@@ -24,7 +24,7 @@ use tracing::debug;
 #[tokio::main]
 async fn main() -> ExitCode {
     logging::init();
-    debug!(version = env!("CARGO_PKG_VERSION"), "starting tk");
+    debug!(version = env!("TK_VERSION"), "starting tk");
 
     let raw_args = env::args().skip(1).collect::<Vec<_>>();
 

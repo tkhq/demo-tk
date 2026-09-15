@@ -41,6 +41,16 @@ fn cli_help_lists_registry_ssh_commands() {
 }
 
 #[test]
+fn version_reports_the_baked_release_version() {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tk"));
+    command.arg("-V");
+    command
+        .assert()
+        .success()
+        .stdout(format!("tk {}\n", env!("TK_VERSION")));
+}
+
+#[test]
 fn config_command_is_unknown() {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tk"));
     let output = command

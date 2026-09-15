@@ -70,8 +70,32 @@ SSH agent:
   export SSH_AUTH_SOCK=~/.config/turnkey/ssh-agent.sock
 "#;
 
+/// Release tag baked in at build time; the tag, not the manifest, is the
+/// version of record for published binaries.
+const VERSION: &str = env!("TK_VERSION");
+
+const LONG_VERSION: &str = concat!(
+    env!("TK_VERSION"),
+    r#"
+target: "#,
+    env!("TK_BUILD_TARGET"),
+    r#"
+commit: "#,
+    env!("TK_GIT_SHA"),
+    r#" ("#,
+    env!("TK_GIT_DIRTY"),
+    r#")
+built: "#,
+    env!("TK_BUILD_TIMESTAMP"),
+    r#"
+release build: "#,
+    env!("TK_RELEASE_BUILD"),
+);
+
 #[derive(Debug, Parser)]
 #[command(
+    version = VERSION,
+    long_version = LONG_VERSION,
     about = "CLI for Turnkey backed auth workflows",
     long_about = LONG_ABOUT,
     after_help = AFTER_HELP
