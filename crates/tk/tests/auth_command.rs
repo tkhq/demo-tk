@@ -133,7 +133,7 @@ api_key_file = "admin.json"
     );
 }
 #[tokio::test]
-async fn login_verifies_identity_and_selects_the_new_profile() {
+async fn login_verifies_a_created_profile_and_selects_it() {
     let temp = TempDir::new().unwrap();
     let key_path = temp.path().join("key.json");
     key(&key_path);
@@ -146,31 +146,39 @@ async fn login_verifies_identity_and_selects_the_new_profile() {
         .expect(2)
         .mount(&server)
         .await;
-    let login = output(
+    output(
         command(&temp)
             .args([
                 "--organization-id",
                 ORG,
                 "--api-base-url",
                 &server.uri(),
-                "login",
+                "profile",
+                "create",
                 "admin",
                 "--api-key-file",
             ])
             .arg(&key_path),
     );
-    assert_eq!(login["data"]["identity"], identity);
+    let unselected = failure(command(&temp).args(["auth", "status"]), 1);
+    assert_eq!(unselected["code"], "invalid_input");
+
+    let login = output(command(&temp).args(["login", "admin"]));
+    assert_eq!(
+        login["data"],
+        json!({"profile": "admin", "identity": identity})
+    );
     let whoami = output(command(&temp).arg("whoami"));
     assert_eq!(whoami["data"], identity);
 
     let parsed = failure(
         command(&temp)
             .env("TK_PROFILE", "ambient")
-            .args(["--organization-id", ORG, "login", "other", "--api-key-file"])
-            .arg(&key_path),
+            .args(["login", "admin"]),
         1,
     );
     assert_eq!(parsed["code"], "invalid_input");
+    server.verify().await;
 }
 
 #[tokio::test]
@@ -190,20 +198,21 @@ async fn typed_client_does_not_follow_redirects() {
         .expect(0)
         .mount(&server)
         .await;
-    let parsed = failure(
+    output(
         command(&temp)
             .args([
                 "--organization-id",
                 ORG,
                 "--api-base-url",
                 &server.uri(),
-                "login",
+                "profile",
+                "create",
                 "admin",
                 "--api-key-file",
             ])
             .arg(&key_path),
-        1,
     );
+    let parsed = failure(command(&temp).args(["login", "admin"]), 1);
     assert_eq!(parsed["code"], "api_error");
     server.verify().await;
 }
@@ -277,6 +286,114 @@ fn empty_environment_bundle_does_not_fall_back_to_saved_admin() {
         "auth",
         "status",
     ]));
+}
+
+#[test]
+fn api_key_generate_defaults_to_the_state_directory() {
+    let temp = TempDir::new().unwrap();
+    let generated = output(command(&temp).args(["api-key", "generate"]));
+    let public_key = generated["data"]["publicKey"].as_str().unwrap();
+    let expected = temp
+        .path()
+        .join(".config/turnkey/tk/api-keys")
+        .join(format!("{public_key}.json"));
+    assert_eq!(generated["data"]["path"], json!(expected));
+    let stored: Value = serde_json::from_slice(&fs::read(&expected).unwrap()).unwrap();
+    assert_eq!(stored["public_key"], public_key);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&expected).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+}
+
+#[test]
+fn profile_create_generates_a_credential_and_login_rejects_local_mismatches() {
+    let temp = TempDir::new().unwrap();
+    let missing_org = failure(command(&temp).args(["profile", "create"]), 2);
+    assert_eq!(missing_org["code"], "usage_error");
+
+    let missing_profile = failure(command(&temp).arg("login"), 1);
+    assert_eq!(missing_profile["code"], "invalid_input");
+    assert_eq!(
+        missing_profile["message"],
+        "profile default does not exist; run tk profile create default --organization-id <org>"
+    );
+
+    let created = output(command(&temp).args(["--organization-id", ORG, "profile", "create"]));
+    let public_key = created["data"]["publicKey"].as_str().unwrap().to_string();
+    let key_file = temp
+        .path()
+        .join(".config/turnkey/tk/api-keys")
+        .join(format!("{public_key}.json"));
+    assert_eq!(created["command"], "profile.create");
+    assert_eq!(
+        created["data"],
+        json!({
+            "name": "default",
+            "profile": {
+                "organization_id": ORG,
+                "api_base_url": "https://api.turnkey.com",
+                "api_key_file": key_file,
+            },
+            "publicKey": public_key,
+            "nextStep": format!("register public key {public_key} (API_KEY_CURVE_P256) on a user in organization {ORG}, then run tk login default"),
+        })
+    );
+    let stored: Value = serde_json::from_slice(&fs::read(&key_file).unwrap()).unwrap();
+    assert_eq!(stored["public_key"], public_key);
+    assert!(
+        !created
+            .to_string()
+            .contains(stored["private_key"].as_str().unwrap())
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&key_file).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    assert_eq!(
+        output(command(&temp).args(["profile", "list"]))["data"]["activeProfile"],
+        Value::Null
+    );
+
+    let duplicate = failure(
+        command(&temp).args(["--organization-id", ORG, "profile", "create"]),
+        1,
+    );
+    assert_eq!(duplicate["code"], "invalid_input");
+    assert_eq!(
+        duplicate["message"],
+        "profile default already exists; run tk login default to select it"
+    );
+
+    let other_org = "00000000-0000-4000-8000-000000000002";
+    let org_mismatch = failure(
+        command(&temp).args(["--organization-id", other_org, "login"]),
+        1,
+    );
+    assert_eq!(org_mismatch["code"], "invalid_input");
+    assert_eq!(
+        org_mismatch["message"],
+        format!(
+            "profile default is saved with organization {ORG}; run tk profile set default --organization-id {other_org} to change it"
+        )
+    );
+    let url_mismatch = failure(
+        command(&temp).args(["--api-base-url", "https://example.com", "login"]),
+        1,
+    );
+    assert_eq!(url_mismatch["code"], "invalid_input");
+    assert_eq!(
+        url_mismatch["message"],
+        "profile default is saved with API base URL https://api.turnkey.com; run tk profile set default --api-base-url https://example.com to change it"
+    );
 }
 
 #[cfg(unix)]

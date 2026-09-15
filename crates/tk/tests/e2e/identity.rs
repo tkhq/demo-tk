@@ -1,4 +1,4 @@
-use crate::run::{AdminLogin, Run};
+use crate::run::{AdminLogin, Run, result};
 use serde_json::{Value, json};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -216,7 +216,7 @@ fn partial_bundle_is_invalid_input_without_registry_fallback() {
 
 #[test]
 #[ignore]
-fn login_with_unregistered_credential_fails_and_writes_no_profile() {
+fn login_with_unregistered_credential_fails_and_selects_nothing() {
     let run = Run::new();
     let key = run.key();
     let key_file = run.home.path().join("unregistered.json");
@@ -230,19 +230,122 @@ fn login_with_unregistered_credential_fails_and_writes_no_profile() {
         .to_string(),
     )
     .unwrap();
-    let error = run.err(
-        run.cli()
-            .args([
-                "login",
-                &run.name("nope"),
-                "--organization-id",
-                run.org(),
-                "--api-key-file",
-            ])
-            .arg(&key_file),
-    );
+    let name = run.name("nope");
+    run.ok(run
+        .cli()
+        .args([
+            "profile",
+            "create",
+            &name,
+            "--organization-id",
+            run.org(),
+            "--api-key-file",
+        ])
+        .arg(&key_file));
+    let error = run.err(run.cli().args(["login", &name]));
     assert_eq!(error["reason"], "command_error");
     assert_eq!(error["code"], "unauthorized");
     assert_eq!(error["httpStatus"], 401);
-    assert!(!run.registry_path().exists());
+    assert_eq!(
+        run.ok(run.cli().args(["profile", "list"]))["data"]["activeProfile"],
+        Value::Null
+    );
+}
+
+#[test]
+#[ignore]
+fn profile_create_generates_a_credential_that_logs_in_once_registered() {
+    let run = Run::new();
+    let name = run.name("fresh");
+    let org = run.org();
+    let created = run.ok(run
+        .cli()
+        .args(["profile", "create", &name, "--organization-id", org]));
+    assert_eq!(created["command"], "profile.create");
+    let public_key = created["data"]["publicKey"].as_str().unwrap().to_string();
+    let key_file = run
+        .home()
+        .join(".config/turnkey/tk/api-keys")
+        .join(format!("{public_key}.json"));
+    let profile = json!({
+        "organization_id": org,
+        "api_base_url": run.config.api_base_url,
+        "api_key_file": key_file,
+    });
+    assert_eq!(
+        created["data"],
+        json!({
+            "name": name,
+            "profile": profile,
+            "publicKey": public_key,
+            "nextStep": format!("register public key {public_key} (API_KEY_CURVE_P256) on a user in organization {org}, then run tk login {name}"),
+        })
+    );
+    let stored: Value = serde_json::from_slice(&fs::read(&key_file).unwrap()).unwrap();
+    let private_key = stored["private_key"].as_str().unwrap().to_string();
+    assert!(!created.to_string().contains(&private_key));
+    run.secrets.borrow_mut().push(private_key);
+    assert_eq!(stored["public_key"], public_key);
+    assert_eq!(
+        fs::metadata(&key_file).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert_eq!(
+        run.ok(run.cli().args(["profile", "show", &name]))["data"],
+        json!({"name": name, "profile": profile})
+    );
+
+    let unregistered = run.err(run.cli().args(["login", &name]));
+    assert_eq!(unregistered["code"], "unauthorized");
+    assert_eq!(unregistered["httpStatus"], 401);
+    assert_eq!(
+        run.err(run.cli().args(["auth", "status"]))["code"],
+        "invalid_input"
+    );
+
+    let (user_id, _) = run.create_user("fresh-login");
+    let registered = run.submit(
+        run.admin().args([
+            "api-key",
+            "register",
+            "--input-json",
+            &json!({
+                "userId": user_id,
+                "apiKeys": [{
+                    "apiKeyName": run.name("fresh-key"),
+                    "publicKey": public_key,
+                    "curveType": "API_KEY_CURVE_P256",
+                }],
+            })
+            .to_string(),
+        ]),
+        "api-key.register",
+    );
+    assert_eq!(
+        result(&registered, "createApiKeysResult")["apiKeyIds"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let login = run.ok(run.cli().args(["login", &name]));
+    assert_eq!(login["command"], "auth.login");
+    assert_eq!(login["data"]["profile"], name);
+    assert_eq!(login["data"]["identity"]["organizationId"], org);
+    assert_eq!(login["data"]["identity"]["userId"], user_id);
+    let status = run.ok(run.cli().args(["auth", "status"]));
+    assert_eq!(
+        status["data"],
+        json!({
+            "ready": true,
+            "profile": name,
+            "organizationId": org,
+            "apiBaseUrl": run.config.api_base_url,
+            "publicKey": public_key,
+            "credentialSource": "profile",
+        })
+    );
+    let whoami = run.ok(run.cli().arg("whoami"));
+    assert_eq!(whoami["data"], login["data"]["identity"]);
 }

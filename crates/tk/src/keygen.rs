@@ -1,40 +1,72 @@
 use crate::{
-    auth::{KeyCurve, StoredApiKey, secure_create},
+    auth::{KeyCurve, StoredApiKey, secure_create, state_dir},
     operations::OperationOutput,
 };
 use anyhow::{Context, Result};
 use clap::Args;
 use serde_json::json;
 use std::path::PathBuf;
+use tokio::fs;
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 use zeroize::{Zeroize, Zeroizing};
 
 #[derive(Debug, Args)]
 pub struct GenerateArgs {
-    /// New credential JSON path. Existing files are never overwritten.
+    /// New credential JSON path; defaults to a file named by the public key
+    /// under ~/.config/turnkey/tk/api-keys/. Existing files are never
+    /// overwritten.
     #[arg(long)]
-    output: PathBuf,
+    output: Option<PathBuf>,
 }
 
 impl GenerateArgs {
     pub async fn run(self) -> Result<OperationOutput> {
-        let key = TurnkeyP256ApiKey::generate();
-        let mut stored = StoredApiKey {
-            public_key: hex::encode(key.compressed_public_key()),
-            private_key: hex::encode(key.private_key()),
-            curve: KeyCurve::P256,
-        };
-        let encoded = serde_json::to_vec(&stored);
-        stored.private_key.zeroize();
-        let encoded = Zeroizing::new(encoded?);
-        secure_create(&self.output, &encoded)
-            .await
-            .with_context(|| format!("create {}", self.output.display()))?;
+        let GeneratedApiKey {
+            public_key,
+            curve,
+            path,
+        } = generate(self.output).await?;
         Ok(OperationOutput::result(
             "api-key.generate",
-            json!({"publicKey": stored.public_key, "curve": stored.curve, "path": self.output}),
+            json!({"publicKey": public_key, "curve": curve, "path": path}),
         ))
     }
+}
+
+pub(crate) struct GeneratedApiKey {
+    pub(crate) public_key: String,
+    pub(crate) curve: KeyCurve,
+    pub(crate) path: PathBuf,
+}
+
+pub(crate) async fn generate(output: Option<PathBuf>) -> Result<GeneratedApiKey> {
+    let key = TurnkeyP256ApiKey::generate();
+    let mut stored = StoredApiKey {
+        public_key: hex::encode(key.compressed_public_key()),
+        private_key: hex::encode(key.private_key()),
+        curve: KeyCurve::P256,
+    };
+    let encoded = serde_json::to_vec(&stored);
+    stored.private_key.zeroize();
+    let encoded = Zeroizing::new(encoded?);
+    let path = match output {
+        Some(path) => path,
+        None => {
+            let dir = state_dir()?.join("api-keys");
+            fs::create_dir_all(&dir)
+                .await
+                .with_context(|| format!("create {}", dir.display()))?;
+            dir.join(format!("{}.json", stored.public_key))
+        }
+    };
+    secure_create(&path, &encoded)
+        .await
+        .with_context(|| format!("create {}", path.display()))?;
+    Ok(GeneratedApiKey {
+        public_key: stored.public_key,
+        curve: stored.curve,
+        path,
+    })
 }
 
 #[cfg(test)]
@@ -49,7 +81,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("key.json");
         let output = GenerateArgs {
-            output: path.clone(),
+            output: Some(path.clone()),
         }
         .run()
         .await
@@ -75,7 +107,7 @@ mod tests {
         let path = dir.path().join("key.json");
         fs::write(&path, b"existing").unwrap();
         let error = GenerateArgs {
-            output: path.clone(),
+            output: Some(path.clone()),
         }
         .run()
         .await
@@ -94,7 +126,7 @@ mod tests {
         let target = dir.path().join("target");
         let path = dir.path().join("link");
         symlink(&target, &path).unwrap();
-        let error = GenerateArgs { output: path }.run().await.unwrap_err();
+        let error = GenerateArgs { output: Some(path) }.run().await.unwrap_err();
         // O_CREAT|O_EXCL fails with EEXIST on a symlink, dangling or not.
         assert!(matches!(
             error.downcast_ref::<SecureCreateError>(),

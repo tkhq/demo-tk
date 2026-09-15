@@ -10,26 +10,33 @@ failures, the last observed `activity` identity.
 
 ## Identity
 
-Generate a credential file without contacting Turnkey:
+Create a profile, register its public key, then log in:
 
 ```sh
-tk api-key generate --output ./agent-key.json
+tk profile create --organization-id ORG_UUID
+tk login
 ```
 
-The output contains only the public key and destination; the private key is
+`profile create` never contacts Turnkey. It generates a P256 credential under
+`~/.config/turnkey/tk/api-keys/`, saves the profile (`default` unless a name
+is given), and prints the public key with the next step. The private key is
 written to a newly created file with mode 0600 and is never printed. Register
-the public key with Turnkey before using it to authenticate.
+that public key on a user in the organization before logging in.
 
-Save and select an existing registered identity:
+`login` verifies the saved profile with `whoami` and selects it; it fails
+without changing the selection when Turnkey rejects the credential. A
+`--organization-id` or `--api-base-url` that differs from the saved profile
+is rejected with a pointer to `profile set`, which is the only command that
+edits a saved profile.
 
 ```sh
-tk login admin --organization-id ORG_UUID --api-key-file ./admin-key.json
+tk profile create admin --organization-id ORG_UUID
+tk login admin
 tk --profile admin auth status
 tk --profile admin whoami --message-format json
 ```
 
-Login verifies the credential with `whoami` before saving the registry at
-`~/.config/turnkey/tk.config.toml`.
+The registry lives at `~/.config/turnkey/tk.config.toml`.
 Profiles identify users or credentials, so admin and agent profiles can share
 one organization. SSH and OpenPGP keys belong to organizations, not profiles.
 `profile delete` removes a registry entry only; `auth logout` clears the
