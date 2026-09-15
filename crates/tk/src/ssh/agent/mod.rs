@@ -1,3 +1,5 @@
+//! Background SSH agent lifecycle and registry-backed key serving.
+
 mod daemon;
 mod lock;
 
@@ -8,7 +10,11 @@ use anyhow::Result;
 use clap::{Args as ClapArgs, Subcommand};
 use serde::Serialize;
 
+pub use daemon::is_default_running;
+
+use crate::auth::AuthOptions;
 use crate::outcome::Outcome;
+use crate::ssh::registry::SshKeyName;
 
 #[derive(Debug, ClapArgs)]
 #[command(
@@ -20,12 +26,12 @@ pub struct Args {
     command: Command,
 }
 
-pub async fn run(args: Args) -> Result<Outcome> {
+pub async fn run(args: Args, options: &AuthOptions) -> Result<Outcome> {
     match args.command {
-        Command::Start(args) => daemon::start(args).await,
+        Command::Start(args) => daemon::start(args, options).await,
         Command::Stop(args) => daemon::stop(args).await,
         Command::Status(args) => daemon::status(args).await,
-        Command::InternalRun(args) => daemon::internal_run(args).await,
+        Command::InternalRun(args) => daemon::internal_run(args, options).await,
     }
 }
 
@@ -33,8 +39,9 @@ pub async fn run(args: Args) -> Result<Outcome> {
 #[cfg_attr(test, derive(Default))]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRunning {
-    pid: u32,
-    socket: String,
+    pub pid: u32,
+    pub socket: String,
+    pub keys: Vec<String>,
 }
 
 impl Display for AgentRunning {
@@ -43,7 +50,11 @@ impl Display for AgentRunning {
             f,
             "ssh-agent running with pid {} on {}",
             self.pid, self.socket
-        )
+        )?;
+        for key in &self.keys {
+            write!(f, "\n{key}")?;
+        }
+        Ok(())
     }
 }
 
@@ -74,15 +85,19 @@ enum Command {
     /// Start the SSH agent in the background.
     Start(StartArgs),
     /// Stop the background SSH agent.
-    Stop(StopArgs),
+    Stop(AgentPathArgs),
     /// Report the background SSH agent state.
-    Status(StatusArgs),
+    Status(AgentPathArgs),
     #[command(hide = true)]
     InternalRun(InternalRunArgs),
 }
 
 #[derive(Debug, ClapArgs)]
 struct StartArgs {
+    /// Serve only this registered key. May be repeated.
+    #[arg(long, value_name = "key")]
+    key: Vec<SshKeyName>,
+
     /// Unix socket path to bind for SSH agent connections.
     #[arg(long, value_name = "path")]
     socket: Option<PathBuf>,
@@ -93,18 +108,7 @@ struct StartArgs {
 }
 
 #[derive(Debug, ClapArgs)]
-struct StopArgs {
-    /// Unix socket path bound for SSH agent connections.
-    #[arg(long, value_name = "path")]
-    socket: Option<PathBuf>,
-
-    /// PID file path for tracking the background SSH agent.
-    #[arg(long, value_name = "path")]
-    pid_file: Option<PathBuf>,
-}
-
-#[derive(Debug, ClapArgs)]
-struct StatusArgs {
+struct AgentPathArgs {
     /// Unix socket path bound for SSH agent connections.
     #[arg(long, value_name = "path")]
     socket: Option<PathBuf>,
@@ -116,6 +120,10 @@ struct StatusArgs {
 
 #[derive(Debug, ClapArgs)]
 struct InternalRunArgs {
+    /// Serve only this registered key. May be repeated.
+    #[arg(long, value_name = "key")]
+    key: Vec<SshKeyName>,
+
     /// Unix socket path to bind for SSH agent connections.
     #[arg(long, value_name = "path")]
     socket: PathBuf,

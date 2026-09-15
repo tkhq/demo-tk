@@ -11,6 +11,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::time::{Duration, timeout};
 
+use super::agent::AgentIdentity;
+
 const SSH_ED25519_ALGORITHM: &str = "ssh-ed25519";
 const CONNECTION_IO_TIMEOUT: Duration = Duration::from_millis(250);
 const MAX_AGENT_FRAME_SIZE: usize = 1 << 20;
@@ -44,11 +46,16 @@ pub fn encode_agent_frame(message_type: u8, payload: &[u8]) -> Vec<u8> {
     frame
 }
 
-/// Reads one SSH agent frame from a Unix stream with a bounded size and timeout.
-pub(crate) async fn read_frame(stream: &mut UnixStream) -> io::Result<Option<Vec<u8>>> {
+/// Reads one SSH agent frame from a Unix stream with a bounded size.
+///
+/// The length prefix is awaited without a deadline, because between requests it
+/// is the idle wait for the next one. Once a length is known the rest of the
+/// frame must arrive within `CONNECTION_IO_TIMEOUT`. Callers that must not
+/// block indefinitely impose their own deadline on the whole read.
+pub async fn read_frame(stream: &mut UnixStream) -> io::Result<Option<Vec<u8>>> {
     let mut length_bytes = [0u8; 4];
-    match read_exact_with_deadline(stream, &mut length_bytes).await {
-        Ok(()) => {}
+    match stream.read_exact(&mut length_bytes).await {
+        Ok(_) => {}
         Err(error) if error.kind() == ErrorKind::UnexpectedEof => return Ok(None),
         Err(error) => return Err(error),
     }
@@ -61,11 +68,9 @@ pub(crate) async fn read_frame(stream: &mut UnixStream) -> io::Result<Option<Vec
         ));
     }
 
-    let mut body = vec![0u8; length];
-    read_exact_with_deadline(stream, &mut body).await?;
-
-    let mut frame = length_bytes.to_vec();
-    frame.extend_from_slice(&body);
+    let mut frame = vec![0u8; 4 + length];
+    frame[..4].copy_from_slice(&length_bytes);
+    read_exact_with_deadline(stream, &mut frame[4..]).await?;
     Ok(Some(frame))
 }
 
@@ -78,12 +83,14 @@ pub(crate) async fn write_frame(stream: &mut UnixStream, frame: &[u8]) -> io::Re
     }
 }
 
-/// Encodes a `SSH_AGENT_IDENTITIES_ANSWER` packet for one Ed25519 key.
-pub fn encode_request_identities_response(public_key_blob: &[u8]) -> Vec<u8> {
+/// Encodes an `SSH_AGENT_IDENTITIES_ANSWER` packet for all available identities.
+pub fn encode_request_identities_response(identities: &[AgentIdentity]) -> Vec<u8> {
     let mut payload = Vec::new();
-    payload.extend_from_slice(&1u32.to_be_bytes());
-    payload = encode_string(public_key_blob, payload);
-    payload = encode_string(&[], payload);
+    payload.extend_from_slice(&(identities.len() as u32).to_be_bytes());
+    for identity in identities {
+        payload = encode_string(&identity.public_key.blob(), payload);
+        payload = encode_string(identity.comment.as_bytes(), payload);
+    }
     encode_agent_frame(SSH_AGENT_IDENTITIES_ANSWER, &payload)
 }
 

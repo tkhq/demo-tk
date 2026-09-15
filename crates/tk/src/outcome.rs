@@ -1,7 +1,7 @@
 //! Outcome reasons; variant names are the stable `snake_case` JSON values.
 
-use crate::commands::{agent, config, public_key};
 use crate::gpg;
+use crate::ssh::{self, agent};
 use serde::Serialize;
 use std::fmt::{self, Display, Formatter};
 
@@ -19,10 +19,10 @@ impl Display for MachineOnly {
 #[serde(tag = "reason", rename_all = "snake_case")]
 #[cfg_attr(test, derive(strum::EnumIter))]
 pub enum Outcome {
-    ConfigValue(config::ConfigValue),
-    ConfigValueSet(config::ConfigValueSet),
-    ConfigListed(config::ConfigListed),
-    PublicKeyPrinted(public_key::PublicKeyPrinted),
+    PublicKeyPrinted(ssh::PublicKeyPrinted),
+    SshKeyRegistered(ssh::RegisteredKey),
+    SshKeyRemoved(ssh::RegisteredKey),
+    SshKeysRegistered(ssh::RegisteredKeys),
     GitSignCompleted(MachineOnly),
     AgentStarted(agent::AgentRunning),
     AgentStopped(agent::AgentStopped),
@@ -41,10 +41,13 @@ pub enum Outcome {
 impl Display for Outcome {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            Outcome::ConfigValue(msg) => msg.fmt(f),
-            Outcome::ConfigValueSet(msg) => msg.fmt(f),
-            Outcome::ConfigListed(msg) => msg.fmt(f),
             Outcome::PublicKeyPrinted(msg) => msg.fmt(f),
+            Outcome::SshKeyRegistered(msg) => msg.fmt(f),
+            Outcome::SshKeyRemoved(msg) => {
+                write!(f, "removed SSH key {} from the registry", msg.fingerprint)?;
+                msg.write_restart_hint(f)
+            }
+            Outcome::SshKeysRegistered(msg) => msg.fmt(f),
             Outcome::GitSignCompleted(msg) => msg.fmt(f),
             Outcome::AgentStarted(msg) => msg.fmt(f),
             Outcome::AgentStopped(msg) => msg.fmt(f),

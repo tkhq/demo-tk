@@ -19,13 +19,10 @@ fn cli() -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_tk"));
     for name in [
         "HOME",
-        "TK_CONFIG",
         "TK_PROFILE",
-        "TURNKEY_TK_CONFIG_PATH",
         "TURNKEY_ORGANIZATION_ID",
         "TURNKEY_API_PUBLIC_KEY",
         "TURNKEY_API_PRIVATE_KEY",
-        "TURNKEY_PRIVATE_KEY_ID",
         "TURNKEY_API_BASE_URL",
     ] {
         cmd.env_remove(name);
@@ -150,7 +147,7 @@ async fn raw_request_http_status_keeps_the_api_message() {
 #[test]
 fn human_mode_errors_go_to_stderr_for_api_commands() {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_tk"));
-    for name in ["HOME", "TK_CONFIG", "TK_PROFILE", "TURNKEY_ORGANIZATION_ID"] {
+    for name in ["HOME", "TK_PROFILE", "TURNKEY_ORGANIZATION_ID"] {
         cmd.env_remove(name);
     }
     cmd.args([

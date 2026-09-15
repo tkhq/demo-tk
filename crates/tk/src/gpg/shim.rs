@@ -26,7 +26,7 @@ const CANNOT_EXEC: u8 = 2;
 
 const DEFAULT_PROGRAM: &str = "gpg";
 
-const ENVIRONMENT_HINT: &str = "set by TK_CONFIG or TK_PROFILE";
+const ENVIRONMENT_HINT: &str = "set by TK_PROFILE";
 
 const SIGNING_KEY_REMEDY: &str = "set user.signingkey to the key fingerprint";
 

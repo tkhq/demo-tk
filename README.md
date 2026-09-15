@@ -21,7 +21,12 @@ The installed binary is named `tk`.
 ## Commands
 
 ```bash
-tk config
+tk api-key generate --output ./agent-key.json
+tk login NAME --organization-id ORG_UUID --api-key-file ./key.json
+tk auth status
+tk profile show NAME
+tk ssh keys add --private-key-id PRIVATE_KEY_ID
+tk ssh keys list
 tk ssh public-key
 tk ssh git-sign
 tk ssh agent
@@ -37,31 +42,30 @@ tk gpg sign
 
 `tk` resolves configuration in this order:
 
-1. Environment variables
-2. Global config file
-3. Built in defaults
+1. An explicit `--profile` (or `TK_PROFILE`)
+2. A complete `TURNKEY_*` environment bundle
+3. The active profile in the identity registry
 
-The default global config file path is:
-
-```bash
-~/.config/turnkey/tk.toml
-```
-
-Set `TURNKEY_TK_CONFIG_PATH` to override the config file location.
-
-You can inspect or update config with:
+The identity registry is stored at:
 
 ```bash
-tk config list
-tk config get turnkey.organizationId
-tk config set turnkey.organizationId "<org-id>"
-tk config set turnkey.apiPublicKey "<api-public-key>"
-tk config set turnkey.apiPrivateKey "<api-private-key>"
-tk config set turnkey.privateKeyId "<ed25519-private-key-id>"
-tk config set turnkey.apiBaseUrl "https://api.turnkey.com"
+~/.config/turnkey/tk.config.toml
 ```
 
-`tk config list` prints the fully resolved effective configuration, so environment-variable overrides appear in its output. Secret values such as `turnkey.apiPrivateKey` are redacted in both `config list` and `config get`.
+```bash
+# Generate a credential, then register its public key with Turnkey.
+tk api-key generate --output ./agent-key.json
+
+# Save the registered credential as a profile.
+tk login agent --organization-id ORG_UUID --api-key-file ./agent-key.json
+
+# Register a Turnkey Ed25519 key locally for SSH.
+tk ssh keys add --private-key-id PRIVATE_KEY_ID
+tk ssh keys list
+```
+
+Profiles hold credentials. OpenPGP and SSH keys belong to organizations and
+are registered locally for signing.
 
 ### Environment Overrides
 
@@ -69,11 +73,8 @@ tk config set turnkey.apiBaseUrl "https://api.turnkey.com"
 export TURNKEY_ORGANIZATION_ID="<org-id>"
 export TURNKEY_API_PUBLIC_KEY="<api-public-key>"
 export TURNKEY_API_PRIVATE_KEY="<api-private-key>"
-export TURNKEY_PRIVATE_KEY_ID="<ed25519-private-key-id>"
 export TURNKEY_API_BASE_URL="https://api.turnkey.com" # optional
 ```
-
-These environment variables override values stored in the global config file. This can be helpful for CI.
 
 ### GPG Environment
 
