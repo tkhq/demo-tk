@@ -10,13 +10,11 @@
 
 ## Installation
 
-From the root of this repo:
+Install the latest release binary (Linux and macOS, x86_64 and arm64):
 
 ```bash
-cargo install -p tk
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/tkhq/tk/main/install.sh | sh
 ```
-
-The installed binary is named `tk`.
 
 ## Commands
 

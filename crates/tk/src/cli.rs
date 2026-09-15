@@ -72,6 +72,7 @@ SSH agent:
 
 #[derive(Debug, Parser)]
 #[command(
+    version,
     about = "CLI for Turnkey backed auth workflows",
     long_about = LONG_ABOUT,
     after_help = AFTER_HELP
