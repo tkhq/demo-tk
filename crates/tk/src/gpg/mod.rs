@@ -342,13 +342,13 @@ pub async fn run(command: GpgCommand, options: &AuthOptions) -> Result<Outcome> 
 async fn run_keys(command: KeysCommand, options: &AuthOptions) -> Result<Outcome> {
     match command {
         KeysCommand::List(ListArgs { wallet_id: None }) => {
-            let table = auth::load_gpg_keys(options).await?;
+            let table = auth::load_gpg_keys().await?;
             Ok(Outcome::GpgKeysRegistered(KeysRegistered {
                 keys: table.into_entries().map(RegisteredKey::from).collect(),
             }))
         }
         KeysCommand::Remove(RemoveArgs { key }) => {
-            let removed = auth::remove_gpg_key(options, key)
+            let removed = auth::remove_gpg_key(key)
                 .await?
                 .map_err(|error| selection_error(error, "name one with a fingerprint"))?;
             Ok(Outcome::GpgKeyRemoved(removed.into()))
@@ -375,7 +375,7 @@ async fn run_keys(command: KeysCommand, options: &AuthOptions) -> Result<Outcome
             let index = keys::next_free_index(&occupied);
             let key = keys::create_key(&client, organization_id, wallet_id, index, user_id).await?;
             Ok(Outcome::GpgKeyCreated(
-                register(options, organization_id, wallet_id, key).await?,
+                register(organization_id, wallet_id, key).await?,
             ))
         }
         KeysCommand::Add(AddArgs { wallet_id, key }) => {
@@ -395,7 +395,7 @@ async fn run_keys(command: KeysCommand, options: &AuthOptions) -> Result<Outcome
             )
             .map_err(|error| selection_error(error, "name one with --key"))?;
             Ok(Outcome::GpgKeyRegistered(
-                register(options, organization_id, wallet_id, key).await?,
+                register(organization_id, wallet_id, key).await?,
             ))
         }
         KeysCommand::Export(KeyArgs { key }) => {
@@ -420,7 +420,6 @@ async fn select_registered(
 }
 
 async fn register(
-    options: &AuthOptions,
     organization_id: Uuid,
     wallet_id: Uuid,
     key: keys::GpgKey,
@@ -446,7 +445,7 @@ async fn register(
             created: entry.key.signing.created,
         },
     };
-    auth::register_gpg_key(options, entry).await?;
+    auth::register_gpg_key(entry).await?;
     Ok(registered)
 }
 

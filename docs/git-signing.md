@@ -9,14 +9,50 @@ Ensure you have followed the [configuration section of the repository readme](..
 ## SSH signing
 
 ```bash
+# Register the Turnkey Ed25519 key locally.
+tk ssh keys add --private-key-id PRIVATE_KEY_ID
+tk ssh keys list
+
+# Configure Git to sign with the registered key.
+SSH_PUBLIC_KEY=$(tk ssh public-key)
 git config --global gpg.format ssh
-git config --global gpg.ssh.program "$(which tk)"
-git config --global user.signingkey "key::$(tk public-key)"
-printf '%s %s\n' "you@example.com" "$(tk public-key)" >> ~/.config/git/allowed_signers
+git config --global gpg.ssh.program "$(command -v tk)"
+git config --global user.signingkey "key::$SSH_PUBLIC_KEY"
+mkdir -p ~/.config/git
+printf '%s %s\n' "you@example.com" "$SSH_PUBLIC_KEY" \
+  >> ~/.config/git/allowed_signers
 git config --global gpg.ssh.allowedSignersFile ~/.config/git/allowed_signers
 ```
 
-After this setup, Git can use `tk git-sign` through the configured SSH signing program when creating signed commits or tags. It is invoked with `tk -Y` since that is how Git expects to invoke the given ssh program.
+With several registered keys, select one for the current repository:
+
+```bash
+git config user.signingkey \
+  "key::$(tk ssh public-key --key SSH_FINGERPRINT)"
+```
+
+```bash
+# Choose a credential when several profiles can access the key's organization.
+export TK_PROFILE=agent
+
+# Sign and verify a commit.
+git commit -S --allow-empty -m test
+git verify-commit HEAD
+
+# Override the ssh-keygen used for verification if needed.
+export TK_SSH_KEYGEN_PROGRAM=/path/to/ssh-keygen
+```
+
+For CI:
+
+```bash
+# TURNKEY_ORGANIZATION_ID, TURNKEY_API_PUBLIC_KEY, and
+# TURNKEY_API_PRIVATE_KEY must already be set.
+export TURNKEY_SSH_KEY_ID=PRIVATE_KEY_ID
+tk ssh keys add --private-key-id "$TURNKEY_SSH_KEY_ID"
+git config user.signingkey \
+  "key::$(tk ssh public-key --key "$TURNKEY_SSH_KEY_ID")"
+```
 
 ## GPG signing
 

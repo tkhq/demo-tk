@@ -1,0 +1,441 @@
+//! Live SSH agent coverage: serving the registry, narrowing, and lifecycle.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output};
+
+use assert_cmd::Command as TkCommand;
+use serde_json::{Value, json};
+use uuid::Uuid;
+
+use crate::run::{Run, bare_cli};
+use crate::ssh::{
+    check_signature, create_ed25519_key, generate_local_key, inherit_admin_environment, locate,
+    register_key, text,
+};
+
+/// Stops the agent when the test ends, whether or not it passed.
+struct Agent<'r> {
+    run: &'r Run,
+    socket: PathBuf,
+    paths: Vec<String>,
+    started: Value,
+}
+
+impl<'r> Agent<'r> {
+    fn start(
+        run: &'r Run,
+        command: &mut TkCommand,
+        keys: &[&str],
+        paths: &[(&str, &Path)],
+    ) -> Self {
+        let paths: Vec<String> = paths
+            .iter()
+            .flat_map(|(flag, path)| [flag.to_string(), path.display().to_string()])
+            .collect();
+        let started = run.ok(command
+            .args(["ssh", "agent", "start"])
+            .args(keys.iter().flat_map(|key| ["--key", key]))
+            .args(&paths));
+        assert_eq!(started["reason"], "agent_started", "{started}");
+        let socket = PathBuf::from(text(&started["socket"]));
+        assert!(socket.exists(), "the agent socket was not created");
+        Self {
+            run,
+            socket,
+            paths,
+            started,
+        }
+    }
+
+    fn fingerprints(&self) -> &Value {
+        &self.started["keys"]
+    }
+
+    fn status(&self) -> Value {
+        self.run.ok(self
+            .run
+            .admin_offline()
+            .args(["ssh", "agent", "status"])
+            .args(&self.paths))
+    }
+
+    /// The `ssh-ed25519 <base64> turnkey:<private-key-id>` lines the agent
+    /// advertises, sorted.
+    fn listed_keys(&self, ssh_add: &Path) -> Vec<String> {
+        let listed = Command::new(ssh_add)
+            .arg("-L")
+            .env("SSH_AUTH_SOCK", &self.socket)
+            .output()
+            .expect("ssh-add should run");
+        assert!(
+            listed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&listed.stderr)
+        );
+        let mut lines: Vec<String> = String::from_utf8_lossy(&listed.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect();
+        lines.sort();
+        lines
+    }
+
+    /// Signs through the agent with the key in `public_key_path`.
+    fn sign(&self, ssh_keygen: &Path, public_key_path: &Path, payload: &Path) -> Output {
+        Command::new(ssh_keygen)
+            .args(["-Y", "sign", "-n", "git", "-U", "-f"])
+            .arg(public_key_path)
+            .arg(payload)
+            .env("SSH_AUTH_SOCK", &self.socket)
+            .output()
+            .expect("ssh-keygen should run")
+    }
+
+    fn stop(self) -> Value {
+        let stopped = self.run.ok(self
+            .run
+            .admin_offline()
+            .args(["ssh", "agent", "stop"])
+            .args(&self.paths));
+        assert!(!self.socket.exists(), "the agent socket was not removed");
+        stopped
+    }
+}
+
+impl Drop for Agent<'_> {
+    fn drop(&mut self) {
+        if self.socket.exists() {
+            let _ = self
+                .run
+                .admin_offline()
+                .args(["ssh", "agent", "stop"])
+                .args(&self.paths)
+                .output();
+        }
+    }
+}
+
+fn public_key_file(run: &Run, name: &str, registered: &Value) -> PathBuf {
+    let path = run.home().join(name);
+    fs::write(&path, format!("{}\n", text(&registered["publicKey"]))).unwrap();
+    path
+}
+
+/// The line the agent should advertise for a registered key: its OpenSSH
+/// public key followed by the comment naming the Turnkey private key.
+fn advertised(registered: &Value, private_key_id: &str) -> String {
+    format!(
+        "{} turnkey:{private_key_id}",
+        text(&registered["publicKey"])
+    )
+}
+
+fn sorted(mut lines: Vec<String>) -> Vec<String> {
+    lines.sort();
+    lines
+}
+
+#[test]
+#[ignore]
+fn agent_serves_every_registered_key_and_reports_its_lifecycle() {
+    let (Some(ssh_add), Some(ssh_keygen)) = (locate("ssh-add"), locate("ssh-keygen")) else {
+        eprintln!("skipping the SSH agent test: ssh-add or ssh-keygen is not on PATH");
+        return;
+    };
+    let run = Run::new();
+    let first_id = create_ed25519_key(&run);
+    let first = register_key(&run, &first_id);
+    let second_id = create_ed25519_key(&run);
+    let second = register_key(&run, &second_id);
+    let payload = run.home().join("payload.txt");
+    fs::write(&payload, b"signed through the tk ssh agent\n").unwrap();
+    let signature = run.home().join("payload.txt.sig");
+    let second_public_key = public_key_file(&run, "second.pub", &second);
+    let unregistered = generate_local_key(
+        &ssh_keygen,
+        &run.home().join("unregistered_ed25519"),
+        "ed25519",
+    );
+
+    // Before the agent runs, status and stop report that plainly.
+    let not_running = run.err(run.admin_offline().args(["ssh", "agent", "status"]));
+    assert_eq!(not_running["code"], "command_error");
+    assert_eq!(not_running["message"], "ssh-agent is not running");
+    assert_eq!(
+        run.ok(run.admin_offline().args(["ssh", "agent", "stop"])),
+        json!({"reason": "agent_not_running"})
+    );
+
+    // Default paths live beside the registry.
+    let agent = Agent::start(&run, &mut run.admin(), &[], &[]);
+    let expected_fingerprints = json!(sorted(vec![
+        text(&first["fingerprint"]).to_string(),
+        text(&second["fingerprint"]).to_string(),
+    ]));
+    assert_eq!(agent.fingerprints(), &expected_fingerprints);
+    assert_eq!(
+        agent.socket,
+        run.home().join(".config/turnkey/ssh-agent.sock")
+    );
+    assert!(run.home().join(".config/turnkey/ssh-agent.pid").exists());
+
+    assert_eq!(
+        agent.listed_keys(&ssh_add),
+        sorted(vec![
+            advertised(&first, &first_id),
+            advertised(&second, &second_id)
+        ])
+    );
+
+    let status = agent.status();
+    assert_eq!(
+        status,
+        json!({
+            "reason": "agent_status_report",
+            "pid": agent.started["pid"],
+            "socket": agent.started["socket"],
+            "keys": expected_fingerprints,
+        })
+    );
+
+    // A real client chooses the second key and Turnkey signs with it.
+    let signed = agent.sign(&ssh_keygen, &second_public_key, &payload);
+    assert!(
+        signed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&signed.stderr)
+    );
+    let checked = check_signature(&ssh_keygen, &second_public_key, &payload, &signature);
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    fs::remove_file(&signature).unwrap();
+
+    // A key the agent does not hold is refused on the wire.
+    let refused = agent.sign(&ssh_keygen, &unregistered, &payload);
+    assert!(
+        !refused.status.success(),
+        "the agent signed with an unregistered key"
+    );
+    assert!(!signature.exists());
+
+    // A second start is refused while the first agent holds the socket.
+    let duplicate = run.err(run.admin().args(["ssh", "agent", "start"]));
+    assert_eq!(duplicate["code"], "command_error");
+    assert_eq!(
+        duplicate["message"],
+        format!("ssh-agent is already running on {}", agent.socket.display())
+    );
+
+    // Registry edits do not reach the running agent, and the human output
+    // says so.
+    let mut readd = Command::new(env!("CARGO_BIN_EXE_tk"));
+    inherit_admin_environment(&run, &mut readd);
+    let readded = run.human_stdout(TkCommand::from_std(readd).args([
+        "ssh",
+        "keys",
+        "add",
+        "--private-key-id",
+        &first_id,
+    ]));
+    assert_eq!(
+        readded,
+        format!(
+            "{}  {}  {first_id}; restart tk ssh agent to pick this up\n",
+            text(&first["fingerprint"]),
+            run.org()
+        )
+    );
+    let mut remove = bare_cli(run.home());
+    let removed = run.human_stdout(remove.args(["ssh", "keys", "remove", &first_id]));
+    assert_eq!(
+        removed,
+        format!(
+            "removed SSH key {} from the registry; restart tk ssh agent to pick this up\n",
+            text(&first["fingerprint"])
+        )
+    );
+    assert_eq!(
+        agent.listed_keys(&ssh_add),
+        sorted(vec![
+            advertised(&first, &first_id),
+            advertised(&second, &second_id)
+        ])
+    );
+
+    assert_eq!(agent.stop(), json!({"reason": "agent_stopped"}));
+    let stopped = run.err(run.admin_offline().args(["ssh", "agent", "status"]));
+    assert_eq!(stopped["message"], "ssh-agent is not running");
+    assert!(!run.home().join(".config/turnkey/ssh-agent.pid").exists());
+
+    // Without the first key the restarted agent serves the rest.
+    let restarted = Agent::start(&run, &mut run.admin(), &[], &[]);
+    assert_eq!(
+        restarted.listed_keys(&ssh_add),
+        vec![advertised(&second, &second_id)]
+    );
+    assert_eq!(restarted.stop(), json!({"reason": "agent_stopped"}));
+}
+
+#[test]
+#[ignore]
+fn agent_start_narrows_by_key_profile_and_organization() {
+    let (Some(ssh_add), Some(ssh_keygen)) = (locate("ssh-add"), locate("ssh-keygen")) else {
+        eprintln!("skipping the SSH agent narrowing test: ssh-add or ssh-keygen is not on PATH");
+        return;
+    };
+    let run = Run::new();
+    let first_id = create_ed25519_key(&run);
+    let first = register_key(&run, &first_id);
+    let second_id = create_ed25519_key(&run);
+    let second = register_key(&run, &second_id);
+    let first_fingerprint = text(&first["fingerprint"]).to_string();
+    let second_fingerprint = text(&second["fingerprint"]).to_string();
+    let payload = run.home().join("payload.txt");
+    fs::write(&payload, b"narrowed agent\n").unwrap();
+    let signature = run.home().join("payload.txt.sig");
+    let first_public_key = public_key_file(&run, "first.pub", &first);
+    let second_public_key = public_key_file(&run, "second.pub", &second);
+    let socket = run.home().join("agent/narrowed.sock");
+    let pid_file = run.home().join("agent/narrowed.pid");
+    let paths: [(&str, &Path); 2] = [("--socket", &socket), ("--pid-file", &pid_file)];
+    let unregistered = "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+    // A named key serves only that key, by fingerprint or private key ID.
+    let narrowed = Agent::start(&run, &mut run.admin(), &[&first_fingerprint], &paths);
+    assert_eq!(narrowed.fingerprints(), &json!([first_fingerprint]));
+    assert_eq!(
+        narrowed.listed_keys(&ssh_add),
+        vec![advertised(&first, &first_id)]
+    );
+    let refused = narrowed.sign(&ssh_keygen, &second_public_key, &payload);
+    assert!(
+        !refused.status.success(),
+        "the narrowed agent signed with an unserved key"
+    );
+    assert!(!signature.exists());
+    let signed = narrowed.sign(&ssh_keygen, &first_public_key, &payload);
+    assert!(
+        signed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&signed.stderr)
+    );
+    fs::remove_file(&signature).unwrap();
+    assert_eq!(narrowed.stop(), json!({"reason": "agent_stopped"}));
+
+    let by_id = Agent::start(
+        &run,
+        &mut run.admin(),
+        &[&second_id, &second_fingerprint],
+        &paths,
+    );
+    assert_eq!(by_id.fingerprints(), &json!([second_fingerprint]));
+    assert_eq!(by_id.stop(), json!({"reason": "agent_stopped"}));
+
+    // Every failure below is reported before a socket or pid file exists.
+    let no_agent = |record: Value, code: &str, message: String| {
+        assert_eq!(record["code"], code, "{record}");
+        assert_eq!(record["message"], message, "{record}");
+        assert!(!socket.exists(), "a failed start left {}", socket.display());
+        assert!(
+            !pid_file.exists(),
+            "a failed start left {}",
+            pid_file.display()
+        );
+    };
+    let path_args: Vec<String> = paths
+        .iter()
+        .flat_map(|(flag, path)| [flag.to_string(), path.display().to_string()])
+        .collect();
+    no_agent(
+        run.err(
+            run.admin_offline()
+                .args(["ssh", "agent", "start", "--key", unregistered])
+                .args(&path_args),
+        ),
+        "invalid_input",
+        format!(
+            "no registered SSH key matches {unregistered}; register it with tk ssh keys add --private-key-id ID"
+        ),
+    );
+    let nil = Uuid::nil().to_string();
+    no_agent(
+        run.err(
+            run.admin_offline()
+                .args(["--organization-id", &nil, "ssh", "agent", "start"])
+                .args(&path_args),
+        ),
+        "invalid_input",
+        format!(
+            "organization {nil} selected by --organization-id has no registered SSH keys; register one with tk ssh keys add --private-key-id <id>, or drop the identity selection"
+        ),
+    );
+
+    // A profile in the key's organization is the credential for the set.
+    let login = run.login_admin();
+    let profiled = Agent::start(
+        &run,
+        run.cli().args(["--profile", &login.name]),
+        &[],
+        &paths,
+    );
+    assert_eq!(
+        profiled.fingerprints(),
+        &json!(sorted(vec![
+            first_fingerprint.clone(),
+            second_fingerprint.clone()
+        ]))
+    );
+    let signed = profiled.sign(&ssh_keygen, &second_public_key, &payload);
+    assert!(
+        signed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&signed.stderr)
+    );
+    let checked = check_signature(&ssh_keygen, &second_public_key, &payload, &signature);
+    assert!(
+        checked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&checked.stderr)
+    );
+    fs::remove_file(&signature).unwrap();
+    assert_eq!(profiled.stop(), json!({"reason": "agent_stopped"}));
+
+    // A profile of another organization has nothing to serve.
+    run.ok(run
+        .cli()
+        .args(["profile", "set", &login.name, "--organization-id", &nil]));
+    no_agent(
+        run.err(
+            run.cli()
+                .args(["--profile", &login.name, "ssh", "agent", "start"])
+                .args(&path_args),
+        ),
+        "invalid_input",
+        format!(
+            "organization {nil} selected by profile {} has no registered SSH keys; register one with tk ssh keys add --private-key-id <id>, or drop the identity selection",
+            login.name
+        ),
+    );
+
+    // An empty registry fails before any process is spawned.
+    run.ok(run
+        .admin_offline()
+        .args(["ssh", "keys", "remove", &first_id]));
+    run.ok(run
+        .admin_offline()
+        .args(["ssh", "keys", "remove", &second_id]));
+    no_agent(
+        run.err(
+            run.admin_offline()
+                .args(["ssh", "agent", "start"])
+                .args(&path_args),
+        ),
+        "invalid_input",
+        "the registry holds no SSH keys; register one with tk ssh keys add --private-key-id ID"
+            .to_string(),
+    );
+}

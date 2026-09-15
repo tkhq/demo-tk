@@ -18,17 +18,14 @@ use wiremock::{
     matchers::{method, path},
 };
 
-const SCRUBBED: [&str; 12] = [
+const SCRUBBED: [&str; 9] = [
     "HOME",
-    "TK_CONFIG",
     "TK_PROFILE",
     "TK_NON_INTERACTIVE",
     "TK_GPG_PROGRAM",
-    "TURNKEY_TK_CONFIG_PATH",
     "TURNKEY_ORGANIZATION_ID",
     "TURNKEY_API_PUBLIC_KEY",
     "TURNKEY_API_PRIVATE_KEY",
-    "TURNKEY_PRIVATE_KEY_ID",
     "TURNKEY_API_BASE_URL",
     "RUST_LOG",
 ];

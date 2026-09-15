@@ -14,17 +14,15 @@ use tempfile::TempDir;
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 use uuid::Uuid;
 
-const SCRUBBED: [&str; 12] = [
+const SCRUBBED: [&str; 10] = [
     "HOME",
-    "TK_CONFIG",
     "TK_PROFILE",
     "TK_NON_INTERACTIVE",
     "TK_GPG_PROGRAM",
-    "TURNKEY_TK_CONFIG_PATH",
+    "TK_SSH_KEYGEN_PROGRAM",
     "TURNKEY_ORGANIZATION_ID",
     "TURNKEY_API_PUBLIC_KEY",
     "TURNKEY_API_PRIVATE_KEY",
-    "TURNKEY_PRIVATE_KEY_ID",
     "TURNKEY_API_BASE_URL",
     "RUST_LOG",
 ];
@@ -71,6 +69,15 @@ pub(crate) struct AdminLogin {
     pub(crate) record: Value,
 }
 
+pub(crate) fn bare_cli(home: &Path) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_tk"));
+    for name in SCRUBBED {
+        cmd.env_remove(name);
+    }
+    cmd.env("HOME", home);
+    cmd
+}
+
 pub(crate) fn result<'v>(record: &'v Value, key: &str) -> &'v Value {
     &record["data"]["activity"]["result"][key]
 }
@@ -111,36 +118,26 @@ impl Run {
             secrets,
             sub_org: None,
         };
-        let body = json!({
-            "type": "ACTIVITY_TYPE_CREATE_SUB_ORGANIZATION_V7",
-            "timestampMs": now_ms(),
-            "organizationId": run.config.organization_id.to_string(),
-            "parameters": {
-                "subOrganizationName": run.marker,
-                "rootUsers": [{
-                    "userName": run.name("root"),
-                    "apiKeys": [{
-                        "apiKeyName": run.name("root-key"),
-                        "publicKey": run.config.public_key,
-                        "curveType": "API_KEY_CURVE_P256",
-                    }],
-                    "authenticators": [],
-                    "oauthProviders": [],
+        let parameters = json!({
+            "subOrganizationName": run.marker,
+            "rootUsers": [{
+                "userName": run.name("root"),
+                "apiKeys": [{
+                    "apiKeyName": run.name("root-key"),
+                    "publicKey": run.config.public_key,
+                    "curveType": "API_KEY_CURVE_P256",
                 }],
-                "rootQuorumThreshold": 1,
-            },
-        })
-        .to_string();
-        let created = run.submit_as(
-            run.parent().args([
-                "request",
-                "--path",
-                "/public/v1/submit/create_sub_organization",
-                "--body",
-                &body,
-            ]),
-            "request",
+                "authenticators": [],
+                "oauthProviders": [],
+            }],
+            "rootQuorumThreshold": 1,
+        });
+        let created = run.submit_activity_as(
             &|| run.parent(),
+            "/public/v1/submit/create_sub_organization",
+            "ACTIVITY_TYPE_CREATE_SUB_ORGANIZATION_V7",
+            &run.config.organization_id.to_string(),
+            &parameters,
         );
         let sub_org = result(&created, "createSubOrganizationResultV7")["subOrganizationId"]
             .as_str()
@@ -184,12 +181,8 @@ impl Run {
     }
 
     fn cli_at(&self, base: &str) -> Command {
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_tk"));
-        for name in SCRUBBED {
-            cmd.env_remove(name);
-        }
-        cmd.env("HOME", self.home.path())
-            .arg("--message-format=json")
+        let mut cmd = bare_cli(self.home.path());
+        cmd.arg("--message-format=json")
             .arg("--api-base-url")
             .arg(base);
         cmd
@@ -403,6 +396,59 @@ impl Run {
         panic!("secret.export did not deliver within {ATTEMPTS} attempts")
     }
 
+    /// Submits a raw activity request as `bundle` and returns its completed
+    /// record. The timestamp lives in the body, so the body is rebuilt on
+    /// every attempt: the API folds a byte-identical request back into the
+    /// activity it already produced, and resending one after a server-side
+    /// failure would keep returning that same failed activity.
+    fn submit_activity_as(
+        &self,
+        bundle: &dyn Fn() -> Command,
+        endpoint: &str,
+        activity_type: &str,
+        organization_id: &str,
+        parameters: &Value,
+    ) -> Value {
+        for attempt in 1..=ATTEMPTS {
+            let body = json!({
+                "type": activity_type,
+                "timestampMs": now_ms(),
+                "organizationId": organization_id,
+                "parameters": parameters,
+            })
+            .to_string();
+            let mut cmd = bundle();
+            cmd.args(["request", "--path", endpoint, "--body", &body]);
+            match self.submit_once(&mut cmd, "request", bundle) {
+                Ok(record) => return record,
+                Err((record, _)) if activity_failed(&record) && attempt < ATTEMPTS => {
+                    eprintln!(
+                        "{activity_type} failed server-side, attempt {attempt}/{ATTEMPTS}: {record}"
+                    );
+                    backoff(attempt);
+                }
+                Err((_, stdout)) => panic!("{activity_type} failed\nstdout: {stdout}"),
+            }
+        }
+        panic!("{activity_type} did not complete within {ATTEMPTS} attempts")
+    }
+
+    /// Submits a raw activity request as the sub-organization root.
+    pub(crate) fn submit_activity(
+        &self,
+        endpoint: &str,
+        activity_type: &str,
+        parameters: &Value,
+    ) -> Value {
+        self.submit_activity_as(
+            &|| self.admin(),
+            endpoint,
+            activity_type,
+            self.org(),
+            parameters,
+        )
+    }
+
     fn submit_as(&self, cmd: &mut Command, command: &str, waiter: &dyn Fn() -> Command) -> Value {
         for attempt in 1..=ATTEMPTS {
             match self.submit_once(cmd, command, waiter) {
@@ -517,35 +563,13 @@ impl Run {
 
     // Deletes the sub-organization, re-submitting server-side failures.
     fn delete_sub_organization(&self, sub_org: &str) {
-        for attempt in 1..=ATTEMPTS {
-            let body = json!({
-                "type": "ACTIVITY_TYPE_DELETE_SUB_ORGANIZATION",
-                "timestampMs": now_ms(),
-                "organizationId": sub_org,
-                "parameters": {"deleteWithoutExport": true},
-            })
-            .to_string();
-            let mut cmd = self.admin();
-            cmd.args([
-                "request",
-                "--path",
-                "/public/v1/submit/delete_sub_organization",
-                "--body",
-                &body,
-            ]);
-            match self.submit_once(&mut cmd, "request", &|| self.admin()) {
-                Ok(_) => return,
-                Err((record, _)) if activity_failed(&record) && attempt < ATTEMPTS => {
-                    eprintln!(
-                        "sub-organization delete failed server-side, attempt {attempt}/{ATTEMPTS}: {record}"
-                    );
-                    backoff(attempt);
-                }
-                Err((_, stdout)) => {
-                    panic!("delete sub-organization {sub_org} failed\nstdout: {stdout}")
-                }
-            }
-        }
+        self.submit_activity_as(
+            &|| self.admin(),
+            "/public/v1/submit/delete_sub_organization",
+            "ACTIVITY_TYPE_DELETE_SUB_ORGANIZATION",
+            sub_org,
+            &json!({"deleteWithoutExport": true}),
+        );
     }
 }
 

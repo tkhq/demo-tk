@@ -118,11 +118,15 @@ fn quorum_approval_completes_and_rejection_fails_a_consensus_activity() {
         json!({"id": tag_activity, "status": "ACTIVITY_STATUS_CONSENSUS_NEEDED"})
     );
 
-    let timed_out =
-        run.err(
-            run.as_user(&approver)
-                .args(["activity", "wait", &tag_activity, "--timeout", "2"]),
-        );
+    // The activity stays in consensus, so any timeout expires; the budget only
+    // has to cover the polls that observe the pending status it reports back.
+    let timed_out = run.err(run.as_user(&approver).args([
+        "activity",
+        "wait",
+        &tag_activity,
+        "--timeout",
+        "10",
+    ]));
     assert_eq!(timed_out["reason"], "command_error");
     assert_eq!(timed_out["code"], "wait_timeout");
     assert_eq!(timed_out["details"]["activity"], pending["activity"]);

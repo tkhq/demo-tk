@@ -2,7 +2,6 @@
 
 mod auth;
 mod cli;
-mod commands;
 mod errors;
 mod gpg;
 mod keygen;
@@ -10,8 +9,10 @@ mod logging;
 mod operations;
 mod outcome;
 mod output;
+mod registry;
 mod resources;
 mod secrets;
+mod ssh;
 mod wallets;
 
 use crate::cli::Cli;
@@ -31,13 +32,14 @@ async fn main() -> ExitCode {
     // arguments. This path bypasses clap and the output shell entirely: its
     // stdout/stderr and file artifacts are ssh-keygen's contract, not tk's.
     if raw_args.first().is_some_and(|arg| arg == "-Y") {
-        return match turnkey_auth::git_sign::run_git_sign(&raw_args).await {
-            Ok(()) => ExitCode::SUCCESS,
+        let invocation = match ssh::shim::Invocation::parse(raw_args) {
+            Ok(invocation) => invocation,
             Err(error) => {
                 let _ = writeln!(io::stderr(), "error: {error:#}");
-                ExitCode::FAILURE
+                return ExitCode::FAILURE;
             }
         };
+        return ssh::shim::run(invocation).await;
     }
 
     // Git invokes `tk` through gpg.program with gpg style arguments. Like

@@ -17,13 +17,10 @@ const ORG: &str = "00000000-0000-4000-8000-000000000001";
 fn command(temp: &TempDir) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_tk"));
     for name in [
-        "TK_CONFIG",
         "TK_PROFILE",
-        "TURNKEY_TK_CONFIG_PATH",
         "TURNKEY_ORGANIZATION_ID",
         "TURNKEY_API_PUBLIC_KEY",
         "TURNKEY_API_PRIVATE_KEY",
-        "TURNKEY_PRIVATE_KEY_ID",
         "TURNKEY_API_BASE_URL",
     ] {
         command.env_remove(name);

@@ -29,10 +29,11 @@ tk --profile admin whoami --message-format json
 ```
 
 Login verifies the credential with `whoami` before saving the registry at
-`~/.config/turnkey/tk.config.toml` (override with `--config` or `TK_CONFIG`).
+`~/.config/turnkey/tk.config.toml`.
 Profiles identify users or credentials, so admin and agent profiles can share
-one organization. `profile delete` removes a registry entry only; `auth
-logout` clears the selection only.
+one organization. SSH and OpenPGP keys belong to organizations, not profiles.
+`profile delete` removes a registry entry only; `auth logout` clears the
+selection only.
 
 Identity resolution uses exactly one source per invocation:
 
