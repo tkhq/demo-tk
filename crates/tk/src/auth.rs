@@ -508,7 +508,7 @@ fn parse_key(private: &str, public: &str) -> Result<TurnkeyP256ApiKey> {
         .map_err(|_| InvalidInput("invalid P256 credential pair".into()).into())
 }
 
-async fn read_key(path: &Path) -> Result<TurnkeyP256ApiKey> {
+pub(crate) async fn read_key(path: &Path) -> Result<TurnkeyP256ApiKey> {
     let text = fs::read_to_string(path)
         .await
         .with_context(|| format!("read credential {}", path.display()))?;
@@ -723,6 +723,35 @@ async fn resolve_profile(
         stamper: read_key(api_key_file).await?,
         source: CredentialSource::Profile(name),
     })
+}
+
+/// A saved profile's identity, without its credential loaded.
+pub(crate) struct SavedProfile {
+    pub(crate) organization_id: Uuid,
+    pub(crate) api_base_url: ApiBaseUrl,
+    pub(crate) api_key_file: PathBuf,
+}
+
+pub(crate) async fn saved_profile(name: &str) -> Result<SavedProfile> {
+    let path = registry_path()?;
+    let Profile {
+        organization_id,
+        api_base_url,
+        api_key_file,
+    } = load(&path)
+        .await?
+        .profiles
+        .remove(name)
+        .ok_or_else(|| profile_missing(name))?;
+    Ok(SavedProfile {
+        organization_id,
+        api_base_url,
+        api_key_file,
+    })
+}
+
+pub(crate) fn api_keys_dir() -> Result<PathBuf> {
+    Ok(state_dir()?.join("api-keys"))
 }
 
 fn profile_missing(name: &str) -> InvalidInput {

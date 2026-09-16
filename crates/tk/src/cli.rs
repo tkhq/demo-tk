@@ -7,6 +7,7 @@ use crate::operations::{ActivityCommand, RequestArgs, run_activity};
 use crate::output::{ColorChoice, Ctx, ErrorMessage, MessageFormat, Shell, StdCtx};
 use crate::resources::{ApiKeyCommand, PolicyCommand, PreparedResource, UserCommand};
 use crate::secrets::{PreparedSecret, SecretCommand};
+use crate::sessions::{self, SessionCommand};
 use crate::ssh::{self, SshCommand};
 use crate::wallets::{PreparedWalletCommand, SignCommand, WalletCommand};
 use anyhow::Result;
@@ -228,6 +229,7 @@ async fn run_operation(
             .await;
             return emit(&mut ctx, result);
         }
+        Operation::Session { command } => sessions::run(command, options).await,
         Operation::Login(login) => auth::run_auth(AuthCommand::Login(login), options).await,
         Operation::Whoami => auth::run_auth(AuthCommand::Whoami, options).await,
         Operation::Auth { command } => auth::run_auth(command, options).await,
@@ -361,6 +363,11 @@ enum Operation {
         #[command(subcommand)]
         command: SecretCommand,
     },
+    /// Short-lived credentials for agent profiles.
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
     /// Create PGP keys as wallet accounts, register them, export them, and sign with them.
     Gpg {
         #[command(subcommand)]
@@ -406,6 +413,7 @@ impl Operation {
             Operation::Wallet { .. } => "wallet",
             Operation::Sign { .. } => "sign",
             Operation::Secret { .. } => "secret",
+            Operation::Session { .. } => "session",
             Operation::Gpg { .. } => "gpg",
             Operation::Login(_) => "login",
             Operation::Whoami => "whoami",
