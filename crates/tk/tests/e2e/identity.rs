@@ -392,3 +392,56 @@ fn profile_create_generates_a_credential_that_logs_in_once_registered() {
         })
     );
 }
+
+#[test]
+#[ignore]
+fn profile_set_switches_the_credential_file() {
+    let run = Run::new();
+    let admin = run.login_admin();
+    let next_key_file = run.home().join("next-key.json");
+    let generated = run.ok(run
+        .cli()
+        .args(["api-key", "generate", "--output"])
+        .arg(&next_key_file));
+    let next_public = generated["data"]["publicKey"].clone();
+
+    let set = run.ok(run
+        .cli()
+        .args(["profile", "set", &admin.name, "--api-key-file"])
+        .arg(&next_key_file));
+    assert_eq!(set["command"], "profile.set");
+    assert_eq!(
+        set["data"]["profile"]["api_key_file"],
+        fs::canonicalize(&next_key_file).unwrap().to_str().unwrap()
+    );
+    assert_eq!(set["data"]["publicKey"], next_public);
+    assert_eq!(
+        set["data"]["previousApiKeyFile"],
+        fs::canonicalize(&admin.key_file).unwrap().to_str().unwrap()
+    );
+
+    // The new key is not registered, so the profile no longer authenticates.
+    let denied = run.err(run.cli().args(["--profile", &admin.name, "whoami"]));
+    assert_eq!(denied["code"], "unauthorized", "{denied}");
+
+    let restored = run.ok(run
+        .cli()
+        .args(["profile", "set", &admin.name, "--api-key-file"])
+        .arg(&admin.key_file));
+    assert_eq!(
+        restored["data"]["profile"]["api_key_file"],
+        fs::canonicalize(&admin.key_file).unwrap().to_str().unwrap()
+    );
+    run.ok(run.cli().args(["--profile", &admin.name, "whoami"]));
+
+    let missing = run.err(
+        run.cli()
+            .args(["profile", "set", &admin.name, "--api-key-file"])
+            .arg(run.home().join("absent.json")),
+    );
+    assert_eq!(missing["code"], "invalid_input", "{missing}");
+    assert_eq!(
+        run.ok(run.cli().args(["profile", "show", &admin.name]))["data"]["profile"]["api_key_file"],
+        fs::canonicalize(&admin.key_file).unwrap().to_str().unwrap()
+    );
+}

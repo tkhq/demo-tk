@@ -133,11 +133,14 @@ impl Cli {
         );
         match command {
             Commands::Profile {
-                command: ProfileCommand::Saved(SavedProfileCommand::Set { .. }),
+                command:
+                    ProfileCommand::Saved(SavedProfileCommand::Set {
+                        api_key_file: None, ..
+                    }),
             } if auth.organization_id().is_none() && auth.api_base_url().is_none() => {
                 handle_parse_error(Cli::command().error(
                     ErrorKind::MissingRequiredArgument,
-                    "profile set requires --organization-id or --api-base-url",
+                    "profile set requires --organization-id, --api-base-url, or --api-key-file",
                 ))
             }
             Commands::Profile {

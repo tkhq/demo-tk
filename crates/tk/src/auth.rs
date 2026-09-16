@@ -105,10 +105,15 @@ pub enum SavedProfileCommand {
     Use { name: String },
     /// Remove a profile entry; credential files are kept.
     Delete { name: String },
-    /// Update the organization or API endpoint of a saved profile.
+    /// Update the organization, API endpoint, or credential file of a saved
+    /// profile.
     Set {
         /// Saved profile to update.
         name: String,
+        /// Existing P256 credential JSON file to use from now on; it is read
+        /// before the registry changes.
+        #[arg(long)]
+        api_key_file: Option<PathBuf>,
     },
 }
 
@@ -991,6 +996,32 @@ pub async fn create_profile(
     Ok(OperationOutput::result("profile.create", record))
 }
 
+struct SwitchedKey {
+    previous: PathBuf,
+    public_key: String,
+}
+
+/// Reads a credential file and makes it the profile's credential.
+async fn switch_key(profile: &mut Profile, api_key_file: PathBuf) -> Result<SwitchedKey> {
+    let current = match fs::canonicalize(&api_key_file).await {
+        Ok(current) => current,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            return Err(InvalidInput(format!(
+                "credential file {} does not exist",
+                api_key_file.display()
+            ))
+            .into());
+        }
+        Err(error) => return Err(error).context("resolve credential path"),
+    };
+    let key = read_key(&current).await?;
+    let previous = mem::replace(&mut profile.api_key_file, current);
+    Ok(SwitchedKey {
+        previous,
+        public_key: hex::encode(key.compressed_public_key()),
+    })
+}
+
 pub async fn run_profile(
     command: SavedProfileCommand,
     options: &AuthOptions,
@@ -1047,7 +1078,7 @@ pub async fn run_profile(
                 json!({"name": name, "credentialFilesDeleted": false}),
             ))
         }
-        SavedProfileCommand::Set { name } => {
+        SavedProfileCommand::Set { name, api_key_file } => {
             let profile = registry
                 .profiles
                 .get_mut(&name)
@@ -1058,12 +1089,15 @@ pub async fn run_profile(
             if let Some(api_base_url) = &options.api_base_url {
                 profile.api_base_url = ApiBaseUrl::try_from(api_base_url.clone())?;
             }
-            let record = serde_json::to_value(&*profile)?;
+            let mut record = json!({"name": name});
+            if let Some(api_key_file) = api_key_file {
+                let switched = switch_key(profile, api_key_file).await?;
+                record["publicKey"] = switched.public_key.into();
+                record["previousApiKeyFile"] = switched.previous.to_string_lossy().into();
+            }
+            record["profile"] = serde_json::to_value(&*profile)?;
             save(&path, &registry).await?;
-            Ok(OperationOutput::result(
-                "profile.set",
-                json!({"name": name, "profile": record}),
-            ))
+            Ok(OperationOutput::result("profile.set", record))
         }
     }
 }
