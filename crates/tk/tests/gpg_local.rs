@@ -252,7 +252,7 @@ fn a_key_whose_organization_has_no_profile_names_the_missing_login() {
         (
             cmd,
             format!(
-                r#"error: select a credential for OpenPGP key {FINGERPRINT}: no profile holds a credential for organization {KEY_ORG}; run tk login <name> --organization-id {KEY_ORG} --api-key-file <path>
+                r#"error: select a credential for OpenPGP key {FINGERPRINT}: no profile holds a credential for organization {KEY_ORG}; run tk profile create --profile-name <name> --organization-id {KEY_ORG}
 "#
             ),
         )

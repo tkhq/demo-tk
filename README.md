@@ -19,8 +19,8 @@ curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/tkhq/tk/
 ## Commands
 
 ```bash
-tk api-key generate --output ./agent-key.json
-tk login NAME --organization-id ORG_UUID --api-key-file ./key.json
+tk profile create --profile-name NAME --organization-id ORG_UUID
+tk login --profile-name NAME
 tk auth status
 tk profile show NAME
 tk ssh keys add --private-key-id PRIVATE_KEY_ID
@@ -51,11 +51,10 @@ The identity registry is stored at:
 ```
 
 ```bash
-# Generate a credential, then register its public key with Turnkey.
-tk api-key generate --output ./agent-key.json
-
-# Save the registered credential as a profile.
-tk login agent --organization-id ORG_UUID --api-key-file ./agent-key.json
+# Create a profile with a freshly generated credential, register the printed
+# public key with Turnkey, then log in.
+tk profile create --profile-name admin --organization-id ORG_UUID
+tk login --profile-name admin
 
 # Register a Turnkey Ed25519 key locally for SSH.
 tk ssh keys add --private-key-id PRIVATE_KEY_ID

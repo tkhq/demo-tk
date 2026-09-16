@@ -519,7 +519,7 @@ impl Run {
         (user_id, key)
     }
     // The admin key in `tk api-key generate` format.
-    pub(crate) fn admin_key_file(&self) -> PathBuf {
+    fn admin_key_file(&self) -> PathBuf {
         let path = self.home.path().join("admin-key.json");
         let mut file = OpenOptions::new()
             .write(true)
@@ -540,20 +540,23 @@ impl Run {
         path
     }
 
-    /// Logs the admin key in as a profile named after this run.
+    /// Saves the admin key as a profile named after this run and logs in.
     pub(crate) fn login_admin(&self) -> AdminLogin {
         let name = self.name("admin");
         let key_file = self.admin_key_file();
-        let record = self.ok(self
+        self.ok(self
             .cli()
             .args([
-                "login",
+                "profile",
+                "create",
+                "--profile-name",
                 &name,
                 "--organization-id",
                 self.org(),
                 "--api-key-file",
             ])
             .arg(&key_file));
+        let record = self.ok(self.cli().args(["login", "--profile-name", &name]));
         AdminLogin {
             name,
             key_file,

@@ -10,7 +10,7 @@ use tempfile::TempDir;
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{body_json, method, path},
+    matchers::{method, path},
 };
 
 const ORG: &str = "00000000-0000-4000-8000-000000000001";
@@ -132,46 +132,6 @@ api_key_file = "admin.json"
             .contains("relative api_key_file admin.json")
     );
 }
-#[tokio::test]
-async fn login_verifies_identity_and_selects_the_new_profile() {
-    let temp = TempDir::new().unwrap();
-    let key_path = temp.path().join("key.json");
-    key(&key_path);
-    let server = MockServer::start().await;
-    let identity = json!({"organizationId": ORG, "organizationName": "test", "userId": "user-1", "username": "alice"});
-    Mock::given(method("POST"))
-        .and(path("/public/v1/query/whoami"))
-        .and(body_json(json!({"organizationId": ORG})))
-        .respond_with(ResponseTemplate::new(200).set_body_json(&identity))
-        .expect(2)
-        .mount(&server)
-        .await;
-    let login = output(
-        command(&temp)
-            .args([
-                "--organization-id",
-                ORG,
-                "--api-base-url",
-                &server.uri(),
-                "login",
-                "admin",
-                "--api-key-file",
-            ])
-            .arg(&key_path),
-    );
-    assert_eq!(login["data"]["identity"], identity);
-    let whoami = output(command(&temp).arg("whoami"));
-    assert_eq!(whoami["data"], identity);
-
-    let parsed = failure(
-        command(&temp)
-            .env("TK_PROFILE", "ambient")
-            .args(["--organization-id", ORG, "login", "other", "--api-key-file"])
-            .arg(&key_path),
-        1,
-    );
-    assert_eq!(parsed["code"], "invalid_input");
-}
 
 #[tokio::test]
 async fn typed_client_does_not_follow_redirects() {
@@ -190,20 +150,22 @@ async fn typed_client_does_not_follow_redirects() {
         .expect(0)
         .mount(&server)
         .await;
-    let parsed = failure(
+    output(
         command(&temp)
             .args([
                 "--organization-id",
                 ORG,
                 "--api-base-url",
                 &server.uri(),
-                "login",
+                "profile",
+                "create",
+                "--profile-name",
                 "admin",
                 "--api-key-file",
             ])
             .arg(&key_path),
-        1,
     );
+    let parsed = failure(command(&temp).args(["login", "--profile-name", "admin"]), 1);
     assert_eq!(parsed["code"], "api_error");
     server.verify().await;
 }
@@ -277,6 +239,70 @@ fn empty_environment_bundle_does_not_fall_back_to_saved_admin() {
         "auth",
         "status",
     ]));
+}
+
+#[test]
+fn profile_create_and_login_reject_local_mismatches() {
+    let temp = TempDir::new().unwrap();
+    let missing_org = failure(command(&temp).args(["profile", "create"]), 2);
+    assert_eq!(missing_org["code"], "usage_error");
+    let empty_create = failure(
+        command(&temp).args([
+            "--organization-id",
+            ORG,
+            "profile",
+            "create",
+            "--profile-name",
+            "",
+        ]),
+        2,
+    );
+    assert_eq!(empty_create["code"], "usage_error");
+    let empty_login = failure(command(&temp).args(["login", "--profile-name", ""]), 2);
+    assert_eq!(empty_login["code"], "usage_error");
+
+    let missing_profile = failure(command(&temp).arg("login"), 1);
+    assert_eq!(missing_profile["code"], "invalid_input");
+    assert_eq!(
+        missing_profile["message"],
+        "profile default does not exist; run tk profile create --profile-name default --organization-id <org>"
+    );
+
+    output(command(&temp).args(["--organization-id", ORG, "profile", "create"]));
+
+    let duplicate = failure(
+        command(&temp).args(["--organization-id", ORG, "profile", "create"]),
+        1,
+    );
+    assert_eq!(duplicate["code"], "invalid_input");
+    assert_eq!(
+        duplicate["message"],
+        "profile default already exists; run tk login --profile-name default to select it"
+    );
+
+    let other_org = "00000000-0000-4000-8000-000000000002";
+    let org_mismatch = failure(
+        command(&temp).args(["--organization-id", other_org, "login"]),
+        1,
+    );
+    assert_eq!(org_mismatch["code"], "invalid_input");
+    assert_eq!(
+        org_mismatch["message"],
+        format!(
+            "profile default is saved with organization {ORG}; run tk profile set default --organization-id {other_org} to change it"
+        )
+    );
+    let url_mismatch = failure(
+        command(&temp).args(["--api-base-url", "https://example.com", "login"]),
+        1,
+    );
+    assert_eq!(url_mismatch["code"], "invalid_input");
+    assert_eq!(
+        url_mismatch["message"],
+        "profile default is saved with API base URL https://api.turnkey.com; run tk profile set default --api-base-url https://example.com to change it"
+    );
+    let ambient_profile = failure(command(&temp).env("TK_PROFILE", "ambient").arg("login"), 1);
+    assert_eq!(ambient_profile["code"], "invalid_input");
 }
 
 #[cfg(unix)]
