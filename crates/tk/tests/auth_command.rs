@@ -187,6 +187,7 @@ async fn typed_client_http_status_is_classified_end_to_end() {
             &server.uri(),
             "user",
             "get",
+            "--id",
             "00000000-0000-4000-8000-000000000002",
         ]),
         1,
@@ -219,7 +220,7 @@ fn stale_lock_file_from_a_dead_process_does_not_block() {
     registry(&temp);
     let lock = temp.path().join(".config/turnkey/tk.config.lock");
     fs::write(&lock, "99999").unwrap();
-    output(command(&temp).args(["profile", "use", "agent"]));
+    output(command(&temp).args(["profile", "use", "--profile-name", "agent"]));
 }
 
 #[test]

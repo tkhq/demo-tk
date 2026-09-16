@@ -130,7 +130,7 @@ async fn raw_request_http_status_keeps_the_api_message() {
         .mount(&server)
         .await;
     let result = record(
-        authed(&server.uri()).args(["activity", "get", "some-id"]),
+        authed(&server.uri()).args(["activity", "get", "--id", "some-id"]),
         1,
     );
     assert_eq!(result["reason"], "command_error");

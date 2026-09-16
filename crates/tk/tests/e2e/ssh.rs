@@ -215,6 +215,7 @@ fn ssh_key_register_list_print_and_remove_by_every_name() {
         "ssh",
         "keys",
         "remove",
+        "--key",
         "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     ]));
     assert_eq!(unknown_removal["code"], "invalid_input");
@@ -235,9 +236,10 @@ fn ssh_key_register_list_print_and_remove_by_every_name() {
         0o600
     );
 
-    let removed = run.ok(run
-        .admin_offline()
-        .args(["ssh", "keys", "remove", &fingerprint]));
+    let removed =
+        run.ok(run
+            .admin_offline()
+            .args(["ssh", "keys", "remove", "--key", &fingerprint]));
     assert_eq!(removed, registration_record("ssh_key_removed", &added));
     assert_eq!(
         run.ok(run.admin_offline().args(["ssh", "keys", "list"])),
@@ -248,7 +250,7 @@ fn ssh_key_register_list_print_and_remove_by_every_name() {
     assert_eq!(
         run.ok(run
             .admin_offline()
-            .args(["ssh", "keys", "remove", &public_key])),
+            .args(["ssh", "keys", "remove", "--key", &public_key])),
         registration_record("ssh_key_removed", &added)
     );
 
@@ -256,7 +258,7 @@ fn ssh_key_register_list_print_and_remove_by_every_name() {
     assert_eq!(
         run.ok(run
             .admin_offline()
-            .args(["ssh", "keys", "remove", &private_key_id])),
+            .args(["ssh", "keys", "remove", "--key", &private_key_id])),
         registration_record("ssh_key_removed", &added)
     );
     assert_eq!(
@@ -548,7 +550,7 @@ fn passthrough_signing_errors_name_the_key_and_git_sign_signs() {
                 "ssh",
                 "git-sign",
             ])
-            .args(["-Y", "sign", "-n", "git", "-f"])
+            .args(["--ssh-keygen-args", "-Y", "sign", "-n", "git", "-f"])
             .arg(&registered_public_key)
             .arg(&payload),
     );
@@ -556,7 +558,16 @@ fn passthrough_signing_errors_name_the_key_and_git_sign_signs() {
     assert!(!signature.exists());
     let signed = run.ok(run
         .admin()
-        .args(["ssh", "git-sign", "-Y", "sign", "-n", "git", "-f"])
+        .args([
+            "ssh",
+            "git-sign",
+            "--ssh-keygen-args",
+            "-Y",
+            "sign",
+            "-n",
+            "git",
+            "-f",
+        ])
         .arg(&registered_public_key)
         .arg(&payload));
     assert_eq!(signed, json!({"reason": "git_sign_completed"}));

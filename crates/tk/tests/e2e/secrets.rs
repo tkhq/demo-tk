@@ -16,6 +16,7 @@ fn secret_import_list_and_export_round_trip() {
             .args([
                 "secret",
                 "import",
+                "--name",
                 &name,
                 "--property",
                 "env=prod",
@@ -133,7 +134,7 @@ fn secret_import_list_and_export_round_trip() {
 
     let duplicate = run.err(
         run.admin()
-            .args(["secret", "import", &name])
+            .args(["secret", "import", "--name", &name])
             .write_stdin("other"),
     );
     assert_eq!(duplicate["reason"], "command_error");
@@ -228,7 +229,7 @@ fn secret_export_with_consensus_finishes_by_rerunning_the_command() {
 
     let approved = run.ok(run
         .as_user(&approver)
-        .args(["activity", "approve", &activity]));
+        .args(["activity", "approve", "--id", &activity]));
     assert_eq!(approved["activity"]["id"], activity);
     run.wait(&activity);
 
@@ -253,9 +254,10 @@ fn secret_export_with_consensus_finishes_by_rerunning_the_command() {
     let rejected_activity = pending["activity"]["id"].as_str().unwrap().to_string();
     assert_ne!(rejected_activity, activity);
     assert!(state.exists(), "a pending export keeps its recovery key");
-    let rejected = run.ok(run
-        .as_user(&approver)
-        .args(["activity", "reject", &rejected_activity]));
+    let rejected =
+        run.ok(run
+            .as_user(&approver)
+            .args(["activity", "reject", "--id", &rejected_activity]));
     assert_eq!(rejected["status"], "rejected");
 
     let failed = run.err(
@@ -277,7 +279,7 @@ fn secret_export_with_consensus_finishes_by_rerunning_the_command() {
     // The retry is a complete export in its own right: approved, it delivers.
     run.ok(run
         .as_user(&approver)
-        .args(["activity", "approve", &fresh_activity]));
+        .args(["activity", "approve", "--id", &fresh_activity]));
     run.wait(&fresh_activity);
     let retried = run.ok(run
         .as_user(&submitter)
@@ -353,7 +355,7 @@ fn a_pending_export_belongs_to_the_credential_that_started_it() {
 
     run.ok(run
         .as_user(&approver)
-        .args(["activity", "approve", &first_activity]));
+        .args(["activity", "approve", "--id", &first_activity]));
     run.wait(&first_activity);
     let delivered = run.ok(run
         .as_user(&owner)

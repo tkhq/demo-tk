@@ -573,7 +573,7 @@ mod tests {
     #[test]
     fn malformed_and_unsupported_inputs_fail_before_auth() {
         for args in [
-            vec!["user", "get", "not-a-uuid"],
+            vec!["user", "get", "--id", "not-a-uuid"],
             vec!["user", "delete"],
             vec!["policy", "delete"],
             vec!["policy", "list", "--cursor", "invented"],
@@ -658,7 +658,7 @@ mod tests {
                 "ACTIVITY_TYPE_UPDATE_USER",
             ),
             (
-                vec!["user", "delete", ID],
+                vec!["user", "delete", "--id", ID],
                 "delete_users",
                 "ACTIVITY_TYPE_DELETE_USERS",
             ),
@@ -673,7 +673,7 @@ mod tests {
                 "ACTIVITY_TYPE_UPDATE_USER_TAG",
             ),
             (
-                vec!["user", "tag", "delete", ID],
+                vec!["user", "tag", "delete", "--id", ID],
                 "delete_user_tags",
                 "ACTIVITY_TYPE_DELETE_USER_TAGS",
             ),
@@ -693,12 +693,12 @@ mod tests {
                 "ACTIVITY_TYPE_UPDATE_POLICY_V2",
             ),
             (
-                vec!["policy", "delete", ID],
+                vec!["policy", "delete", "--id", ID],
                 "delete_policy",
                 "ACTIVITY_TYPE_DELETE_POLICY",
             ),
             (
-                vec!["policy", "delete", ID, OTHER],
+                vec!["policy", "delete", "--id", ID, "--id", OTHER],
                 "delete_policies",
                 "ACTIVITY_TYPE_DELETE_POLICIES",
             ),
@@ -708,7 +708,7 @@ mod tests {
                 "ACTIVITY_TYPE_CREATE_API_KEYS_V2",
             ),
             (
-                vec!["api-key", "delete", "--user-id", ID, OTHER],
+                vec!["api-key", "delete", "--user-id", ID, "--id", OTHER],
                 "delete_api_keys",
                 "ACTIVITY_TYPE_DELETE_API_KEYS",
             ),
@@ -797,7 +797,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({"user": null})))
             .mount(&server)
             .await;
-        let result = prepare(&["user", "get", ID])
+        let result = prepare(&["user", "get", "--id", ID])
             .unwrap()
             .run(auth(&server))
             .await;
@@ -869,7 +869,7 @@ mod tests {
                 .expect(0)
                 .mount(&server)
                 .await;
-            let error = prepare(&["user", "delete", ID])
+            let error = prepare(&["user", "delete", "--id", ID])
                 .unwrap()
                 .run(auth(&server))
                 .await

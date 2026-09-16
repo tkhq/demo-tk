@@ -38,7 +38,7 @@ fn user_lifecycle_from_input_json_and_stdin() {
         .to_string();
 
     for (id, name) in [(&json_user, &json_name), (&stdin_user, &stdin_name)] {
-        let got = run.ok(run.admin().args(["user", "get", id]));
+        let got = run.ok(run.admin().args(["user", "get", "--id", id]));
         assert_eq!(got["command"], "user.get");
         assert_eq!(got["data"]["user"]["userId"], *id);
         assert_eq!(got["data"]["user"]["userName"], *name);
@@ -55,13 +55,13 @@ fn user_lifecycle_from_input_json_and_stdin() {
     assert!(listed.contains(&stdin_user.as_str()));
 
     let deleted = run.submit(
-        run.admin().args(["user", "delete", &stdin_user]),
+        run.admin().args(["user", "delete", "--id", &stdin_user]),
         "user.delete",
     );
     assert_eq!(
         result(&deleted, "deleteUsersResult")["userIds"],
         json!([stdin_user])
     );
-    let missing = run.err(run.admin().args(["user", "get", &stdin_user]));
+    let missing = run.err(run.admin().args(["user", "get", "--id", &stdin_user]));
     assert_eq!(missing["code"], "not_found");
 }

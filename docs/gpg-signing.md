@@ -33,7 +33,7 @@ tk gpg keys list
 tk gpg keys list --wallet-id WALLET_ID
 tk gpg keys add --wallet-id WALLET_ID --key FINGERPRINT
 tk gpg keys export --key FINGERPRINT
-tk gpg keys remove FINGERPRINT   # forgets the key; the wallet account stays
+tk gpg keys remove --key FINGERPRINT   # forgets the key; the wallet account stays
 ```
 
 ```bash
