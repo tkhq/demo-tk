@@ -51,6 +51,7 @@ fn registered_api_key_is_listed_for_its_user_and_gone_after_delete() {
         .unwrap_or_else(|| panic!("registered key missing from list: {listed}"));
     assert_eq!(ours["apiKeyName"], key_name);
     assert_eq!(ours["credential"]["publicKey"], public_key);
+    assert!(ours["expiresAt"].is_null(), "{ours}");
 
     let deleted = run.submit(
         run.admin()

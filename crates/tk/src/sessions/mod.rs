@@ -4,15 +4,18 @@
 //! key to a provisioner, which registers it with `provision`. The agent then
 //! switches to it with `activate` and watches its expiry with `status`.
 
+mod activate;
 pub(crate) mod duration;
 pub(crate) mod pending;
 mod provision;
 mod request;
+mod status;
 
 use anyhow::Result;
 use clap::Subcommand;
 
 pub use provision::ProvisionArgs;
+pub use status::StatusArgs;
 
 use crate::auth::{self, AuthOptions};
 use crate::operations::OperationOutput;
@@ -32,6 +35,15 @@ pub enum SessionCommand {
     /// Register a public key on a user as an expiring API key. Run with the
     /// provisioner's identity; re-run after approval.
     Provision(ProvisionArgs),
+    /// Switch a saved profile to its pending credential once it is registered.
+    Activate {
+        /// Saved profile with a pending session request.
+        #[arg(long = "profile-name")]
+        name: String,
+    },
+    /// Report when a saved profile's credential expires; exits with
+    /// `session_expiring` when less than `--warn-before` remains.
+    Status(StatusArgs),
 }
 
 pub async fn run(command: SessionCommand, options: &AuthOptions) -> Result<OperationOutput> {
@@ -40,5 +52,7 @@ pub async fn run(command: SessionCommand, options: &AuthOptions) -> Result<Opera
         SessionCommand::Provision(args) => {
             provision::run(auth::resolve(options).await?, args).await
         }
+        SessionCommand::Activate { name } => activate::run(name).await,
+        SessionCommand::Status(args) => status::run(args).await,
     }
 }

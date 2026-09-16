@@ -1025,9 +1025,23 @@ pub async fn create_profile(
     Ok(OperationOutput::result("profile.create", record))
 }
 
-struct SwitchedKey {
-    previous: PathBuf,
-    public_key: String,
+pub(crate) struct SwitchedKey {
+    pub(crate) previous: PathBuf,
+    pub(crate) public_key: String,
+}
+
+/// Points a saved profile at another credential file.
+pub(crate) async fn set_profile_key(name: &str, api_key_file: PathBuf) -> Result<SwitchedKey> {
+    let path = registry_path()?;
+    let _lock = registry_lock(&path).await?;
+    let mut registry = load(&path).await?;
+    let profile = registry
+        .profiles
+        .get_mut(name)
+        .ok_or_else(|| profile_missing(name))?;
+    let switched = switch_key(profile, api_key_file).await?;
+    save(&path, &registry).await?;
+    Ok(switched)
 }
 
 /// Reads a credential file and makes it the profile's credential.

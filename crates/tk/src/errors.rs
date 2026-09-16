@@ -47,6 +47,19 @@ pub(crate) fn assert_malformed_response(error: &anyhow::Error, chain: &[&str]) {
     assert_eq!(rendered, chain);
 }
 
+/// A credential ends within the caller's warning window.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "credential for profile {profile} expires in {seconds_left}s (at unix ms {expires_at_unix_ms}), inside the {warn_before_seconds}s warning window; request a new session"
+)]
+pub struct SessionExpiring {
+    pub profile: String,
+    pub public_key: String,
+    pub expires_at_unix_ms: u64,
+    pub seconds_left: u64,
+    pub warn_before_seconds: u64,
+}
+
 #[derive(Debug, thiserror::Error)]
 #[error("HTTP response was not successful: {status} ({body})")]
 pub struct UnexpectedHttpStatus {
@@ -109,6 +122,15 @@ impl ActivityError {
 }
 
 pub fn error_details(error: &anyhow::Error) -> Option<Value> {
+    if let Some(expiring) = error.downcast_ref::<SessionExpiring>() {
+        return Some(json!({
+            "profile": expiring.profile,
+            "publicKey": expiring.public_key,
+            "expiresAt": expiring.expires_at_unix_ms.to_string(),
+            "secondsLeft": expiring.seconds_left,
+            "warnBeforeSeconds": expiring.warn_before_seconds,
+        }));
+    }
     error
         .downcast_ref::<ActivityError>()
         .and_then(ActivityError::activity)
@@ -143,6 +165,8 @@ pub enum ErrorCode {
     SubmissionUnknown,
     /// `activity wait` timed out while the activity was still pending.
     WaitTimeout,
+    /// A session credential ends within the requested warning window.
+    SessionExpiring,
     /// Fallback for everything else.
     CommandError,
 }
@@ -169,6 +193,9 @@ pub fn classify(error: &anyhow::Error) -> Classification {
         }
         if cause.downcast_ref::<MissingResource>().is_some() {
             return Classification::new(ErrorCode::NotFound, None);
+        }
+        if cause.downcast_ref::<SessionExpiring>().is_some() {
+            return Classification::new(ErrorCode::SessionExpiring, None);
         }
         if let Some(http) = cause.downcast_ref::<UnexpectedHttpStatus>() {
             return classify_http_status(http.status);

@@ -56,6 +56,8 @@ Output format:
                                 be observed; inspect before resubmitting
         wait_timeout            activity wait ran out of time; resume with the
                                 same ID
+        session_expiring        the profile's credential ends within the
+                                --warn-before window; request a new session
         command_error           fallback for everything else
     Exit codes: 0 success, 1 runtime error, 2 usage error."#;
 

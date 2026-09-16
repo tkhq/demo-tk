@@ -330,6 +330,24 @@ impl ApiKeyCommand {
     }
 }
 
+/// Expiry as a unix millisecond string, from a listed key's `createdAt`
+/// seconds and `expirationSeconds`; null when the key does not expire.
+pub(crate) fn expires_at(key: &Value) -> Value {
+    let created = key["createdAt"]["seconds"]
+        .as_str()
+        .and_then(|seconds| seconds.parse::<u64>().ok());
+    let lifetime = key["expirationSeconds"]
+        .as_str()
+        .and_then(|seconds| seconds.parse::<u64>().ok());
+    match (created, lifetime) {
+        (Some(created), Some(lifetime)) => created
+            .checked_add(lifetime)
+            .and_then(|at| at.checked_mul(1000))
+            .map_or(Value::Null, |ms| Value::String(ms.to_string())),
+        _ => Value::Null,
+    }
+}
+
 impl PreparedResource {
     pub async fn run(self, auth: ResolvedAuth) -> Result<OperationOutput> {
         match self {
@@ -489,17 +507,22 @@ impl Query {
                         .await?,
                 )?,
             ),
-            Self::ApiKeys(user_id) => (
-                "api-key.list",
-                to_value(
+            Self::ApiKeys(user_id) => {
+                let mut listed = to_value(
                     client
                         .get_api_keys(query::GetApiKeysRequest {
                             organization_id,
                             user_id: user_id.map(|id| id.to_string()),
                         })
                         .await?,
-                )?,
-            ),
+                )?;
+                if let Some(keys) = listed["apiKeys"].as_array_mut() {
+                    for key in keys {
+                        key["expiresAt"] = expires_at(key);
+                    }
+                }
+                ("api-key.list", listed)
+            }
         };
         Ok(OperationOutput::result(command, data))
     }
