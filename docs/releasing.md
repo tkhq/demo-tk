@@ -4,13 +4,15 @@ Push a `v*` tag to start the `release` workflow. The workflow builds a native
 binary for every supported target, checksums each one, and publishes a GitHub
 release. `install.sh` installs from that release.
 
-1. Open a pull request that bumps `version` in `crates/tk/Cargo.toml` and
-   refreshes the pinned entry in `Cargo.lock`, and wait for CI to pass. CI,
-   the tag validation, and the release build run with `--locked`, so a stale
+1. Open a pull request that bumps `version` under `[workspace.package]` in the
+   root `Cargo.toml` and refreshes the pinned entries in `Cargo.lock`, and wait
+   for CI to pass. Every crate inherits that one version with
+   `version.workspace = true`, so the whole workspace moves together. CI, the
+   tag validation, and the release build run with `--locked`, so a stale
    lockfile fails all three:
 
    ```sh
-   cargo update -p tk --offline
+   cargo update -p tk -p turnkey_auth --offline
    ```
 2. Merge it to `main`.
 3. Tag the merge commit with the same version prefixed by `v` and push the
@@ -36,7 +38,9 @@ release. `install.sh` installs from that release.
 
 ## The manifest is the version
 
-`tk --version` reports the `tk` manifest version, and the release tag must match it.
+`tk --version` reports the `tk` manifest version, and the release tag must match
+it. That version lives in `[workspace.package]`, so bumping it there is what
+moves the release.
 
 ## Artifact contract
 
