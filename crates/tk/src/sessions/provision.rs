@@ -38,7 +38,8 @@ pub struct ProvisionArgs {
     label: Option<String>,
 }
 
-fn parse_public_key(text: &str) -> Result<String, String> {
+/// Normalizes a compressed P256 public key given as hex.
+pub(crate) fn parse_public_key(text: &str) -> Result<String, String> {
     let key = text.trim().to_ascii_lowercase();
     let valid = key.len() == 66
         && (key.starts_with("02") || key.starts_with("03"))

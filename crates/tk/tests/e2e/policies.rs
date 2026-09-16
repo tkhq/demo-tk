@@ -198,3 +198,53 @@ fn quorum_approval_completes_and_rejection_fails_a_consensus_activity() {
         .args(["activity", "get", &rejected_activity]));
     assert_eq!(inspected["status"], "rejected");
 }
+
+#[test]
+#[ignore]
+fn policy_create_from_flags() {
+    let run = Run::new();
+    let name = run.name("flag-policy");
+    let created = run.submit(
+        run.admin().args([
+            "policy",
+            "create",
+            "--name",
+            &name,
+            "--effect",
+            "deny",
+            "--condition",
+            "activity.resource == 'CREDENTIAL'",
+            "--consensus",
+            "approvers.any(user, user.tags.contains('00000000-0000-4000-8000-000000000001'))",
+            "--notes",
+            "tk e2e flags",
+        ]),
+        "policy.create",
+    );
+    let policy_id = result(&created, "createPolicyResult")["policyId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let got = run.ok(run.admin().args(["policy", "get", &policy_id]));
+    assert_eq!(got["data"]["policy"]["policyName"], name);
+    assert_eq!(got["data"]["policy"]["effect"], "EFFECT_DENY");
+    assert_eq!(
+        got["data"]["policy"]["condition"],
+        "activity.resource == 'CREDENTIAL'"
+    );
+    assert_eq!(
+        got["data"]["policy"]["consensus"],
+        "approvers.any(user, user.tags.contains('00000000-0000-4000-8000-000000000001'))"
+    );
+    assert_eq!(got["data"]["policy"]["notes"], "tk e2e flags");
+
+    let no_effect = run.err(run.admin().args([
+        "policy",
+        "create",
+        "--name",
+        &run.name("incomplete"),
+        "--condition",
+        "true",
+    ]));
+    assert_eq!(no_effect["code"], "invalid_input", "{no_effect}");
+}

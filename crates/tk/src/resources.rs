@@ -5,18 +5,21 @@ use std::{
 };
 
 use anyhow::Result;
-use clap::{Args, Subcommand};
+use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 use serde::{Serialize, de::DeserializeOwned};
-use serde_json::{Value, from_slice, to_value};
+use serde_json::{Value, from_slice, from_value, to_value};
+use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 use turnkey_client::generated::{
-    immutable::activity::v1 as intent, services::coordinator::public::v1 as query,
+    immutable::{activity::v1 as intent, common::v1 as common},
+    services::coordinator::public::v1 as query,
 };
 use uuid::Uuid;
 
 use crate::{
     auth::{ResolvedAuth, build_turnkey_client},
-    errors::{InvalidInput, Malformed, MissingResource},
-    operations::{OperationOutput, submit_activity},
+    errors::{ActivityError, ActivityErrorKind, InvalidInput, Malformed, MissingResource},
+    operations::{OperationOutput, query as query_api, submit_activity},
+    sessions::{duration::ExpiresIn, parse_public_key},
 };
 
 #[derive(Debug, Subcommand)]
@@ -25,8 +28,9 @@ pub enum UserCommand {
     Get {
         id: Uuid,
     },
-    /// Create one or more users from a `CreateUsersIntentV4` parameters object.
-    Create(BodyArgs),
+    /// Create a user from flags, or one or more users from a
+    /// `CreateUsersIntentV4` parameters object.
+    Create(CreateUserArgs),
     /// Update user name, email, phone, or tag membership.
     Update(BodyArgs),
     Delete {
@@ -42,7 +46,8 @@ pub enum UserCommand {
 #[derive(Debug, Subcommand)]
 pub enum TagCommand {
     List,
-    Create(BodyArgs),
+    /// Create a tag by name, or from a `CreateUserTagIntent` parameters object.
+    Create(CreateTagArgs),
     Update(BodyArgs),
     Delete {
         #[arg(required = true, num_args = 1..)]
@@ -56,8 +61,9 @@ pub enum PolicyCommand {
     Get {
         id: Uuid,
     },
-    /// Create a policy from a `CreatePolicyIntentV3` parameters object.
-    Create(BodyArgs),
+    /// Create a policy from flags, or from a `CreatePolicyIntentV3` parameters
+    /// object.
+    Create(CreatePolicyArgs),
     /// Create multiple policies from a parameters object containing policies.
     CreateBatch(BodyArgs),
     /// Update with policyEffect/policyCondition/policyConsensus field names.
@@ -98,6 +104,90 @@ pub struct BodyArgs {
     input_file: Option<PathBuf>,
 }
 
+/// Flags for one user, or a full parameters object.
+#[derive(Debug, Args)]
+#[command(group(ArgGroup::new("user_source").required(true).args(["input_json", "input_file", "user_name"])))]
+pub struct CreateUserArgs {
+    /// Inline JSON parameters (no activity envelope).
+    #[arg(long)]
+    input_json: Option<String>,
+    /// Read JSON parameters from a file, or - for stdin.
+    #[arg(long)]
+    input_file: Option<PathBuf>,
+    /// Name of the single user to create.
+    #[arg(long)]
+    user_name: Option<String>,
+    /// Email of the user.
+    #[arg(long, requires = "user_name")]
+    email: Option<String>,
+    /// Tag id to attach (repeatable).
+    #[arg(long = "tag", requires = "user_name")]
+    tags: Vec<Uuid>,
+    /// Tag name to attach, resolved against the organization's tags (repeatable).
+    #[arg(long = "tag-name", requires = "user_name")]
+    tag_names: Vec<String>,
+    /// Compressed P256 public key (hex) to register as the user's API key.
+    #[arg(long, requires = "user_name", value_parser = parse_public_key)]
+    public_key: Option<String>,
+    /// Lifetime of that API key, for example 7d; omit for a key that never expires.
+    #[arg(long, requires = "public_key")]
+    expires_in: Option<ExpiresIn>,
+    /// Also register a never-expiring anchor key whose private half is
+    /// generated here and discarded. Turnkey requires every user to hold one
+    /// long-lived credential, so this lets a user otherwise live on expiring
+    /// keys alone.
+    #[arg(long, requires = "user_name")]
+    anchor_key: bool,
+}
+
+/// A tag name, or a full parameters object.
+#[derive(Debug, Args)]
+#[command(group(ArgGroup::new("tag_source").required(true).args(["input_json", "input_file", "name"])))]
+pub struct CreateTagArgs {
+    /// Inline JSON parameters (no activity envelope).
+    #[arg(long)]
+    input_json: Option<String>,
+    /// Read JSON parameters from a file, or - for stdin.
+    #[arg(long)]
+    input_file: Option<PathBuf>,
+    /// Name of the new tag, with no members.
+    #[arg(long)]
+    name: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+pub enum EffectArg {
+    Allow,
+    Deny,
+}
+
+/// Policy fields as flags, or a full parameters object.
+#[derive(Debug, Args)]
+#[command(group(ArgGroup::new("policy_source").required(true).args(["input_json", "input_file", "name"])))]
+pub struct CreatePolicyArgs {
+    /// Inline JSON parameters (no activity envelope).
+    #[arg(long)]
+    input_json: Option<String>,
+    /// Read JSON parameters from a file, or - for stdin.
+    #[arg(long)]
+    input_file: Option<PathBuf>,
+    /// Name of the policy.
+    #[arg(long)]
+    name: Option<String>,
+    /// Whether matching activities are allowed or denied.
+    #[arg(long, value_enum, requires = "name")]
+    effect: Option<EffectArg>,
+    /// Condition expression, evaluated against the activity.
+    #[arg(long, requires = "name")]
+    condition: Option<String>,
+    /// Consensus expression, evaluated against the approvers.
+    #[arg(long, requires = "name")]
+    consensus: Option<String>,
+    /// Free-text notes stored with the policy.
+    #[arg(long, requires = "name")]
+    notes: Option<String>,
+}
+
 pub enum PreparedResource {
     Query(Query),
     Mutation(Mutation),
@@ -127,6 +217,11 @@ pub enum Mutation {
     DeletePolicies(intent::DeletePoliciesIntent),
     RegisterKeys(intent::CreateApiKeysIntentV2),
     DeleteKeys(intent::DeleteApiKeysIntent),
+    /// Users whose `--tag-name` values still need resolving to tag ids.
+    CreateUsersWithTagNames {
+        params: intent::CreateUsersIntentV4,
+        tag_names: Vec<String>,
+    },
 }
 
 impl BodyArgs {
@@ -234,12 +329,67 @@ impl UserCommand {
         Ok(match self {
             UserCommand::List => PreparedResource::Query(Query::Users),
             UserCommand::Get { id } => PreparedResource::Query(Query::User(id)),
-            UserCommand::Create(body) => {
-                let params: intent::CreateUsersIntentV4 = body.parse()?;
+            UserCommand::Create(CreateUserArgs {
+                input_json,
+                input_file,
+                user_name: None,
+                ..
+            }) => {
+                let params: intent::CreateUsersIntentV4 = BodyArgs {
+                    input_json,
+                    input_file,
+                }
+                .parse()?;
                 if params.users.is_empty() {
                     return Err(InvalidInput("users must contain at least one user".into()).into());
                 }
                 PreparedResource::Mutation(Mutation::CreateUsers(params))
+            }
+            UserCommand::Create(CreateUserArgs {
+                user_name: Some(user_name),
+                email,
+                tags,
+                tag_names,
+                public_key,
+                expires_in,
+                anchor_key,
+                ..
+            }) => {
+                let anchor = anchor_key.then(|| intent::ApiKeyParamsV2 {
+                    api_key_name: format!("{user_name}-anchor"),
+                    public_key: hex::encode(TurnkeyP256ApiKey::generate().compressed_public_key()),
+                    curve_type: common::ApiKeyCurve::P256,
+                    expiration_seconds: None,
+                });
+                let api_keys = anchor
+                    .into_iter()
+                    .chain(public_key.map(|public_key| intent::ApiKeyParamsV2 {
+                        api_key_name: format!("{user_name}-key"),
+                        public_key,
+                        curve_type: common::ApiKeyCurve::P256,
+                        expiration_seconds:
+                            expires_in.map(|expires_in| expires_in.seconds().to_string()),
+                    }))
+                    .collect();
+                let params = intent::CreateUsersIntentV4 {
+                    users: vec![intent::UserParamsV4 {
+                        user_name,
+                        user_email: email,
+                        user_phone_number: None,
+                        api_keys,
+                        authenticators: vec![],
+                        oauth_providers: vec![],
+                        user_tags: tags.iter().map(ToString::to_string).collect(),
+                    }],
+                };
+                if tag_names.is_empty() {
+                    PreparedResource::Mutation(Mutation::CreateUsers(params))
+                } else {
+                    PreparedResource::Mutation(Mutation::CreateUsersWithTagNames {
+                        params,
+                        tag_names,
+                    })
+                }
             }
             UserCommand::Update(body) => {
                 PreparedResource::Mutation(Mutation::UpdateUser(body.parse()?))
@@ -251,9 +401,26 @@ impl UserCommand {
             }
             UserCommand::Tag { command } => match command {
                 TagCommand::List => PreparedResource::Query(Query::Tags),
-                TagCommand::Create(body) => {
-                    PreparedResource::Mutation(Mutation::CreateTag(body.parse()?))
+                TagCommand::Create(CreateTagArgs {
+                    name: Some(user_tag_name),
+                    ..
+                }) => {
+                    PreparedResource::Mutation(Mutation::CreateTag(intent::CreateUserTagIntent {
+                        user_tag_name,
+                        user_ids: vec![],
+                    }))
                 }
+                TagCommand::Create(CreateTagArgs {
+                    input_json,
+                    input_file,
+                    name: None,
+                }) => PreparedResource::Mutation(Mutation::CreateTag(
+                    BodyArgs {
+                        input_json,
+                        input_file,
+                    }
+                    .parse()?,
+                )),
                 TagCommand::Update(body) => {
                     PreparedResource::Mutation(Mutation::UpdateTag(body.parse()?))
                 }
@@ -272,9 +439,49 @@ impl PolicyCommand {
         Ok(match self {
             PolicyCommand::List => PreparedResource::Query(Query::Policies),
             PolicyCommand::Get { id } => PreparedResource::Query(Query::Policy(id)),
-            PolicyCommand::Create(body) => {
-                PreparedResource::Mutation(Mutation::CreatePolicy(body.parse()?))
+            PolicyCommand::Create(CreatePolicyArgs {
+                name: Some(policy_name),
+                effect,
+                condition,
+                consensus,
+                notes,
+                ..
+            }) => {
+                let Some(effect) = effect else {
+                    return Err(
+                        InvalidInput("--effect allow|deny is required with --name".into()).into(),
+                    );
+                };
+                if condition.is_none() && consensus.is_none() {
+                    return Err(InvalidInput(
+                        "at least one of --condition or --consensus is required with --name".into(),
+                    )
+                    .into());
+                }
+                PreparedResource::Mutation(Mutation::CreatePolicy(intent::CreatePolicyIntentV3 {
+                    policy_name,
+                    effect: match effect {
+                        EffectArg::Allow => common::Effect::Allow,
+                        EffectArg::Deny => common::Effect::Deny,
+                    },
+                    condition,
+                    consensus,
+                    notes: notes.unwrap_or_default(),
+                    time: None,
+                }))
             }
+            PolicyCommand::Create(CreatePolicyArgs {
+                input_json,
+                input_file,
+                name: None,
+                ..
+            }) => PreparedResource::Mutation(Mutation::CreatePolicy(
+                BodyArgs {
+                    input_json,
+                    input_file,
+                }
+                .parse()?,
+            )),
             PolicyCommand::CreateBatch(body) => {
                 let params: intent::CreatePoliciesIntent = body.parse()?;
                 if params.policies.is_empty() {
@@ -359,7 +566,20 @@ impl PreparedResource {
 
 impl Mutation {
     async fn run(self, auth: ResolvedAuth) -> Result<OperationOutput> {
-        let (command, endpoint, kind, params) = match self {
+        let resolved = match self {
+            Self::CreateUsersWithTagNames {
+                mut params,
+                tag_names,
+            } => {
+                let tag_ids = resolve_tag_names(&auth, tag_names).await?;
+                for user in &mut params.users {
+                    user.user_tags.extend(tag_ids.iter().cloned());
+                }
+                Self::CreateUsers(params)
+            }
+            other => other,
+        };
+        let (command, endpoint, kind, params) = match resolved {
             Self::CreateUsers(p) => (
                 "user.create",
                 "create_users",
@@ -438,9 +658,55 @@ impl Mutation {
                 "ACTIVITY_TYPE_DELETE_API_KEYS",
                 to_value(p)?,
             ),
+            Self::CreateUsersWithTagNames { .. } => {
+                return Err(InvalidInput("tag names were not resolved".into()).into());
+            }
         };
         submit_activity(&auth, command, endpoint, kind, &params).await
     }
+}
+
+/// Tag ids for the given names; each name must match exactly one tag.
+async fn resolve_tag_names(auth: &ResolvedAuth, names: Vec<String>) -> Result<Vec<String>> {
+    let listed: query::ListUserTagsResponse = from_value(
+        query_api(
+            "/public/v1/query/list_user_tags",
+            &query::ListUserTagsRequest {
+                organization_id: auth.org_id.to_string(),
+            },
+            &auth.api_base_url,
+            &auth.stamper,
+        )
+        .await?,
+    )
+    .map_err(|error| {
+        ActivityError::new(
+            ActivityErrorKind::MalformedResponse,
+            "list_user_tags response was malformed",
+        )
+        .with_source(error)
+    })?;
+    names
+        .into_iter()
+        .map(|name| {
+            let matches: Vec<&str> = listed
+                .user_tags
+                .iter()
+                .filter(|tag| tag.tag_name == name)
+                .map(|tag| tag.tag_id.as_str())
+                .collect();
+            match matches.as_slice() {
+                [] => Err(MissingResource::new("user tag", name).into()),
+                [one] => Ok((*one).to_owned()),
+                many => Err(InvalidInput(format!(
+                    "{} tags are named {name}; pass --tag with one of: {}",
+                    many.len(),
+                    many.join(", ")
+                ))
+                .into()),
+            }
+        })
+        .collect()
 }
 
 impl Query {
@@ -533,12 +799,11 @@ impl Query {
 #[allow(clippy::disallowed_types)]
 mod tests {
     use super::*;
-    use crate::errors::{ActivityError, ActivityErrorKind, Classification, ErrorCode, classify};
+    use crate::errors::{Classification, ErrorCode, classify};
     use clap::Parser;
-    use serde_json::{from_value, json, to_vec};
+    use serde_json::{json, to_vec};
     use std::iter::once;
     use tempfile::NamedTempFile;
-    use turnkey_api_key_stamper::TurnkeyP256ApiKey;
     use turnkey_client::generated::external::activity::v1 as activity;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,

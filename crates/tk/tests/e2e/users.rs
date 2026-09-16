@@ -65,3 +65,94 @@ fn user_lifecycle_from_input_json_and_stdin() {
     let missing = run.err(run.admin().args(["user", "get", &stdin_user]));
     assert_eq!(missing["code"], "not_found");
 }
+
+#[test]
+#[ignore]
+fn user_and_tag_create_from_flags() {
+    let run = Run::new();
+    let tag_name = run.name("agent");
+    let tagged = run.submit(
+        run.admin()
+            .args(["user", "tag", "create", "--name", &tag_name]),
+        "user.tag.create",
+    );
+    let tag_id = result(&tagged, "createUserTagResult")["userTagId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let key = run.key();
+    let public_key = hex::encode(key.compressed_public_key());
+    let user_name = run.name("flag-user");
+
+    // Turnkey requires one long-lived credential per user.
+    let expiring_only = run.err(run.admin().args([
+        "user",
+        "create",
+        "--user-name",
+        &user_name,
+        "--public-key",
+        &public_key,
+        "--expires-in",
+        "2h",
+    ]));
+    assert_eq!(expiring_only["code"], "api_error", "{expiring_only}");
+    assert_eq!(expiring_only["httpStatus"], 400, "{expiring_only}");
+
+    let created = run.submit(
+        run.admin().args([
+            "user",
+            "create",
+            "--user-name",
+            &user_name,
+            "--tag-name",
+            &tag_name,
+            "--public-key",
+            &public_key,
+            "--expires-in",
+            "2h",
+            "--anchor-key",
+        ]),
+        "user.create",
+    );
+    let user_id = result(&created, "createUsersResult")["userIds"][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let got = run.ok(run.admin().args(["user", "get", &user_id]));
+    assert_eq!(got["data"]["user"]["userName"], user_name);
+    assert_eq!(got["data"]["user"]["userTags"], json!([tag_id]));
+    let keys = run.ok(run.admin().args(["api-key", "list", "--user-id", &user_id]));
+    let ours = keys["data"]["apiKeys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["credential"]["publicKey"] == public_key)
+        .unwrap_or_else(|| panic!("registered key missing: {keys}"));
+    assert_eq!(ours["apiKeyName"], format!("{user_name}-key"));
+    assert_eq!(ours["expirationSeconds"], "7200");
+    assert!(ours["expiresAt"].is_string(), "{ours}");
+    let anchor = keys["data"]["apiKeys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|k| k["apiKeyName"] == format!("{user_name}-anchor"))
+        .unwrap_or_else(|| panic!("anchor key missing: {keys}"));
+    assert!(anchor["expirationSeconds"].is_null(), "{anchor}");
+    assert_eq!(keys["data"]["apiKeys"].as_array().unwrap().len(), 2);
+
+    // The new user can authenticate with the flagged key.
+    let whoami = run.ok(run.as_user(&key).arg("whoami"));
+    assert_eq!(whoami["data"]["userId"], user_id);
+
+    let unknown_tag = run.err(run.admin().args([
+        "user",
+        "create",
+        "--user-name",
+        &run.name("orphan"),
+        "--tag-name",
+        &run.name("no-such-tag"),
+    ]));
+    assert_eq!(unknown_tag["code"], "not_found", "{unknown_tag}");
+}
