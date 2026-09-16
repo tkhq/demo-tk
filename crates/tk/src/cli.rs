@@ -1,4 +1,6 @@
-use crate::auth::{self, AuthCommand, AuthOptions, LoginArgs, ProfileCommand, ResolvedAuth};
+use crate::auth::{
+    self, AuthCommand, AuthOptions, LoginArgs, ProfileCommand, ResolvedAuth, SavedProfileCommand,
+};
 use crate::gpg::{self, GpgCommand};
 use crate::keygen::GenerateArgs;
 use crate::operations::{ActivityCommand, RequestArgs, run_activity};
@@ -113,88 +115,120 @@ struct OutputOptions {
 
 impl Cli {
     pub async fn run() -> ExitCode {
-        let args = match Cli::try_parse() {
+        let Cli {
+            auth,
+            output,
+            command,
+        } = match Cli::try_parse() {
             Ok(args) => args,
             Err(error) => return handle_parse_error(error),
         };
-        if matches!(
-            &args.command,
-            Commands::Profile {
-                command: ProfileCommand::Set { .. }
-            }
-        ) && args.auth.organization_id().is_none()
-            && args.auth.api_base_url().is_none()
-        {
-            return handle_parse_error(Cli::command().error(
-                ErrorKind::MissingRequiredArgument,
-                "profile set requires --organization-id or --api-base-url",
-            ));
-        }
-        args.run_parsed().await
-    }
-
-    async fn run_parsed(self) -> ExitCode {
         debug!(
-            command = self.command.name(),
-            non_interactive = self.output.non_interactive,
-            message_format = ?self.output.message_format,
-            color = ?self.output.color,
+            command = command.name(),
+            non_interactive = output.non_interactive,
+            message_format = ?output.message_format,
+            color = ?output.color,
             "dispatching"
         );
-
-        let shell = Shell::standard(self.output.message_format, self.output.color);
-        let mut ctx = Ctx::new(shell, self.output.non_interactive);
-        auth::sweep_state().await;
-        let options = &self.auth;
-        let result = match self.command {
-            Commands::Ssh { command } => return emit(&mut ctx, ssh::run(command, options).await),
-            Commands::ApiKey {
-                command: ApiKeyCommands::Generate(generate),
-            } => return emit(&mut ctx, generate.run().await),
-            Commands::Gpg { command } => return emit(&mut ctx, gpg::run(command, options).await),
-            Commands::Request(request) => {
-                run_prepared(request.prepare(), options, async |prepared, auth| {
-                    prepared.run(&auth).await
-                })
-                .await
+        match command {
+            Commands::Profile {
+                command: ProfileCommand::Saved(SavedProfileCommand::Set { .. }),
+            } if auth.organization_id().is_none() && auth.api_base_url().is_none() => {
+                handle_parse_error(Cli::command().error(
+                    ErrorKind::MissingRequiredArgument,
+                    "profile set requires --organization-id or --api-base-url",
+                ))
             }
-            Commands::Activity { command } => {
-                run_prepared(Ok(command), options, async |command, auth| {
-                    run_activity(command, &auth).await
-                })
-                .await
+            Commands::Profile {
+                command: ProfileCommand::Create(create),
+            } => {
+                let Some(organization_id) = auth.organization_id() else {
+                    return handle_parse_error(Cli::command().error(
+                        ErrorKind::MissingRequiredArgument,
+                        "profile create requires --organization-id",
+                    ));
+                };
+                let api_base_url = auth::endpoint_override(&auth).map(Option::unwrap_or_default);
+                let mut ctx = ready(output).await;
+                let result = match api_base_url {
+                    Ok(api_base_url) => {
+                        auth::create_profile(create, organization_id, api_base_url).await
+                    }
+                    Err(error) => Err(error),
+                };
+                emit(&mut ctx, result)
             }
-            Commands::User { command } => {
-                run_prepared(command.prepare(), options, PreparedResource::run).await
+            Commands::Profile {
+                command: ProfileCommand::Saved(command),
+            } => {
+                let mut ctx = ready(output).await;
+                emit(&mut ctx, auth::run_profile(command, &auth).await)
             }
-            Commands::Policy { command } => {
-                run_prepared(command.prepare(), options, PreparedResource::run).await
-            }
-            Commands::ApiKey {
-                command: ApiKeyCommands::Remote(command),
-            } => run_prepared(command.prepare(), options, PreparedResource::run).await,
-            Commands::Wallet { command } => {
-                run_prepared(command.prepare(), options, PreparedWalletCommand::run).await
-            }
-            Commands::Sign { command } => {
-                run_prepared(command.prepare(), options, PreparedWalletCommand::run).await
-            }
-            Commands::Secret { command } => {
-                let result = run_prepared(
-                    command.prepare(ctx.is_non_interactive()),
-                    options,
-                    PreparedSecret::run,
-                )
-                .await;
-                return emit(&mut ctx, result);
-            }
-            Commands::Login(login) => auth::run_auth(AuthCommand::Login(login), options).await,
-            Commands::Whoami => auth::run_auth(AuthCommand::Whoami, options).await,
-            Commands::Auth { command } => auth::run_auth(command, options).await,
-            Commands::Profile { command } => auth::run_profile(command, options).await,
-        };
-        emit(&mut ctx, result)
+            Commands::Operation(operation) => run_operation(&auth, output, operation).await,
+        }
     }
+}
+
+async fn ready(output: OutputOptions) -> StdCtx {
+    let shell = Shell::standard(output.message_format, output.color);
+    let ctx = Ctx::new(shell, output.non_interactive);
+    auth::sweep_state().await;
+    ctx
+}
+
+async fn run_operation(
+    options: &AuthOptions,
+    output: OutputOptions,
+    operation: Operation,
+) -> ExitCode {
+    let mut ctx = ready(output).await;
+    let result = match operation {
+        Operation::Ssh { command } => return emit(&mut ctx, ssh::run(command, options).await),
+        Operation::ApiKey {
+            command: ApiKeyCommands::Generate(generate),
+        } => return emit(&mut ctx, generate.run().await),
+        Operation::Gpg { command } => return emit(&mut ctx, gpg::run(command, options).await),
+        Operation::Request(request) => {
+            run_prepared(request.prepare(), options, async |prepared, auth| {
+                prepared.run(&auth).await
+            })
+            .await
+        }
+        Operation::Activity { command } => {
+            run_prepared(Ok(command), options, async |command, auth| {
+                run_activity(command, &auth).await
+            })
+            .await
+        }
+        Operation::User { command } => {
+            run_prepared(command.prepare(), options, PreparedResource::run).await
+        }
+        Operation::Policy { command } => {
+            run_prepared(command.prepare(), options, PreparedResource::run).await
+        }
+        Operation::ApiKey {
+            command: ApiKeyCommands::Remote(command),
+        } => run_prepared(command.prepare(), options, PreparedResource::run).await,
+        Operation::Wallet { command } => {
+            run_prepared(command.prepare(), options, PreparedWalletCommand::run).await
+        }
+        Operation::Sign { command } => {
+            run_prepared(command.prepare(), options, PreparedWalletCommand::run).await
+        }
+        Operation::Secret { command } => {
+            let result = run_prepared(
+                command.prepare(ctx.is_non_interactive()),
+                options,
+                PreparedSecret::run,
+            )
+            .await;
+            return emit(&mut ctx, result);
+        }
+        Operation::Login(login) => auth::run_auth(AuthCommand::Login(login), options).await,
+        Operation::Whoami => auth::run_auth(AuthCommand::Whoami, options).await,
+        Operation::Auth { command } => auth::run_auth(command, options).await,
+    };
+    emit(&mut ctx, result)
 }
 
 async fn run_prepared<P, M>(
@@ -270,6 +304,17 @@ fn args_request_json_output(args: impl IntoIterator<Item = OsString>) -> bool {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    #[command(flatten)]
+    Operation(Operation),
+    /// Manage named API identities.
+    Profile {
+        #[command(subcommand)]
+        command: ProfileCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum Operation {
     /// Inspect, approve, reject, and wait for activities.
     Activity {
         #[command(subcommand)]
@@ -317,7 +362,7 @@ enum Commands {
         #[command(subcommand)]
         command: GpgCommand,
     },
-    /// Save an existing API credential as a named profile and select it.
+    /// Verify a saved profile with Turnkey and select it.
     Login(LoginArgs),
     /// Verify the selected identity remotely.
     Whoami,
@@ -325,11 +370,6 @@ enum Commands {
     Auth {
         #[command(subcommand)]
         command: AuthCommand,
-    },
-    /// Manage named API identities.
-    Profile {
-        #[command(subcommand)]
-        command: ProfileCommand,
     },
 }
 
@@ -344,20 +384,28 @@ enum ApiKeyCommands {
 impl Commands {
     fn name(&self) -> &'static str {
         match self {
-            Commands::Activity { .. } => "activity",
-            Commands::Ssh { .. } => "ssh",
-            Commands::Request(_) => "request",
-            Commands::User { .. } => "user",
-            Commands::Policy { .. } => "policy",
-            Commands::ApiKey { .. } => "api-key",
-            Commands::Wallet { .. } => "wallet",
-            Commands::Sign { .. } => "sign",
-            Commands::Secret { .. } => "secret",
-            Commands::Gpg { .. } => "gpg",
-            Commands::Login(_) => "login",
-            Commands::Whoami => "whoami",
-            Commands::Auth { .. } => "auth",
+            Commands::Operation(operation) => operation.name(),
             Commands::Profile { .. } => "profile",
+        }
+    }
+}
+
+impl Operation {
+    fn name(&self) -> &'static str {
+        match self {
+            Operation::Activity { .. } => "activity",
+            Operation::Ssh { .. } => "ssh",
+            Operation::Request(_) => "request",
+            Operation::User { .. } => "user",
+            Operation::Policy { .. } => "policy",
+            Operation::ApiKey { .. } => "api-key",
+            Operation::Wallet { .. } => "wallet",
+            Operation::Sign { .. } => "sign",
+            Operation::Secret { .. } => "secret",
+            Operation::Gpg { .. } => "gpg",
+            Operation::Login(_) => "login",
+            Operation::Whoami => "whoami",
+            Operation::Auth { .. } => "auth",
         }
     }
 }

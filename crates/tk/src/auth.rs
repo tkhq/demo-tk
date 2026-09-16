@@ -1,10 +1,10 @@
 use anyhow::{Context, Error, Result, bail};
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, builder::NonEmptyStringValueParser};
 use reqwest::{ClientBuilder, Url, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, btree_map::Entry},
     fmt::{self, Display, Formatter},
     io::{self, ErrorKind},
     mem,
@@ -24,6 +24,7 @@ use uuid::Uuid;
 use crate::{
     errors::{InvalidInput, Malformed, OrganizationMismatch},
     gpg::registry::{GpgKeyEntry, GpgKeyTable, KeyName, SelectError, SigningKeyName, StoredGpgKey},
+    keygen::{GeneratedApiKey, generate},
     operations::OperationOutput,
     ssh::registry::{
         SelectError as SshSelectError, SshKeyEntry, SshKeyName, SshKeyTable, StoredSshKey,
@@ -31,6 +32,7 @@ use crate::{
 };
 
 const DEFAULT_URL: &str = "https://api.turnkey.com";
+const DEFAULT_PROFILE_NAME: &str = "default";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Args)]
@@ -63,7 +65,7 @@ impl AuthOptions {
 
 #[derive(Debug, Subcommand)]
 pub enum AuthCommand {
-    /// Save and select an existing API credential after verifying it remotely.
+    /// Verify a saved profile with Turnkey and select it.
     Login(LoginArgs),
     /// Inspect local credential readiness without contacting the server.
     Status,
@@ -75,15 +77,26 @@ pub enum AuthCommand {
 
 #[derive(Debug, Args)]
 pub struct LoginArgs {
-    /// Name for the new profile.
+    /// Saved profile to verify and select.
+    #[arg(
+        long = "profile-name",
+        default_value = DEFAULT_PROFILE_NAME,
+        value_parser = NonEmptyStringValueParser::new()
+    )]
     name: String,
-    /// Existing P256 credential JSON file (public key, private key, curve).
-    #[arg(long)]
-    api_key_file: PathBuf,
 }
 
 #[derive(Debug, Subcommand)]
 pub enum ProfileCommand {
+    /// Save a new profile without contacting Turnkey, generating a credential
+    /// when none is given.
+    Create(CreateArgs),
+    #[command(flatten)]
+    Saved(SavedProfileCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum SavedProfileCommand {
     /// List saved profiles and the active selection.
     List,
     /// Show one saved profile.
@@ -97,6 +110,22 @@ pub enum ProfileCommand {
         /// Saved profile to update.
         name: String,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct CreateArgs {
+    /// Name for the new profile.
+    #[arg(
+        long = "profile-name",
+        default_value = DEFAULT_PROFILE_NAME,
+        value_parser = NonEmptyStringValueParser::new()
+    )]
+    name: String,
+    /// Existing P256 credential JSON file (public key, private key, curve).
+    /// Without it, a fresh credential is written under
+    /// ~/.config/turnkey/tk/api-keys/.
+    #[arg(long)]
+    api_key_file: Option<PathBuf>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -145,11 +174,11 @@ impl Default for Registry {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct Profile {
     organization_id: Uuid,
-    api_base_url: String,
+    api_base_url: ApiBaseUrl,
     api_key_file: PathBuf,
 }
 
@@ -186,12 +215,27 @@ impl Display for SelectedIdentity {
 /// An HTTP(S) origin, optionally with a path prefix, that carries no
 /// credentials, query, or fragment. The text is kept exactly as supplied so
 /// persisted and reported values match the input.
-#[derive(Serialize)]
-#[serde(transparent)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[cfg_attr(test, derive(Debug))]
+#[serde(try_from = "String")]
 pub struct ApiBaseUrl(String);
 
-impl ApiBaseUrl {
-    fn parse(raw: String) -> Result<Self> {
+impl Default for ApiBaseUrl {
+    fn default() -> Self {
+        Self(DEFAULT_URL.to_owned())
+    }
+}
+
+impl Display for ApiBaseUrl {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl TryFrom<String> for ApiBaseUrl {
+    type Error = Error;
+
+    fn try_from(raw: String) -> Result<Self> {
         let url =
             Url::parse(&raw).map_err(|error| Malformed::new("invalid API base URL", error))?;
         if !matches!(url.scheme(), "https" | "http")
@@ -208,15 +252,11 @@ impl ApiBaseUrl {
         }
         Ok(Self(raw))
     }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
-impl From<ApiBaseUrl> for String {
-    fn from(url: ApiBaseUrl) -> Self {
-        url.0
+impl ApiBaseUrl {
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -232,7 +272,7 @@ impl ResolvedAuth {
     pub fn for_tests(org_id: &str, api_base_url: &str, stamper: TurnkeyP256ApiKey) -> Self {
         Self {
             org_id: Uuid::parse_str(org_id).expect("test organization ID is a UUID"),
-            api_base_url: ApiBaseUrl::parse(api_base_url.into())
+            api_base_url: ApiBaseUrl::try_from(api_base_url.to_owned())
                 .expect("test API base URL is a valid HTTP(S) URL"),
             stamper,
             source: CredentialSource::Environment,
@@ -476,14 +516,13 @@ async fn read_key(path: &Path) -> Result<TurnkeyP256ApiKey> {
     parse_key(&key.private_key, &key.public_key)
 }
 
-fn endpoint(options: &AuthOptions, fallback: &str) -> Result<ApiBaseUrl> {
-    ApiBaseUrl::parse(
-        options
-            .api_base_url
-            .clone()
-            .or_else(|| env("TURNKEY_API_BASE_URL"))
-            .unwrap_or_else(|| fallback.to_owned()),
-    )
+pub(crate) fn endpoint_override(options: &AuthOptions) -> Result<Option<ApiBaseUrl>> {
+    options
+        .api_base_url
+        .clone()
+        .or_else(|| env("TURNKEY_API_BASE_URL"))
+        .map(ApiBaseUrl::try_from)
+        .transpose()
 }
 
 const ENV_BUNDLE: [&str; 3] = [
@@ -584,7 +623,7 @@ impl LoadedRegistry {
         let chosen = match candidates.len() {
             0 => {
                 return Err(InvalidInput(format!(
-                    "no profile holds a credential for organization {organization_id}; run tk login <name> --organization-id {organization_id} --api-key-file <path>"
+                    "no profile holds a credential for organization {organization_id}; run tk profile create --profile-name <name> --organization-id {organization_id}"
                 ))
                 .into());
             }
@@ -657,7 +696,7 @@ fn resolve_environment(options: &AuthOptions) -> Result<Option<ResolvedAuth>> {
     };
     Ok(Some(ResolvedAuth {
         org_id: org,
-        api_base_url: endpoint(options, DEFAULT_URL)?,
+        api_base_url: endpoint_override(options)?.unwrap_or_default(),
         stamper: parse_key(&private, &public)?,
         source: CredentialSource::Environment,
     }))
@@ -675,7 +714,7 @@ async fn resolve_profile(
     } = profile;
     Ok(ResolvedAuth {
         org_id: options.organization_id.unwrap_or(*organization_id),
-        api_base_url: endpoint(options, api_base_url)?,
+        api_base_url: endpoint_override(options)?.unwrap_or_else(|| api_base_url.clone()),
         stamper: read_key(api_key_file).await?,
         source: CredentialSource::Profile(name),
     })
@@ -823,80 +862,155 @@ pub async fn run_auth(command: AuthCommand, options: &AuthOptions) -> Result<Ope
                 json!({"activeProfile": null, "environmentCredentialsPresent": present}),
             ))
         }
-        AuthCommand::Login(args) => {
-            if options.profile.is_some() {
-                return Err(InvalidInput(
-                    "login names its profile positionally; do not pass --profile or TK_PROFILE"
-                        .into(),
-                )
-                .into());
-            }
-            let org = options
-                .organization_id
-                .ok_or_else(|| InvalidInput("login requires --organization-id".into()))?;
-            let path = registry_path()?;
-            if load(&path).await?.profiles.contains_key(&args.name) {
-                return Err(InvalidInput(format!(
-                    "profile {} already exists; use profile use to select it",
-                    args.name
-                ))
-                .into());
-            }
-            let key_path = fs::canonicalize(args.api_key_file)
-                .await
-                .context("resolve credential path")?;
-            let base_url = endpoint(options, DEFAULT_URL)?;
-            let identity = build_turnkey_client(read_key(&key_path).await?, &base_url)?
-                .get_whoami(GetWhoamiRequest {
-                    organization_id: org.to_string(),
-                })
-                .await
-                .map_err(Error::new)
-                .context("Turnkey API request failed")?;
-            let _lock = registry_lock(&path).await?;
-            let mut registry = load(&path).await?;
-            if registry.profiles.contains_key(&args.name) {
-                return Err(InvalidInput(format!(
-                    "profile {} already exists; use profile use to select it",
-                    args.name
-                ))
-                .into());
-            }
-            registry.profiles.insert(
-                args.name.clone(),
-                Profile {
-                    organization_id: org,
-                    api_base_url: base_url.into(),
-                    api_key_file: key_path,
-                },
-            );
-            registry.active_profile = Some(args.name.clone());
-            save(&path, &registry).await?;
-            Ok(OperationOutput::result(
-                "auth.login",
-                json!({"profile": args.name, "identity": identity}),
-            ))
-        }
+        AuthCommand::Login(args) => login(args, options).await,
     }
 }
 
+async fn login(args: LoginArgs, options: &AuthOptions) -> Result<OperationOutput> {
+    let LoginArgs { name } = args;
+    if options.profile.is_some() {
+        return Err(InvalidInput(
+            "login selects a profile with --profile-name; do not pass --profile or TK_PROFILE"
+                .into(),
+        )
+        .into());
+    }
+    let path = registry_path()?;
+    let Some(profile) = load(&path).await?.profiles.remove(&name) else {
+        return Err(InvalidInput(format!(
+            "profile {name} does not exist; run tk profile create --profile-name {name} --organization-id <org>"
+        ))
+        .into());
+    };
+    let Profile {
+        organization_id,
+        api_base_url,
+        api_key_file,
+    } = &profile;
+    if let Some(requested) = options.organization_id
+        && requested != *organization_id
+    {
+        return Err(InvalidInput(format!(
+            "profile {name} is saved with organization {organization_id}; run tk profile set {name} --organization-id {requested} to change it"
+        ))
+        .into());
+    }
+    if let Some(requested) = endpoint_override(options)?
+        && requested != *api_base_url
+    {
+        return Err(InvalidInput(format!(
+            "profile {name} is saved with API base URL {api_base_url}; run tk profile set {name} --api-base-url {requested} to change it"
+        ))
+        .into());
+    }
+    let identity = build_turnkey_client(read_key(api_key_file).await?, api_base_url)?
+        .get_whoami(GetWhoamiRequest {
+            organization_id: organization_id.to_string(),
+        })
+        .await
+        .map_err(Error::new)
+        .context("Turnkey API request failed")?;
+    let _lock = registry_lock(&path).await?;
+    let mut registry = load(&path).await?;
+    let current = registry
+        .profiles
+        .get(&name)
+        .ok_or_else(|| profile_missing(&name))?;
+    if *current != profile {
+        return Err(InvalidInput(format!(
+            "profile {name} changed during login; run tk login --profile-name {name} again"
+        ))
+        .into());
+    }
+    let record = json!({"profile": name, "identity": identity});
+    registry.active_profile = Some(name);
+    save(&path, &registry).await?;
+    Ok(OperationOutput::result("auth.login", record))
+}
+
+pub async fn create_profile(
+    args: CreateArgs,
+    organization_id: Uuid,
+    api_base_url: ApiBaseUrl,
+) -> Result<OperationOutput> {
+    let CreateArgs { name, api_key_file } = args;
+    let path = registry_path()?;
+    let _lock = registry_lock(&path).await?;
+    let mut registry = load(&path).await?;
+    let slot = match registry.profiles.entry(name) {
+        Entry::Occupied(existing) => {
+            let name = existing.key();
+            return Err(InvalidInput(format!(
+                "profile {name} already exists; run tk login --profile-name {name} to select it"
+            ))
+            .into());
+        }
+        Entry::Vacant(slot) => slot,
+    };
+    let (api_key_file, public_key, generated) = match api_key_file {
+        Some(file) => {
+            let resolved = fs::canonicalize(&file)
+                .await
+                .context("resolve credential path")?;
+            let key = read_key(&resolved).await?;
+            (resolved, hex::encode(key.compressed_public_key()), None)
+        }
+        None => {
+            let GeneratedApiKey { public_key, path } = generate(None).await?;
+            match fs::canonicalize(&path)
+                .await
+                .context("resolve credential path")
+            {
+                Ok(resolved) => (resolved, public_key, Some(path)),
+                Err(error) => {
+                    let _ = fs::remove_file(&path).await;
+                    return Err(error);
+                }
+            }
+        }
+    };
+    let profile = Profile {
+        organization_id,
+        api_base_url,
+        api_key_file,
+    };
+    let name = slot.key();
+    let record = json!({
+        "name": name,
+        "profile": profile,
+        "publicKey": public_key,
+        "nextStep": format!("register public key {public_key} (API_KEY_CURVE_P256) on a user in organization {organization_id}, then run tk login --profile-name {name}"),
+    });
+    slot.insert(profile);
+    if let Err(error) = save(&path, &registry).await {
+        if let Some(generated) = generated {
+            let _ = fs::remove_file(generated).await;
+        }
+        return Err(error);
+    }
+    Ok(OperationOutput::result("profile.create", record))
+}
+
 pub async fn run_profile(
-    command: ProfileCommand,
+    command: SavedProfileCommand,
     options: &AuthOptions,
 ) -> Result<OperationOutput> {
     let path = registry_path()?;
-    let _lock = if matches!(&command, ProfileCommand::List | ProfileCommand::Show { .. }) {
+    let _lock = if matches!(
+        &command,
+        SavedProfileCommand::List | SavedProfileCommand::Show { .. }
+    ) {
         None
     } else {
         Some(registry_lock(&path).await?)
     };
     let mut registry = load(&path).await?;
     match command {
-        ProfileCommand::List => Ok(OperationOutput::result(
+        SavedProfileCommand::List => Ok(OperationOutput::result(
             "profile.list",
             json!({"activeProfile": registry.active_profile, "profiles": registry.profiles}),
         )),
-        ProfileCommand::Show { name } => {
+        SavedProfileCommand::Show { name } => {
             let profile = registry
                 .profiles
                 .get(&name)
@@ -906,7 +1020,7 @@ pub async fn run_profile(
                 json!({"name": name, "profile": profile}),
             ))
         }
-        ProfileCommand::Use { name } => {
+        SavedProfileCommand::Use { name } => {
             let profile = registry
                 .profiles
                 .get(&name)
@@ -919,7 +1033,7 @@ pub async fn run_profile(
                 json!({"activeProfile": name}),
             ))
         }
-        ProfileCommand::Delete { name } => {
+        SavedProfileCommand::Delete { name } => {
             registry
                 .profiles
                 .remove(&name)
@@ -933,7 +1047,7 @@ pub async fn run_profile(
                 json!({"name": name, "credentialFilesDeleted": false}),
             ))
         }
-        ProfileCommand::Set { name } => {
+        SavedProfileCommand::Set { name } => {
             let profile = registry
                 .profiles
                 .get_mut(&name)
@@ -942,7 +1056,7 @@ pub async fn run_profile(
                 profile.organization_id = organization_id;
             }
             if let Some(api_base_url) = &options.api_base_url {
-                profile.api_base_url = ApiBaseUrl::parse(api_base_url.clone())?.into();
+                profile.api_base_url = ApiBaseUrl::try_from(api_base_url.clone())?;
             }
             let record = serde_json::to_value(&*profile)?;
             save(&path, &registry).await?;
@@ -957,6 +1071,14 @@ pub async fn run_profile(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_default_api_base_url_parses() {
+        assert_eq!(
+            ApiBaseUrl::default(),
+            ApiBaseUrl::try_from(DEFAULT_URL.to_owned()).unwrap()
+        );
+    }
 
     #[tokio::test]
     async fn sweep_removes_only_files_older_than_the_cutoff() {

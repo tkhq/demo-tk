@@ -9,7 +9,7 @@ use assert_cmd::Command;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::run::{Run, result};
+use crate::run::{AdminLogin, Run, result};
 
 const USER_ID: &str = "tk e2e <tk-e2e@example.com>";
 const SECOND_USER_ID: &str = "tk e2e second <tk-e2e-2@example.com>";
@@ -271,20 +271,7 @@ fn gpg_keys_create_list_export_sign_remove_and_add() {
 fn gpg_key_organization_selects_the_profile() {
     let run = Run::new();
     let wallet = create_wallet(&run);
-    let profile = run.name("admin");
-    let key_file = run.admin_key_file();
-    let org = run.org();
-
-    let login = run.ok(run
-        .cli()
-        .args([
-            "login",
-            &profile,
-            "--organization-id",
-            org,
-            "--api-key-file",
-        ])
-        .arg(&key_file));
+    let AdminLogin { record: login, .. } = run.login_admin();
     assert_eq!(login["command"], "auth.login");
 
     let created = create_key_with(&run, &mut run.cli(), &wallet, USER_ID);

@@ -1,8 +1,23 @@
-use crate::run::{AdminLogin, Run};
+use crate::run::{AdminLogin, Run, result};
 use serde_json::{Value, json};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
 use uuid::Uuid;
+
+fn stored_key(path: &Path, record: &Value) -> Value {
+    let stored: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+    assert_eq!(
+        fs::metadata(path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(
+        !record
+            .to_string()
+            .contains(stored["private_key"].as_str().unwrap())
+    );
+    stored
+}
 
 #[test]
 #[ignore]
@@ -13,11 +28,7 @@ fn api_key_generate_writes_0600_and_prints_only_public_key() {
         .cli()
         .args(["api-key", "generate", "--output"])
         .arg(&path));
-    let stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    assert_eq!(
-        fs::metadata(&path).unwrap().permissions().mode() & 0o777,
-        0o600
-    );
+    let stored = stored_key(&path, &record);
     assert_eq!(record["schemaVersion"], 1);
     assert_eq!(record["reason"], "command_result");
     assert_eq!(record["command"], "api-key.generate");
@@ -26,10 +37,25 @@ fn api_key_generate_writes_0600_and_prints_only_public_key() {
         record["data"],
         json!({"publicKey": stored["public_key"], "curve": "p256", "path": path})
     );
-    assert!(
-        !record
-            .to_string()
-            .contains(stored["private_key"].as_str().unwrap())
+}
+
+#[test]
+#[ignore]
+fn api_key_generate_without_output_writes_to_the_state_directory() {
+    let run = Run::new();
+    let record = run.ok(run.cli().args(["api-key", "generate"]));
+    let public_key = record["data"]["publicKey"].as_str().unwrap().to_owned();
+    let path = run
+        .home()
+        .join(".config/turnkey/tk/api-keys")
+        .join(format!("{public_key}.json"));
+    let stored = stored_key(&path, &record);
+    assert_eq!(stored["public_key"], public_key);
+    assert_eq!(record["command"], "api-key.generate");
+    assert_eq!(record["status"], "completed");
+    assert_eq!(
+        record["data"],
+        json!({"publicKey": public_key, "curve": "p256", "path": path})
     );
 }
 
@@ -188,15 +214,26 @@ fn profile_flag_beats_ambient_bundle() {
 
 #[test]
 #[ignore]
-fn complete_bundle_works_without_home() {
+fn complete_bundle_authenticates_without_a_profile() {
     let run = Run::new();
-    let whoami = run.ok(run.admin().env_remove("HOME").arg("whoami"));
+    let whoami = run.ok(run.admin().arg("whoami"));
     assert_eq!(whoami["command"], "auth.whoami");
     assert_eq!(whoami["data"]["organizationId"], run.org());
+    let users = run.ok(run.admin().args(["user", "list"]));
+    assert_eq!(users["command"], "user.list");
     assert!(!run.registry_path().exists());
     let status = run.ok(run.admin().env_remove("HOME").args(["auth", "status"]));
-    assert_eq!(status["data"]["credentialSource"], "environment");
-    assert_eq!(status["data"]["profile"], Value::Null);
+    assert_eq!(
+        status["data"],
+        json!({
+            "ready": true,
+            "profile": Value::Null,
+            "organizationId": run.org(),
+            "apiBaseUrl": run.config.api_base_url,
+            "publicKey": run.config.public_key,
+            "credentialSource": "environment",
+        })
+    );
 }
 
 #[test]
@@ -216,7 +253,7 @@ fn partial_bundle_is_invalid_input_without_registry_fallback() {
 
 #[test]
 #[ignore]
-fn login_with_unregistered_credential_fails_and_writes_no_profile() {
+fn login_with_unregistered_credential_fails_and_selects_nothing() {
     let run = Run::new();
     let key = run.key();
     let key_file = run.home.path().join("unregistered.json");
@@ -230,19 +267,128 @@ fn login_with_unregistered_credential_fails_and_writes_no_profile() {
         .to_string(),
     )
     .unwrap();
-    let error = run.err(
-        run.cli()
-            .args([
-                "login",
-                &run.name("nope"),
-                "--organization-id",
-                run.org(),
-                "--api-key-file",
-            ])
-            .arg(&key_file),
-    );
+    let name = run.name("nope");
+    run.ok(run
+        .cli()
+        .args([
+            "profile",
+            "create",
+            "--profile-name",
+            &name,
+            "--organization-id",
+            run.org(),
+            "--api-key-file",
+        ])
+        .arg(&key_file));
+    let error = run.err(run.cli().args(["login", "--profile-name", &name]));
     assert_eq!(error["reason"], "command_error");
     assert_eq!(error["code"], "unauthorized");
     assert_eq!(error["httpStatus"], 401);
-    assert!(!run.registry_path().exists());
+    assert_eq!(
+        run.ok(run.cli().args(["profile", "list"]))["data"]["activeProfile"],
+        Value::Null
+    );
+}
+
+#[test]
+#[ignore]
+fn profile_create_generates_a_credential_that_logs_in_once_registered() {
+    let run = Run::new();
+    let name = run.name("fresh");
+    let org = run.org();
+    let created = run.ok(run.cli().args([
+        "profile",
+        "create",
+        "--profile-name",
+        &name,
+        "--organization-id",
+        org,
+    ]));
+    assert_eq!(created["command"], "profile.create");
+    let public_key = created["data"]["publicKey"].as_str().unwrap().to_string();
+    let key_file = fs::canonicalize(
+        run.home()
+            .join(".config/turnkey/tk/api-keys")
+            .join(format!("{public_key}.json")),
+    )
+    .unwrap();
+    let profile = json!({
+        "organization_id": org,
+        "api_base_url": run.config.api_base_url,
+        "api_key_file": key_file,
+    });
+    assert_eq!(
+        created["data"],
+        json!({
+            "name": name,
+            "profile": profile,
+            "publicKey": public_key,
+            "nextStep": format!("register public key {public_key} (API_KEY_CURVE_P256) on a user in organization {org}, then run tk login --profile-name {name}"),
+        })
+    );
+    let stored = stored_key(&key_file, &created);
+    run.secrets
+        .borrow_mut()
+        .push(stored["private_key"].as_str().unwrap().to_owned());
+    assert_eq!(stored["public_key"], public_key);
+    assert_eq!(
+        run.ok(run.cli().args(["profile", "show", &name]))["data"],
+        json!({"name": name, "profile": profile})
+    );
+
+    let unregistered = run.err(run.cli().args(["login", "--profile-name", &name]));
+    assert_eq!(unregistered["code"], "unauthorized");
+    assert_eq!(unregistered["httpStatus"], 401);
+    assert_eq!(
+        run.err(run.cli().args(["auth", "status"]))["code"],
+        "invalid_input"
+    );
+
+    let (user_id, _) = run.create_user("fresh-login");
+    let registered = run.submit(
+        run.admin().args([
+            "api-key",
+            "register",
+            "--input-json",
+            &json!({
+                "userId": user_id,
+                "apiKeys": [{
+                    "apiKeyName": run.name("fresh-key"),
+                    "publicKey": public_key,
+                    "curveType": "API_KEY_CURVE_P256",
+                }],
+            })
+            .to_string(),
+        ]),
+        "api-key.register",
+    );
+    assert_eq!(
+        result(&registered, "createApiKeysResult")["apiKeyIds"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let login = run.ok(run.cli().args(["login", "--profile-name", &name]));
+    assert_eq!(login["command"], "auth.login");
+    let whoami = run.ok(run.cli().args(["--profile", &name, "whoami"]));
+    assert_eq!(whoami["command"], "auth.whoami");
+    assert_eq!(whoami["data"]["userId"], user_id);
+    assert_eq!(
+        login["data"],
+        json!({"profile": name, "identity": whoami["data"]})
+    );
+    let status = run.ok(run.cli().args(["auth", "status"]));
+    assert_eq!(
+        status["data"],
+        json!({
+            "ready": true,
+            "profile": name,
+            "organizationId": org,
+            "apiBaseUrl": run.config.api_base_url,
+            "publicKey": public_key,
+            "credentialSource": "profile",
+        })
+    );
 }

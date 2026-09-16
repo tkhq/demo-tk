@@ -10,26 +10,16 @@ failures, the last observed `activity` identity.
 
 ## Identity
 
-Generate a credential file without contacting Turnkey:
+Create a profile, register its public key, then log in:
 
 ```sh
-tk api-key generate --output ./agent-key.json
-```
-
-The output contains only the public key and destination; the private key is
-written to a newly created file with mode 0600 and is never printed. Register
-the public key with Turnkey before using it to authenticate.
-
-Save and select an existing registered identity:
-
-```sh
-tk login admin --organization-id ORG_UUID --api-key-file ./admin-key.json
+tk profile create --profile-name admin --organization-id ORG_UUID
+tk login --profile-name admin
 tk --profile admin auth status
 tk --profile admin whoami --message-format json
 ```
 
-Login verifies the credential with `whoami` before saving the registry at
-`~/.config/turnkey/tk.config.toml`.
+The registry lives at `~/.config/turnkey/tk.config.toml`.
 Profiles identify users or credentials, so admin and agent profiles can share
 one organization. SSH and OpenPGP keys belong to organizations, not profiles.
 `profile delete` removes a registry entry only; `auth logout` clears the
