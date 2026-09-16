@@ -1,0 +1,30 @@
+# Activities
+
+Every mutation is an activity. Inspect, vote on, and wait for them.
+
+```bash
+tk activity list --limit 50
+tk activity list --limit 50 --cursor ACTIVITY_ID
+tk activity get ACTIVITY_ID
+```
+
+Consensus:
+
+```bash
+# Approver: one vote per command.
+tk --profile approver activity approve ACTIVITY_ID
+tk --profile approver activity reject ACTIVITY_ID
+
+# Submitter: block until the activity ends.
+tk activity wait ACTIVITY_ID --timeout 60
+```
+
+`wait` fails with `api_error` when the activity ends rejected or failed and
+with `wait_timeout` when time runs out. Run it again with the same ID to
+resume.
+
+To see which policies decided an activity:
+
+```bash
+tk policy evaluations ACTIVITY_ID
+```
