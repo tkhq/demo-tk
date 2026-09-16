@@ -67,13 +67,7 @@ pub struct KeyArgs {
 
 #[derive(Debug, Args)]
 pub struct GitSignArgs {
-    /// The ssh-keygen style arguments, exactly as git passes them.
-    #[arg(
-        long = "ssh-keygen-args",
-        value_name = "ARG",
-        num_args = 1..,
-        allow_hyphen_values = true
-    )]
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     ssh_keygen_args: Vec<String>,
 }
 
