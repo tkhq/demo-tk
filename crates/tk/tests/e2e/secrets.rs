@@ -373,3 +373,90 @@ fn a_pending_export_belongs_to_the_credential_that_started_it() {
         second_activity
     );
 }
+
+#[test]
+#[ignore]
+fn secret_env_exports_matching_secrets_as_dotenv() {
+    let run = Run::new();
+    let prefix = run.name("svc");
+    for (var, value) in [
+        ("API_TOKEN", "tok-1"),
+        ("DB_URL", "postgres://u:p@h/db?x=1 y"),
+    ] {
+        run.submit(
+            run.admin()
+                .args([
+                    "secret",
+                    "import",
+                    &format!("{prefix}/{var}"),
+                    "--property",
+                    "consensus=unilateral",
+                ])
+                .write_stdin(value),
+            "secret.import",
+        );
+    }
+    run.submit(
+        run.admin()
+            .args([
+                "secret",
+                "import",
+                &format!("{prefix}/OTHER"),
+                "--property",
+                "consensus=approval",
+            ])
+            .write_stdin("nope"),
+        "secret.import",
+    );
+
+    let human = run.human_stdout(run.admin().args([
+        "secret",
+        "env",
+        "--name-prefix",
+        &format!("{prefix}/"),
+        "--property",
+        "consensus=unilateral",
+        "--message-format",
+        "human",
+    ]));
+    assert_eq!(
+        human,
+        "API_TOKEN=tok-1\nDB_URL='postgres://u:p@h/db?x=1 y'\n"
+    );
+
+    let record = run.ok(run.admin().args([
+        "secret",
+        "env",
+        "--name-prefix",
+        &format!("{prefix}/"),
+        "--property",
+        "consensus=unilateral",
+    ]));
+    assert_eq!(record["command"], "secret.env");
+    assert_eq!(record["status"], "completed");
+    assert_eq!(
+        record["data"]["env"],
+        json!({"API_TOKEN": "tok-1", "DB_URL": "postgres://u:p@h/db?x=1 y"})
+    );
+    assert_eq!(record["data"]["pending"], json!([]));
+    let exported: Vec<&str> = record["data"]["exported"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|entry| entry["var"].as_str().unwrap())
+        .collect();
+    assert_eq!(exported, ["API_TOKEN", "DB_URL"]);
+
+    // Without the property filter the approval secret is included too.
+    let all = run.ok(run
+        .admin()
+        .args(["secret", "env", "--name-prefix", &format!("{prefix}/")]));
+    assert_eq!(all["data"]["env"]["OTHER"], "nope");
+
+    let nothing =
+        run.err(
+            run.admin()
+                .args(["secret", "env", "--name-prefix", &run.name("absent/")]),
+        );
+    assert_eq!(nothing["code"], "invalid_input", "{nothing}");
+}

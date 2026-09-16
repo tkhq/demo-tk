@@ -24,12 +24,11 @@ async fn a_submission_that_fails_leaves_no_recipient_key_on_disk() {
     let (dir, auth, secret_id) = fixture(&server);
     let binding = Binding::of(&auth);
 
-    let error = export(
+    let error = export_value(
         dir.path(),
-        QuorumPublicKey::production_signer(),
-        auth,
-        SecretRef::Id(secret_id),
-        None,
+        &QuorumPublicKey::production_signer(),
+        &auth,
+        secret_id,
         UniqueKeyValues::parse(vec![], "--context").unwrap(),
     )
     .await
@@ -63,12 +62,11 @@ async fn state_written_against_another_endpoint_is_refused() {
     )
     .unwrap();
 
-    let error = export(
+    let error = export_value(
         dir.path(),
-        QuorumPublicKey::production_signer(),
-        auth,
-        SecretRef::Id(secret_id),
-        None,
+        &QuorumPublicKey::production_signer(),
+        &auth,
+        secret_id,
         UniqueKeyValues::parse(vec![], "--context").unwrap(),
     )
     .await

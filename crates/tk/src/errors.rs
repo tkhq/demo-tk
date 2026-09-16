@@ -47,6 +47,14 @@ pub(crate) fn assert_malformed_response(error: &anyhow::Error, chain: &[&str]) {
     assert_eq!(rendered, chain);
 }
 
+/// Activities that still need approval before a command can finish.
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct PendingApprovals {
+    pub message: String,
+    pub pending: Value,
+}
+
 /// A credential ends within the caller's warning window.
 #[derive(Debug, thiserror::Error)]
 #[error(
@@ -122,6 +130,9 @@ impl ActivityError {
 }
 
 pub fn error_details(error: &anyhow::Error) -> Option<Value> {
+    if let Some(pending) = error.downcast_ref::<PendingApprovals>() {
+        return Some(json!({"pending": pending.pending}));
+    }
     if let Some(expiring) = error.downcast_ref::<SessionExpiring>() {
         return Some(json!({
             "profile": expiring.profile,
@@ -196,6 +207,9 @@ pub fn classify(error: &anyhow::Error) -> Classification {
         }
         if cause.downcast_ref::<SessionExpiring>().is_some() {
             return Classification::new(ErrorCode::SessionExpiring, None);
+        }
+        if cause.downcast_ref::<PendingApprovals>().is_some() {
+            return Classification::new(ErrorCode::ApprovalRequired, None);
         }
         if let Some(http) = cause.downcast_ref::<UnexpectedHttpStatus>() {
             return classify_http_status(http.status);

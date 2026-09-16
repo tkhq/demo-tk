@@ -1,9 +1,10 @@
+mod env;
 mod export;
 mod import;
 mod input;
 
 use anyhow::Result;
-use clap::{Args, Subcommand};
+use clap::{ArgGroup, Args, Subcommand};
 use serde::{Serialize, Serializer};
 use std::fmt::{self, Display, Formatter};
 use std::fs;
@@ -39,6 +40,17 @@ pub enum SecretCommand {
         /// Policy-visible property bound to the secret.
         #[arg(long = "property", value_name = "KEY=VALUE", value_parser = parse_key_value)]
         properties: Vec<KeyValue>,
+    },
+    /// Export every matching secret and print dotenv lines for a process's
+    /// startup environment. Names are <prefix>/<VAR>; VAR is the line's key.
+    #[command(group = ArgGroup::new("selector").required(true).multiple(true))]
+    Env {
+        /// Only secrets carrying this static property (repeatable; all must match).
+        #[arg(long = "property", value_name = "KEY=VALUE", value_parser = parse_key_value, group = "selector")]
+        properties: Vec<KeyValue>,
+        /// Only secrets whose name starts with this prefix, for example hermes/.
+        #[arg(long, group = "selector")]
+        name_prefix: Option<String>,
     },
     /// Export a secret's value; re-run after approval.
     Export {
@@ -97,6 +109,10 @@ pub enum PreparedSecret {
         out: Option<PathBuf>,
         context: UniqueKeyValues,
     },
+    Env {
+        properties: UniqueKeyValues,
+        name_prefix: Option<String>,
+    },
 }
 
 impl SecretCommand {
@@ -117,6 +133,13 @@ impl SecretCommand {
                     properties,
                 }
             }
+            Self::Env {
+                properties,
+                name_prefix,
+            } => PreparedSecret::Env {
+                properties: UniqueKeyValues::parse(properties, "--property")?,
+                name_prefix,
+            },
             Self::Export {
                 secret,
                 out,
@@ -184,6 +207,10 @@ impl PreparedSecret {
                 out,
                 context,
             } => export::run(auth, secret, out, context).await,
+            Self::Env {
+                properties,
+                name_prefix,
+            } => env::run(auth, properties, name_prefix).await,
         }
     }
 }
