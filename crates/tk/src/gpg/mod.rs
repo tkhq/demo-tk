@@ -81,6 +81,7 @@ pub struct AddArgs {
 #[derive(Debug, Args)]
 pub struct RemoveArgs {
     /// Fingerprint or long key ID of the registered key.
+    #[arg(long)]
     key: SigningKeyName,
 }
 
@@ -103,6 +104,7 @@ pub struct SignArgs {
     #[command(flatten)]
     key: KeyArgs,
     /// File to sign. With no file, tk reads stdin.
+    #[arg(long)]
     file: Option<PathBuf>,
     /// Write the armored signature here instead of stdout.
     #[arg(long)]

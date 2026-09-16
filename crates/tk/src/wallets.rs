@@ -21,6 +21,8 @@ use uuid::Uuid;
 pub enum WalletCommand {
     List,
     Get {
+        /// Wallet to fetch.
+        #[arg(long)]
         id: Uuid,
     },
     Create(BodyArgs),

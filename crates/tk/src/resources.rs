@@ -23,6 +23,8 @@ use crate::{
 pub enum UserCommand {
     List,
     Get {
+        /// User to fetch.
+        #[arg(long)]
         id: Uuid,
     },
     /// Create one or more users from a `CreateUsersIntentV4` parameters object.
@@ -30,7 +32,8 @@ pub enum UserCommand {
     /// Update user name, email, phone, or tag membership.
     Update(BodyArgs),
     Delete {
-        #[arg(required = true, num_args = 1..)]
+        /// User to delete; repeat to delete several.
+        #[arg(long = "id", required = true)]
         ids: Vec<Uuid>,
     },
     Tag {
@@ -45,7 +48,8 @@ pub enum TagCommand {
     Create(BodyArgs),
     Update(BodyArgs),
     Delete {
-        #[arg(required = true, num_args = 1..)]
+        /// Tag to delete; repeat to delete several.
+        #[arg(long = "id", required = true)]
         ids: Vec<Uuid>,
     },
 }
@@ -54,6 +58,8 @@ pub enum TagCommand {
 pub enum PolicyCommand {
     List,
     Get {
+        /// Policy to fetch.
+        #[arg(long)]
         id: Uuid,
     },
     /// Create a policy from a `CreatePolicyIntentV3` parameters object.
@@ -63,10 +69,13 @@ pub enum PolicyCommand {
     /// Update with policyEffect/policyCondition/policyConsensus field names.
     Update(BodyArgs),
     Delete {
-        #[arg(required = true, num_args = 1..)]
+        /// Policy to delete; repeat to delete several.
+        #[arg(long = "id", required = true)]
         ids: Vec<Uuid>,
     },
     Evaluations {
+        /// Activity whose policy evaluations to fetch.
+        #[arg(long)]
         activity_id: Uuid,
     },
 }
@@ -82,7 +91,8 @@ pub enum ApiKeyCommand {
     Delete {
         #[arg(long)]
         user_id: Uuid,
-        #[arg(required = true, num_args = 1..)]
+        /// API key to delete; repeat to delete several.
+        #[arg(long = "id", required = true)]
         ids: Vec<Uuid>,
     },
 }

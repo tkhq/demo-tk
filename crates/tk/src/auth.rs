@@ -100,14 +100,27 @@ pub enum SavedProfileCommand {
     /// List saved profiles and the active selection.
     List,
     /// Show one saved profile.
-    Show { name: String },
+    Show {
+        /// Saved profile to show.
+        #[arg(long = "profile-name")]
+        name: String,
+    },
     /// Select a saved profile after checking its credential file.
-    Use { name: String },
+    Use {
+        /// Saved profile to select.
+        #[arg(long = "profile-name")]
+        name: String,
+    },
     /// Remove a profile entry; credential files are kept.
-    Delete { name: String },
+    Delete {
+        /// Saved profile to remove.
+        #[arg(long = "profile-name")]
+        name: String,
+    },
     /// Update the organization or API endpoint of a saved profile.
     Set {
         /// Saved profile to update.
+        #[arg(long = "profile-name")]
         name: String,
     },
 }

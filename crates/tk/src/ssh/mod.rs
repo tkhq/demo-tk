@@ -54,6 +54,7 @@ pub struct AddArgs {
 #[derive(Debug, Args)]
 pub struct RemoveArgs {
     /// Fingerprint, public key line, or Turnkey private key ID.
+    #[arg(long)]
     key: SshKeyName,
 }
 
@@ -66,7 +67,13 @@ pub struct KeyArgs {
 
 #[derive(Debug, Args)]
 pub struct GitSignArgs {
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    /// The ssh-keygen style arguments, exactly as git passes them.
+    #[arg(
+        long = "ssh-keygen-args",
+        value_name = "ARG",
+        num_args = 1..,
+        allow_hyphen_values = true
+    )]
     ssh_keygen_args: Vec<String>,
 }
 
@@ -203,7 +210,7 @@ pub async fn run(command: SshCommand, options: &AuthOptions) -> Result<Outcome> 
         } => {
             let removed = auth::remove_ssh_key(key)
                 .await?
-                .map_err(|error| selection_error(error, "name the key positionally"))?;
+                .map_err(|error| selection_error(error, "name the key with --key"))?;
             let mut record = RegisteredKey::from(removed);
             record.agent_running = agent::is_default_running().await;
             Ok(Outcome::SshKeyRemoved(record))

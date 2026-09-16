@@ -55,13 +55,27 @@ pub enum ActivityCommand {
         cursor: Option<String>,
     },
     /// Fetch one activity by ID.
-    Get { id: String },
+    Get {
+        /// Activity to fetch.
+        #[arg(long)]
+        id: String,
+    },
     /// Approve a pending activity by ID.
-    Approve { id: String },
+    Approve {
+        /// Activity to approve.
+        #[arg(long)]
+        id: String,
+    },
     /// Reject a pending activity by ID.
-    Reject { id: String },
+    Reject {
+        /// Activity to reject.
+        #[arg(long)]
+        id: String,
+    },
     /// Poll one activity until it reaches a terminal status.
     Wait {
+        /// Activity to wait for.
+        #[arg(long)]
         id: String,
         #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
         timeout: u64,
