@@ -26,6 +26,20 @@ tk secret export --name db-password --out ./password.txt   # new file, mode 0600
 tk secret export --name api-token --message-format json | jq -r .data.value
 ```
 
+## Rotation
+
+Secrets are immutable and names are unique, so rotating a value is a delete
+followed by an import under the same name:
+
+```sh
+tk secret delete --name api-token
+echo -n "$NEW_API_TOKEN" | tk secret import api-token --property env=prod
+```
+
+`delete` accepts `--name` or `--id`. A pending deletion (consensus needed)
+exits zero with `status: pending`; wait on the activity before importing the
+replacement, since the name is taken until the deletion completes.
+
 ## Environment for a process
 
 `tk secret env` exports every secret that matches a name prefix and static

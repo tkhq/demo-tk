@@ -1,3 +1,4 @@
+mod delete;
 mod env;
 mod export;
 mod import;
@@ -52,6 +53,12 @@ pub enum SecretCommand {
         #[arg(long, group = "selector")]
         name_prefix: Option<String>,
     },
+    /// Delete a secret. Secrets are immutable: to rotate one, delete it and
+    /// import the new value under the same name.
+    Delete {
+        #[command(flatten)]
+        secret: SecretSelector,
+    },
     /// Export a secret's value; re-run after approval.
     Export {
         #[command(flatten)]
@@ -65,7 +72,7 @@ pub enum SecretCommand {
     },
 }
 
-/// Exactly one of `--name` or `--id` selects the secret to export.
+/// Exactly one of `--name` or `--id` selects the secret.
 #[derive(Debug, Args)]
 #[group(required = true, multiple = false)]
 pub struct SecretSelector {
@@ -113,6 +120,9 @@ pub enum PreparedSecret {
         properties: UniqueKeyValues,
         name_prefix: Option<String>,
     },
+    Delete {
+        secret: SecretRef,
+    },
 }
 
 impl SecretCommand {
@@ -133,6 +143,9 @@ impl SecretCommand {
                     properties,
                 }
             }
+            Self::Delete { secret } => PreparedSecret::Delete {
+                secret: secret.into(),
+            },
             Self::Env {
                 properties,
                 name_prefix,
@@ -211,6 +224,7 @@ impl PreparedSecret {
                 properties,
                 name_prefix,
             } => env::run(auth, properties, name_prefix).await,
+            Self::Delete { secret } => delete::run(auth, secret).await.map(Into::into),
         }
     }
 }

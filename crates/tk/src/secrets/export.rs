@@ -240,7 +240,7 @@ pub(super) async fn list_all(auth: &ResolvedAuth) -> Result<Vec<SecretMetadata>>
     Ok(secrets)
 }
 
-async fn resolve_name(auth: &ResolvedAuth, name: SecretName) -> Result<Uuid> {
+pub(super) async fn resolve_name(auth: &ResolvedAuth, name: SecretName) -> Result<Uuid> {
     let matches: Vec<SecretMetadata> = list_all(auth)
         .await?
         .into_iter()

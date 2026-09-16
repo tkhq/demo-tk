@@ -460,3 +460,39 @@ fn secret_env_exports_matching_secrets_as_dotenv() {
         );
     assert_eq!(nothing["code"], "invalid_input", "{nothing}");
 }
+
+#[test]
+#[ignore]
+fn secret_delete_removes_it_from_listing_and_export() {
+    let run = Run::new();
+    let name = run.name("rotate-me");
+    let secret_id = run.import_secret(&name, "old-value");
+
+    let deleted = run.submit(
+        run.admin().args(["secret", "delete", "--name", &name]),
+        "secret.delete",
+    );
+    assert_eq!(deleted["data"]["secretId"], secret_id);
+    assert_eq!(
+        deleted["data"]["activity"]["type"],
+        "ACTIVITY_TYPE_DELETE_SECRETS"
+    );
+
+    let listed = run.ok(run.admin().args(["secret", "list", "--limit", "100"]));
+    assert!(
+        listed["data"]["secrets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["secretId"] != secret_id),
+        "{listed}"
+    );
+    let missing = run.err(run.admin().args(["secret", "export", "--name", &name]));
+    assert_eq!(missing["code"], "not_found", "{missing}");
+
+    // The name is free again, so rotation is delete + import.
+    let replaced = run.import_secret(&name, "new-value");
+    assert_ne!(replaced, secret_id);
+    let exported = run.export(run.admin().args(["secret", "export", "--name", &name]));
+    assert_eq!(exported["data"]["value"], "new-value");
+}
