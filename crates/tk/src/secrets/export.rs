@@ -382,8 +382,8 @@ pub(super) async fn export_value(
         let state = PendingExport {
             version: 1,
             organization_id: binding.organization_id,
-            api_base_url: binding.api_base_url.clone(),
-            api_public_key: binding.api_public_key.clone(),
+            api_base_url: binding.api_base_url,
+            api_public_key: binding.api_public_key,
             secret_id,
             target_public_key,
             key_material: Zeroizing::new(hex::encode(ikm.as_slice())),

@@ -1,6 +1,35 @@
 use crate::run::{Run, result};
 use serde_json::{Value, json};
 use std::fs;
+use turnkey_api_key_stamper::TurnkeyP256ApiKey;
+
+/// Creates a user allowed to mint expiring API keys for other users.
+fn create_provisioner(run: &Run) -> TurnkeyP256ApiKey {
+    let key = run.key();
+    let created = run.submit(
+        run.admin().args([
+            "user",
+            "create",
+            "--user-name",
+            &run.name("provisioner"),
+            "--public-key",
+            &hex::encode(key.compressed_public_key()),
+        ]),
+        "user.create",
+    );
+    let provisioner_id = result(&created, "createUsersResult")["userIds"][0]
+        .as_str()
+        .unwrap()
+        .to_string();
+    run.create_policy(json!({
+        "policyName": run.name("provisioners-mint"),
+        "effect": "EFFECT_ALLOW",
+        "consensus": format!("approvers.any(user, user.id == '{provisioner_id}')"),
+        "condition": "activity.type == 'ACTIVITY_TYPE_CREATE_API_KEYS_V2'",
+        "notes": ""
+    }));
+    key
+}
 
 #[test]
 #[ignore]
@@ -70,14 +99,7 @@ fn session_request_generates_a_pending_credential() {
 fn session_provision_registers_an_expiring_key_once() {
     let run = Run::new();
     let (agent_id, _agent_key) = run.create_user("agent");
-    let (provisioner_id, provisioner_key) = run.create_user("provisioner");
-    run.create_policy(json!({
-        "policyName": run.name("provisioners-mint"),
-        "effect": "EFFECT_ALLOW",
-        "consensus": format!("approvers.any(user, user.id == '{provisioner_id}')"),
-        "condition": "activity.type == 'ACTIVITY_TYPE_CREATE_API_KEYS_V2'",
-        "notes": ""
-    }));
+    let provisioner_key = create_provisioner(&run);
     let public_key = hex::encode(run.key().compressed_public_key());
     let provision = |label: Option<&str>| {
         let mut cmd = run.as_user(&provisioner_key);
@@ -140,14 +162,7 @@ fn session_provision_registers_an_expiring_key_once() {
 #[ignore]
 fn session_loop_rotates_an_agent_profile_and_reports_status() {
     let run = Run::new();
-    let (provisioner_id, provisioner_key) = run.create_user("provisioner");
-    run.create_policy(json!({
-        "policyName": run.name("provisioners-mint"),
-        "effect": "EFFECT_ALLOW",
-        "consensus": format!("approvers.any(user, user.id == '{provisioner_id}')"),
-        "condition": "activity.type == 'ACTIVITY_TYPE_CREATE_API_KEYS_V2'",
-        "notes": ""
-    }));
+    let provisioner_key = create_provisioner(&run);
 
     // The agent's first credential lives outside api-keys/ and is registered by root.
     let first_key_file = run.home().join("agent-first.json");

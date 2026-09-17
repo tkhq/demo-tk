@@ -54,6 +54,14 @@ impl PendingSession {
             ))
             .into());
         }
+        if pending.profile != profile {
+            return Err(InvalidInput(format!(
+                "pending session state {} was written for profile {}, not {profile}; delete it to start over",
+                path.display(),
+                pending.profile
+            ))
+            .into());
+        }
         Ok(Some(pending))
     }
 
@@ -122,6 +130,25 @@ mod tests {
                 Some(SecureCreateError::Exists)
             ),
             "{error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn state_written_for_another_profile_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = PendingSession::path(dir.path(), "agent");
+        fs::create_dir_all(PendingSession::dir(dir.path())).unwrap();
+        fs::write(&path, to_vec(&sample("other")).unwrap()).unwrap();
+        let error = PendingSession::load(dir.path(), "agent").await.unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<InvalidInput>()
+                .expect("the error should be InvalidInput")
+                .to_string(),
+            format!(
+                "pending session state {} was written for profile other, not agent; delete it to start over",
+                path.display()
+            )
         );
     }
 

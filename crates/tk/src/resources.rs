@@ -557,9 +557,10 @@ impl Mutation {
             } => {
                 if !tag_names.is_empty() {
                     let tag_ids = resolve_tag_names(&auth, tag_names).await?;
-                    for user in &mut params.users {
-                        user.user_tags.extend(tag_ids.iter().cloned());
-                    }
+                    let [user] = params.users.as_mut_slice() else {
+                        unreachable!("--tag-name requires --user-name, which builds one user");
+                    };
+                    user.user_tags.extend(tag_ids);
                 }
                 (
                     "user.create",
