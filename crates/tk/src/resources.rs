@@ -530,22 +530,36 @@ impl ApiKeyCommand {
     }
 }
 
-/// Expiry as a unix millisecond string, from a listed key's `createdAt`
-/// seconds and `expirationSeconds`; null when the key does not expire.
-pub(crate) fn expires_at(key: &Value) -> Value {
-    let created = key["createdAt"]["seconds"]
-        .as_str()
-        .and_then(|seconds| seconds.parse::<u64>().ok());
-    let lifetime = key["expirationSeconds"]
-        .as_str()
-        .and_then(|seconds| seconds.parse::<u64>().ok());
-    match (created, lifetime) {
-        (Some(created), Some(lifetime)) => created
-            .checked_add(lifetime)
-            .and_then(|at| at.checked_mul(1000))
-            .map_or(Value::Null, |ms| Value::String(ms.to_string())),
-        _ => Value::Null,
-    }
+/// Expiry in unix milliseconds from a listed key's `createdAt` seconds and `expirationSeconds`; `None` only when `expirationSeconds` is absent because the key never expires.
+pub(crate) fn expires_at(key: &Value) -> Result<Option<u64>> {
+    let malformed = |reason: &str| {
+        ActivityError::new(
+            ActivityErrorKind::MalformedResponse,
+            format!("get_api_keys returned key {} {reason}", key["apiKeyId"]),
+        )
+    };
+    let lifetime: u64 = match &key["expirationSeconds"] {
+        Value::Null => return Ok(None),
+        Value::String(seconds) => seconds.parse().map_err(|error| {
+            malformed("with a non numeric expirationSeconds").with_source(error)
+        })?,
+        _ => return Err(malformed("with a non string expirationSeconds").into()),
+    };
+    let created: u64 = match &key["createdAt"]["seconds"] {
+        Value::Null => return Err(malformed("without createdAt.seconds").into()),
+        Value::String(seconds) => seconds.parse().map_err(|error| {
+            malformed("with a non numeric createdAt.seconds").with_source(error)
+        })?,
+        _ => return Err(malformed("with a non string createdAt.seconds").into()),
+    };
+    created
+        .checked_add(lifetime)
+        .and_then(|at| at.checked_mul(1000))
+        .map(Some)
+        .ok_or_else(|| {
+            malformed("whose createdAt.seconds plus expirationSeconds overflows unix milliseconds")
+                .into()
+        })
 }
 
 impl PreparedResource {
@@ -776,7 +790,9 @@ impl Query {
                 )?;
                 if let Some(keys) = listed["apiKeys"].as_array_mut() {
                     for key in keys {
-                        key["expiresAt"] = expires_at(key);
+                        let expires_at_ms = expires_at(key)?;
+                        key["expiresAt"] =
+                            expires_at_ms.map_or(Value::Null, |ms| Value::String(ms.to_string()));
                     }
                 }
                 ("api-key.list", listed)
@@ -791,7 +807,7 @@ impl Query {
 #[allow(clippy::disallowed_types)]
 mod tests {
     use super::*;
-    use crate::errors::{Classification, ErrorCode, classify};
+    use crate::errors::{Classification, ErrorCode, assert_malformed_response, classify};
     use clap::Parser;
     use serde_json::{json, to_vec};
     use std::iter::once;
@@ -882,6 +898,69 @@ mod tests {
                 prepare(&args).is_err(),
                 "input unexpectedly accepted: {args:?}"
             );
+        }
+    }
+
+    #[test]
+    fn expires_at_returns_millis_and_none_only_for_a_key_that_never_expires() {
+        let key = json!({
+            "apiKeyId": "key-1",
+            "createdAt": {"seconds": "1700000000", "nanos": "0"},
+            "expirationSeconds": "60",
+        });
+        assert_eq!(expires_at(&key).unwrap(), Some(1_700_000_060_000));
+
+        let never = json!({
+            "apiKeyId": "key-1",
+            "createdAt": {"seconds": "1700000000", "nanos": "0"},
+            "expirationSeconds": null,
+        });
+        assert_eq!(expires_at(&never).unwrap(), None);
+    }
+
+    #[test]
+    fn expires_at_reports_malformed_fields_naming_the_field_and_key() {
+        for (key, chain) in [
+            (
+                json!({
+                    "apiKeyId": "key-1",
+                    "createdAt": {"seconds": "1700000000", "nanos": "0"},
+                    "expirationSeconds": "later",
+                }),
+                &[
+                    r#"get_api_keys returned key "key-1" with a non numeric expirationSeconds"#,
+                    "invalid digit found in string",
+                ][..],
+            ),
+            (
+                json!({
+                    "apiKeyId": "key-1",
+                    "createdAt": {"seconds": "1700000000", "nanos": "0"},
+                    "expirationSeconds": 60,
+                }),
+                &[r#"get_api_keys returned key "key-1" with a non string expirationSeconds"#][..],
+            ),
+            (
+                json!({
+                    "apiKeyId": "key-1",
+                    "expirationSeconds": "60",
+                }),
+                &[r#"get_api_keys returned key "key-1" without createdAt.seconds"#][..],
+            ),
+            (
+                json!({
+                    "apiKeyId": "key-1",
+                    "createdAt": {"seconds": "soon", "nanos": "0"},
+                    "expirationSeconds": "60",
+                }),
+                &[
+                    r#"get_api_keys returned key "key-1" with a non numeric createdAt.seconds"#,
+                    "invalid digit found in string",
+                ][..],
+            ),
+        ] {
+            let error = expires_at(&key).unwrap_err();
+            assert_malformed_response(&error, chain);
         }
     }
 

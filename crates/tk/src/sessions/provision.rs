@@ -125,7 +125,7 @@ pub(super) async fn run(auth: ResolvedAuth, args: ProvisionArgs) -> Result<Opera
     let response = submitted.into_data();
     let activity = &response["activity"];
     let api_key_id = activity["result"]["createApiKeysResult"]["apiKeyIds"][0].clone();
-    let mut data = json!({
+    let data = json!({
         "userId": user_id,
         "expiresIn": expires_in.to_string(),
         "expirationSeconds": expires_in.seconds().to_string(),
@@ -138,8 +138,9 @@ pub(super) async fn run(auth: ResolvedAuth, args: ProvisionArgs) -> Result<Opera
             "type": activity["type"],
         },
     });
-    let record = OperationOutput::result(COMMAND, data.clone());
+    let record = OperationOutput::result(COMMAND, data);
     if record.is_pending() {
+        let mut data = record.into_data();
         data["nextStep"] = Value::from(format!(
             "approve activity {} (expiring key for user {user_id}, lifetime {expires_in}), then re-run this command or tk activity wait {0}",
             activity["id"].as_str().unwrap_or("<ACTIVITY_ID>")

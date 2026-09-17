@@ -45,7 +45,10 @@ fn select(
         if !has_all {
             continue;
         }
-        let var = name.rsplit('/').next().unwrap_or(&name).to_owned();
+        let var = name
+            .rsplit_once('/')
+            .map_or(name.as_str(), |(_, var)| var)
+            .to_owned();
         let valid = var
             .chars()
             .next()
@@ -155,12 +158,12 @@ pub(super) async fn run(
 
     let mut plain = Zeroizing::new(String::new());
     let mut values = serde_json::Map::new();
-    for (var, value) in &env {
+    for (var, value) in env {
         if !plain.is_empty() {
             plain.push('\n');
         }
-        plain.push_str(&line(var, value)?);
-        values.insert(var.clone(), Value::String(value.to_string()));
+        plain.push_str(&line(&var, &value)?);
+        values.insert(var, Value::String(value.to_string()));
     }
     Ok(SecretOutput {
         record: OperationOutput::result(

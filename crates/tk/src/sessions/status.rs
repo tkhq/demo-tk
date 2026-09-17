@@ -70,8 +70,7 @@ pub(super) async fn run(args: StatusArgs) -> Result<OperationOutput> {
         })
         .ok_or_else(|| MissingResource::new("api key", public_key.clone()))?;
     let key = to_value(key)?;
-    let expires_at = expires_at(&key);
-    let expires_at_ms = expires_at.as_str().and_then(|ms| ms.parse::<u64>().ok());
+    let expires_at_ms = expires_at(&key)?;
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
@@ -87,7 +86,7 @@ pub(super) async fn run(args: StatusArgs) -> Result<OperationOutput> {
         "apiKeyName": key["apiKeyName"],
         "createdAt": key["createdAt"]["seconds"],
         "expirationSeconds": key["expirationSeconds"],
-        "expiresAt": expires_at,
+        "expiresAt": expires_at_ms.map(|ms| ms.to_string()),
         "secondsLeft": seconds_left,
         "expiresIn": seconds_left.map(|left| ExpiresIn::from_seconds(left).to_string()),
         "warnBefore": warn_before.to_string(),
