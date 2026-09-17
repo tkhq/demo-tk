@@ -36,10 +36,6 @@ tk secret delete --name api-token
 echo -n "$NEW_API_TOKEN" | tk secret import api-token --property env=prod
 ```
 
-`delete` accepts `--name` or `--id`. A pending deletion (consensus needed)
-exits zero with `status: pending`; wait on the activity before importing the
-replacement, since the name is taken until the deletion completes.
-
 ## Environment for a process
 
 `tk secret env` exports every secret that matches a name prefix and static
@@ -62,7 +58,9 @@ single quote is refused. `--message-format json` returns the same values under
 Each secret is one export activity. If any of them needs approval the command
 prints nothing, exits 1 with code `approval_required`, and lists the pending
 activities under `details.pending`; approve them and run the same command
-again. Hermes Agent can use it as its `secrets.command`:
+again.
+
+Hermes Agent can use it as its `secrets.command`:
 
 ```yaml
 secrets:

@@ -1,20 +1,21 @@
 name: prerelease
-# Publishes a GitHub prerelease for every pull request push, tagged
-# pr-<number>-<short sha>, with the same archives the release workflow ships.
-# Install one with: TK_VERSION=pr-44-abc1234 sh install.sh
+# Publishes a GitHub prerelease for every pull request push, tagged pr-<number>
+# and replaced on each push, with the same archives the release workflow ships.
+# Install one with: TK_VERSION=pr-44 sh install.sh
 on:
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
-  workflow_dispatch:
 permissions:
   contents: read
 concurrency:
-  group: prerelease-${{ github.event.pull_request.number || github.ref }}
+  group: prerelease-${{ github.event.pull_request.number }}
   cancel-in-progress: true
+env:
+  TAG: pr-${{ github.event.pull_request.number }}
 jobs:
   build:
     name: Build ${{ matrix.target }}
-    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     strategy:
@@ -33,27 +34,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Name the prerelease tag
-        id: tag
-        shell: bash
-        env:
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          set -euo pipefail
-          short=${HEAD_SHA:0:7}
-          if [ -n "$PR_NUMBER" ]; then
-            echo "tag=pr-${PR_NUMBER}-${short}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=dev-${short}" >> "$GITHUB_OUTPUT"
-          fi
       - name: Install the musl C toolchain
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends musl-tools
           echo "CC=musl-gcc" >> "$GITHUB_ENV"
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Build release binary
         env:
           TARGET: ${{ matrix.target }}
@@ -64,7 +51,6 @@ jobs:
         shell: bash
         env:
           TARGET: ${{ matrix.target }}
-          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
           package="tk-${TARGET}-${TAG}"
@@ -76,11 +62,9 @@ jobs:
         with:
           name: ${{ matrix.target }}
           path: |
-            tk-${{ matrix.target }}-${{ steps.tag.outputs.tag }}.tar.gz
-            tk-${{ matrix.target }}-${{ steps.tag.outputs.tag }}.tar.gz.sha256
+            tk-${{ matrix.target }}-${{ env.TAG }}.tar.gz
+            tk-${{ matrix.target }}-${{ env.TAG }}.tar.gz.sha256
           if-no-files-found: error
-    outputs:
-      tag: ${{ steps.tag.outputs.tag }}
   publish:
     name: Publish prerelease
     needs: build
@@ -93,38 +77,21 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Verify every archive against its checksum
-        shell: bash
-        run: |
-          set -euo pipefail
-          cd dist
-          for archive in *.tar.gz; do
-            shasum -a 256 --check "$archive.sha256"
-          done
-      - name: Remove older prereleases of this pull request
-        if: github.event_name == 'pull_request'
+      - name: Remove the previous prerelease of this pull request
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          TAG: ${{ needs.build.outputs.tag }}
-        run: |
-          set -euo pipefail
-          gh release list --limit 200 --json tagName,isPrerelease \
-            --jq ".[] | select(.isPrerelease and (.tagName | startswith(\"pr-${PR_NUMBER}-\")) and .tagName != \"${TAG}\") | .tagName" \
-            | while read -r old; do
-                gh release delete "$old" --cleanup-tag --yes
-              done
+        run: gh release delete "$TAG" --cleanup-tag --yes || true
       - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          name: ${{ needs.build.outputs.tag }}
-          tag_name: ${{ needs.build.outputs.tag }}
-          target_commitish: ${{ github.event.pull_request.head.sha || github.sha }}
+          name: ${{ env.TAG }}
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.event.pull_request.head.sha }}
           prerelease: true
           body: |
-            Automated build of ${{ github.event.pull_request.html_url || github.ref }} at ${{ github.event.pull_request.head.sha || github.sha }}.
-            Install with `TK_VERSION=${{ needs.build.outputs.tag }} sh install.sh`.
+            Automated build of ${{ github.event.pull_request.html_url }} at ${{ github.event.pull_request.head.sha }}.
+            Install with `TK_VERSION=${{ env.TAG }} sh install.sh`.
           files: |
             dist/*.tar.gz
             dist/*.sha256

@@ -5,7 +5,7 @@
 #
 # Set TK_INSTALL_DIR to an absolute directory to install somewhere other than
 # $HOME/.local/bin. Set TK_VERSION to a release tag (v0.2.0) or a pull request
-# prerelease tag (pr-44-abc1234) to install that build instead of the latest
+# prerelease tag (pr-44) to install that build instead of the latest
 # release.
 
 set -eu
@@ -62,7 +62,7 @@ version=${TK_VERSION:-}
 if [ -n "$version" ]; then
     case "$version" in
         *[!A-Za-z0-9._-]*)
-            echo "error: TK_VERSION must be a release or prerelease tag such as v0.2.0 or pr-44-abc1234" >&2
+            echo "error: TK_VERSION must be a release or prerelease tag such as v0.2.0 or pr-44" >&2
             exit 1
             ;;
     esac

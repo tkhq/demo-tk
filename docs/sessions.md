@@ -6,13 +6,13 @@ identity allowed to register keys never sees it.
 
 ```mermaid
 sequenceDiagram
-    participant Agent as agent host
-    participant Provisioner as provisioner host
+    participant Agent as agent
+    participant Provisioner as provisioner
     participant Approver as human approver
     participant Turnkey
 
     Agent->>Agent: tk session request --profile-name agent
-    Note over Agent: new keypair under ~/.config/turnkey/tk/api-keys/<br/>private key never leaves this host
+    Note over Agent: new local keypair<br/>private key never<br/>leaves this host
     Agent->>Provisioner: public key + user id (any transport)
     Provisioner->>Turnkey: tk --profile provisioner session provision<br/>--user-id U --public-key PK --expires-in 7d
     Turnkey-->>Provisioner: status pending, activity id
@@ -20,9 +20,9 @@ sequenceDiagram
     Provisioner->>Turnkey: same provision command again
     Turnkey-->>Provisioner: completed, apiKeyId
     Agent->>Turnkey: tk session activate --profile-name agent (whoami with the new key)
-    Note over Agent: profile repointed at the new key,<br/>old generated key file removed
+    Note over Agent: profile repointed<br/>at the new key
     Agent->>Turnkey: tk session status --profile-name agent
-    Turnkey-->>Agent: expiresAt, secondsLeft; exit 1 with code session_expiring<br/>when under --warn-before (default 48h)
+    Turnkey-->>Agent: expiresAt, secondsLeft<br/>exit 1 with code session_expiring when under --warn-before (default 48h)
 ```
 
 Only the public key and user id cross from the agent to the provisioner; the

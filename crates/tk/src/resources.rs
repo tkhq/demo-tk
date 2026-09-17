@@ -127,7 +127,7 @@ pub struct CreateUserArgs {
     #[arg(long, requires = "user_name")]
     email: Option<String>,
     /// Tag id to attach (repeatable).
-    #[arg(long = "tag", requires = "user_name")]
+    #[arg(long = "tag-id", requires = "user_name")]
     tags: Vec<Uuid>,
     /// Tag name to attach, resolved against the organization's tags (repeatable).
     #[arg(long = "tag-name", requires = "user_name")]
@@ -667,7 +667,7 @@ async fn resolve_tag_names(auth: &ResolvedAuth, names: Vec<String>) -> Result<Ve
                 [] => Err(MissingResource::new("user tag", name).into()),
                 [one] => Ok((*one).to_owned()),
                 many => Err(InvalidInput(format!(
-                    "{} tags are named {name}; pass --tag with one of: {}",
+                    "{} tags are named {name}; pass --tag-id with one of: {}",
                     many.len(),
                     many.join(", ")
                 ))

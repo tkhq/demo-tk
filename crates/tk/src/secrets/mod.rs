@@ -49,7 +49,7 @@ pub enum SecretCommand {
         /// Only secrets carrying this static property (repeatable; all must match).
         #[arg(long = "property", value_name = "KEY=VALUE", value_parser = parse_key_value, group = "selector")]
         properties: Vec<KeyValue>,
-        /// Only secrets whose name starts with this prefix, for example hermes/.
+        /// Only secrets whose name starts with this prefix.
         #[arg(long, group = "selector")]
         name_prefix: Option<String>,
     },

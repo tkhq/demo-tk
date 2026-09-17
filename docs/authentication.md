@@ -27,8 +27,7 @@ export TK_PROFILE=agent
 # Change a profile's organization or API endpoint.
 tk profile set agent --organization-id OTHER_ORG_UUID
 
-# Repoint a profile at another credential file. The file is read before the
-# registry changes; the result reports the new public key and the previous file.
+# Repoint a profile at another credential file.
 tk profile set agent --api-key-file ./agent-key.json
 
 # Forget a profile. Credential files are kept.
