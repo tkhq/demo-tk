@@ -1,5 +1,7 @@
 //! Switches a saved profile to its pending credential once Turnkey knows it.
 
+use std::io::ErrorKind;
+
 use anyhow::{Context, Error, Result};
 use serde_json::{json, to_value};
 use tokio::fs;
@@ -26,11 +28,7 @@ pub(super) async fn run(name: String) -> Result<OperationOutput> {
         ))
         .into());
     };
-    let PendingSession {
-        public_key: _,
-        key_file,
-        ..
-    } = pending;
+    let PendingSession { key_file, .. } = pending;
 
     let key = read_key(&key_file).await?;
     let public_key = CompressedPublicKey::of(&key);
@@ -46,7 +44,17 @@ pub(super) async fn run(name: String) -> Result<OperationOutput> {
     let previous = set_profile_key(&name, &key_file).await?;
     let previous_public_key = match read_key(&previous).await {
         Ok(key) => Some(CompressedPublicKey::of(&key)),
-        Err(_) => None,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == ErrorKind::NotFound) =>
+        {
+            None
+        }
+        Err(error) => {
+            debug!(%error, "previous credential was not readable");
+            None
+        }
     };
     let api_keys = api_keys_dir()?;
     let api_keys = fs::canonicalize(&api_keys).await.unwrap_or(api_keys);

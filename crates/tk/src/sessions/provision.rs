@@ -169,6 +169,19 @@ pub(super) async fn run(auth: ResolvedAuth, args: ProvisionArgs) -> Result<Opera
         )
         .into());
     }
+    let activity_id = activity["id"].take();
+    let Some(activity_id_str) = activity_id.as_str() else {
+        return Err(ActivityError::new(
+            ActivityErrorKind::MalformedResponse,
+            "create_api_keys submitted without activity.id",
+        )
+        .into());
+    };
+    let next_step = pending.then(|| {
+        format!(
+            "approve activity {activity_id_str} (expiring key for user {user_id}, lifetime {expires_in}), then re-run this command or tk activity wait {activity_id_str}"
+        )
+    });
     let mut data = json!({
         "userId": user_id,
         "expiresIn": expires_in.to_string(),
@@ -177,16 +190,13 @@ pub(super) async fn run(auth: ResolvedAuth, args: ProvisionArgs) -> Result<Opera
         "apiKeyName": api_key_name,
         "apiKeyId": api_key_id,
         "activity": {
-            "id": activity["id"].take(),
+            "id": activity_id,
             "status": activity["status"].take(),
             "type": activity["type"].take(),
         },
     });
-    if pending {
-        data["nextStep"] = Value::from(format!(
-            "approve activity {} (expiring key for user {user_id}, lifetime {expires_in}), then re-run this command or tk activity wait {0}",
-            data["activity"]["id"].as_str().unwrap_or("<ACTIVITY_ID>")
-        ));
+    if let Some(next_step) = next_step {
+        data["nextStep"] = Value::from(next_step);
     }
     Ok(OperationOutput::result(COMMAND, data))
 }

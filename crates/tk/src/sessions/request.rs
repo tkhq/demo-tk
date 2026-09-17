@@ -6,7 +6,7 @@ use tokio::fs;
 use tracing::debug;
 
 use super::pending::PendingSession;
-use super::whoami;
+use super::{CompressedPublicKey, whoami};
 use crate::auth::{Profile, SecureCreateError, api_keys_dir, read_key, saved_profile, state_dir};
 use crate::errors::InvalidInput;
 use crate::keygen::{GeneratedApiKey, generate};
@@ -20,9 +20,14 @@ pub(super) async fn run(name: String, replace: bool) -> Result<OperationOutput> 
 
     if let Some(pending) = PendingSession::load(&state, &name).await? {
         if !replace {
+            let key = read_key(&pending.key_file).await.with_context(|| {
+                format!(
+                    "a session request for profile {name} is already pending but its credential could not be read; run tk session request --profile-name {name} --replace to start over"
+                )
+            })?;
             return Err(InvalidInput(format!(
                 "a session request for profile {name} is already pending (public key {}); run tk session activate --profile-name {name}, or pass --replace to start over",
-                pending.public_key
+                CompressedPublicKey::of(&key)
             ))
             .into());
         }
@@ -45,7 +50,6 @@ pub(super) async fn run(name: String, replace: bool) -> Result<OperationOutput> 
             version: 1,
             profile: name,
             organization_id: profile.organization_id,
-            public_key,
             key_file,
         };
         if let Err(error) = pending.create(&state).await {
@@ -76,7 +80,6 @@ pub(super) async fn run(name: String, replace: bool) -> Result<OperationOutput> 
     let PendingSession {
         profile: name,
         organization_id,
-        public_key,
         key_file,
         ..
     } = pending;
