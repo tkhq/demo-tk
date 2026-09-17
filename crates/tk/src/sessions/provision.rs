@@ -4,8 +4,11 @@
 
 use anyhow::Result;
 use clap::Args;
-use serde_json::{Value, from_value, json};
+use serde::Serialize;
+use serde_json::{Value, json};
+use std::fmt::{self, Display, Formatter};
 use std::time::{SystemTime, UNIX_EPOCH};
+use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 use turnkey_client::generated::{
     immutable::{
         activity::v1::{ApiKeyParamsV2, CreateApiKeysIntentV2},
@@ -18,7 +21,7 @@ use uuid::Uuid;
 use super::duration::ExpiresIn;
 use crate::auth::ResolvedAuth;
 use crate::errors::{ActivityError, ActivityErrorKind};
-use crate::operations::{OperationOutput, query, submit_activity};
+use crate::operations::{OperationOutput, query_decoded, submit_activity};
 
 const COMMAND: &str = "session.provision";
 
@@ -29,7 +32,7 @@ pub struct ProvisionArgs {
     user_id: Uuid,
     /// Compressed P256 public key (hex) printed by tk session request.
     #[arg(long, value_parser = parse_public_key)]
-    public_key: String,
+    public_key: CompressedPublicKey,
     /// Lifetime of the key, for example 7d, 48h, 30m.
     #[arg(long, default_value = "7d")]
     expires_in: ExpiresIn,
@@ -39,14 +42,39 @@ pub struct ProvisionArgs {
     label: Option<String>,
 }
 
+/// A compressed P256 public key as normalized lowercase hex.
+#[derive(Clone, Debug, Serialize)]
+#[serde(transparent)]
+pub(crate) struct CompressedPublicKey(String);
+
+impl CompressedPublicKey {
+    pub(crate) fn of(key: &TurnkeyP256ApiKey) -> Self {
+        Self(hex::encode(key.compressed_public_key()))
+    }
+
+    pub(crate) fn matches(&self, hex: &str) -> bool {
+        self.0.eq_ignore_ascii_case(hex)
+    }
+
+    pub(crate) fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl Display for CompressedPublicKey {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Normalizes a compressed P256 public key given as hex.
-pub(crate) fn parse_public_key(text: &str) -> Result<String, String> {
+pub(crate) fn parse_public_key(text: &str) -> Result<CompressedPublicKey, String> {
     let key = text.trim().to_ascii_lowercase();
     let valid = key.len() == 66
         && (key.starts_with("02") || key.starts_with("03"))
         && key.chars().all(|c| c.is_ascii_hexdigit());
     if valid {
-        Ok(key)
+        Ok(CompressedPublicKey(key))
     } else {
         Err("must be a compressed P256 public key: 66 hex characters starting with 02 or 03".into())
     }
@@ -59,29 +87,20 @@ pub(super) async fn run(auth: ResolvedAuth, args: ProvisionArgs) -> Result<Opera
         expires_in,
         label,
     } = args;
-    let existing: GetApiKeysResponse = from_value(
-        query(
-            "/public/v1/query/get_api_keys",
-            &GetApiKeysRequest {
-                organization_id: auth.org_id.to_string(),
-                user_id: Some(user_id.to_string()),
-            },
-            &auth.api_base_url,
-            &auth.stamper,
-        )
-        .await?,
+    let existing: GetApiKeysResponse = query_decoded(
+        "get_api_keys",
+        &GetApiKeysRequest {
+            organization_id: auth.org_id.to_string(),
+            user_id: Some(user_id.to_string()),
+        },
+        &auth.api_base_url,
+        &auth.stamper,
     )
-    .map_err(|error| {
-        ActivityError::new(
-            ActivityErrorKind::MalformedResponse,
-            "get_api_keys response was malformed",
-        )
-        .with_source(error)
-    })?;
+    .await?;
     if let Some(key) = existing.api_keys.into_iter().find(|key| {
         key.credential
             .as_ref()
-            .is_some_and(|credential| credential.public_key.eq_ignore_ascii_case(&public_key))
+            .is_some_and(|credential| public_key.matches(&credential.public_key))
     }) {
         let lifetime = key.expiration_seconds.map(ExpiresIn::from_seconds);
         return Ok(OperationOutput::result(
@@ -114,7 +133,7 @@ pub(super) async fn run(auth: ResolvedAuth, args: ProvisionArgs) -> Result<Opera
         &CreateApiKeysIntentV2 {
             api_keys: vec![ApiKeyParamsV2 {
                 api_key_name: api_key_name.clone(),
-                public_key: public_key.clone(),
+                public_key: public_key.to_string(),
                 curve_type: ApiKeyCurve::P256,
                 expiration_seconds: Some(expires_in.seconds().to_string()),
             }],
@@ -146,6 +165,16 @@ pub(super) async fn run(auth: ResolvedAuth, args: ProvisionArgs) -> Result<Opera
             activity["id"].as_str().unwrap_or("<ACTIVITY_ID>")
         ));
         return Ok(OperationOutput::result(COMMAND, data));
+    }
+    if activity["result"]["createApiKeysResult"]["apiKeyIds"][0]
+        .as_str()
+        .is_none()
+    {
+        return Err(ActivityError::new(
+            ActivityErrorKind::MalformedResponse,
+            "create_api_keys completed without result.createApiKeysResult.apiKeyIds[0]",
+        )
+        .into());
     }
     Ok(record)
 }

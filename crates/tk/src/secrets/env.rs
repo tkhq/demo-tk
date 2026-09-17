@@ -122,17 +122,20 @@ pub(super) async fn run(
             &quorum,
             &auth,
             secret_id,
-            UniqueKeyValues::parse(vec![], "--context")?,
+            UniqueKeyValues::empty(),
         )
         .await?;
         let Exported { record, value } = attempt;
         match value {
-            None => pending.push(json!({
-                "name": name,
-                "secretId": secret_id,
-                "var": var,
-                "activityId": record.data()["activity"]["id"],
-            })),
+            None => {
+                let entry = json!({
+                    "name": &name,
+                    "secretId": secret_id,
+                    "var": var,
+                    "activityId": record.data()["activity"]["id"],
+                });
+                pending.push((name, entry));
+            }
             Some(value) => {
                 exported.push(json!({"name": name, "secretId": secret_id, "var": var}));
                 env.insert(var, value);
@@ -140,10 +143,7 @@ pub(super) async fn run(
         }
     }
     if !pending.is_empty() {
-        let names: Vec<&str> = pending
-            .iter()
-            .filter_map(|entry| entry["name"].as_str())
-            .collect();
+        let (names, pending): (Vec<String>, Vec<Value>) = pending.into_iter().unzip();
         return Err(PendingApprovals {
             message: format!(
                 "{} secret export(s) await approval: {}; approve them and run the same command again",

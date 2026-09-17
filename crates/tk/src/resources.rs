@@ -7,7 +7,7 @@ use std::{
 use anyhow::Result;
 use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 use serde::{Serialize, de::DeserializeOwned};
-use serde_json::{Value, from_slice, from_value, to_value};
+use serde_json::{Value, from_slice, to_value};
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 use turnkey_client::generated::{
     immutable::{activity::v1 as intent, common::v1 as common},
@@ -18,8 +18,8 @@ use uuid::Uuid;
 use crate::{
     auth::{ResolvedAuth, build_turnkey_client},
     errors::{ActivityError, ActivityErrorKind, InvalidInput, Malformed, MissingResource},
-    operations::{OperationOutput, query as query_api, submit_activity},
-    sessions::{duration::ExpiresIn, parse_public_key},
+    operations::{OperationOutput, query_decoded, submit_activity},
+    sessions::{CompressedPublicKey, duration::ExpiresIn, parse_public_key},
 };
 
 #[derive(Debug, Subcommand)]
@@ -128,7 +128,7 @@ pub struct CreateUserArgs {
     tag_names: Vec<String>,
     /// Compressed P256 public key (hex) to register as the user's API key.
     #[arg(long, requires = "user_name", value_parser = parse_public_key)]
-    public_key: Option<String>,
+    public_key: Option<CompressedPublicKey>,
     /// Lifetime of that API key, for example 7d; omit for a key that never expires.
     #[arg(long, requires = "public_key")]
     expires_in: Option<ExpiresIn>,
@@ -365,7 +365,7 @@ impl UserCommand {
                     .into_iter()
                     .chain(public_key.map(|public_key| intent::ApiKeyParamsV2 {
                         api_key_name: format!("{user_name}-key"),
-                        public_key,
+                        public_key: public_key.into_string(),
                         curve_type: common::ApiKeyCurve::P256,
                         expiration_seconds:
                             expires_in.map(|expires_in| expires_in.seconds().to_string()),
@@ -681,24 +681,15 @@ impl Mutation {
 
 /// Tag ids for the given names; each name must match exactly one tag.
 async fn resolve_tag_names(auth: &ResolvedAuth, names: Vec<String>) -> Result<Vec<String>> {
-    let listed: query::ListUserTagsResponse = from_value(
-        query_api(
-            "/public/v1/query/list_user_tags",
-            &query::ListUserTagsRequest {
-                organization_id: auth.org_id.to_string(),
-            },
-            &auth.api_base_url,
-            &auth.stamper,
-        )
-        .await?,
+    let listed: query::ListUserTagsResponse = query_decoded(
+        "list_user_tags",
+        &query::ListUserTagsRequest {
+            organization_id: auth.org_id.to_string(),
+        },
+        &auth.api_base_url,
+        &auth.stamper,
     )
-    .map_err(|error| {
-        ActivityError::new(
-            ActivityErrorKind::MalformedResponse,
-            "list_user_tags response was malformed",
-        )
-        .with_source(error)
-    })?;
+    .await?;
     names
         .into_iter()
         .map(|name| {
@@ -816,7 +807,7 @@ mod tests {
     use super::*;
     use crate::errors::{Classification, ErrorCode, assert_malformed_response, classify};
     use clap::Parser;
-    use serde_json::{json, to_vec};
+    use serde_json::{from_value, json, to_vec};
     use std::iter::once;
     use tempfile::NamedTempFile;
     use turnkey_client::generated::external::activity::v1 as activity;

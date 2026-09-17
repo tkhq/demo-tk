@@ -1031,7 +1031,7 @@ pub(crate) struct SwitchedKey {
 }
 
 /// Points a saved profile at another credential file.
-pub(crate) async fn set_profile_key(name: &str, api_key_file: PathBuf) -> Result<SwitchedKey> {
+pub(crate) async fn set_profile_key(name: &str, api_key_file: &Path) -> Result<SwitchedKey> {
     let path = registry_path()?;
     let _lock = registry_lock(&path).await?;
     let mut registry = load(&path).await?;
@@ -1045,8 +1045,8 @@ pub(crate) async fn set_profile_key(name: &str, api_key_file: PathBuf) -> Result
 }
 
 /// Reads a credential file and makes it the profile's credential.
-async fn switch_key(profile: &mut Profile, api_key_file: PathBuf) -> Result<SwitchedKey> {
-    let current = match fs::canonicalize(&api_key_file).await {
+async fn switch_key(profile: &mut Profile, api_key_file: &Path) -> Result<SwitchedKey> {
+    let current = match fs::canonicalize(api_key_file).await {
         Ok(current) => current,
         Err(error) if error.kind() == ErrorKind::NotFound => {
             return Err(InvalidInput(format!(
@@ -1134,7 +1134,7 @@ pub async fn run_profile(
             }
             let mut record = json!({"name": name});
             if let Some(api_key_file) = api_key_file {
-                let switched = switch_key(profile, api_key_file).await?;
+                let switched = switch_key(profile, &api_key_file).await?;
                 record["publicKey"] = switched.public_key.into();
                 record["previousApiKeyFile"] = switched.previous.to_string_lossy().into();
             }

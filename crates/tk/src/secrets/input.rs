@@ -81,6 +81,11 @@ pub(crate) fn parse_key_value(raw: &str) -> Result<KeyValue, String> {
 pub struct UniqueKeyValues(Vec<KeyValue>);
 
 impl UniqueKeyValues {
+    /// No pairs; an empty list cannot contain duplicate keys.
+    pub(crate) fn empty() -> Self {
+        Self(Vec::new())
+    }
+
     pub(crate) fn parse(pairs: Vec<KeyValue>, flag: &str) -> Result<Self> {
         let mut seen = BTreeSet::new();
         for pair in &pairs {

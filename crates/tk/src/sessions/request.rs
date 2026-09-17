@@ -1,7 +1,7 @@
 //! Generates a credential for a saved profile and records it as pending.
 
 use anyhow::{Context, Result};
-use serde_json::{Value, json, to_value};
+use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tracing::debug;
@@ -86,9 +86,7 @@ pub(super) async fn run(name: String, replace: bool) -> Result<OperationOutput> 
         key_file,
         ..
     } = pending;
-    let user_hint = user_id
-        .as_str()
-        .map_or_else(|| "<USER_ID>".to_owned(), str::to_owned);
+    let user_hint = user_id.as_deref().unwrap_or("<USER_ID>").to_owned();
     Ok(OperationOutput::result(
         COMMAND,
         json!({
@@ -105,8 +103,8 @@ pub(super) async fn run(name: String, replace: bool) -> Result<OperationOutput> 
     ))
 }
 
-/// The profile's user id when its current credential still works, else null.
-async fn current_user_id(profile: &SavedProfile) -> Value {
+/// The profile's user id when its current credential still works, else `None`.
+async fn current_user_id(profile: &SavedProfile) -> Option<String> {
     let SavedProfile {
         organization_id,
         api_base_url,
@@ -119,14 +117,14 @@ async fn current_user_id(profile: &SavedProfile) -> Value {
                 organization_id: organization_id.to_string(),
             })
             .await?;
-        anyhow::Ok(to_value(response)?)
+        anyhow::Ok(response.user_id)
     }
     .await;
     match identity {
-        Ok(identity) => identity["userId"].clone(),
+        Ok(user_id) => Some(user_id),
         Err(error) => {
             debug!(%error, "current credential did not identify the user");
-            Value::Null
+            None
         }
     }
 }

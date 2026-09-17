@@ -15,7 +15,7 @@ use anyhow::Result;
 use clap::Subcommand;
 
 use provision::ProvisionArgs;
-pub(crate) use provision::parse_public_key;
+pub(crate) use provision::{CompressedPublicKey, parse_public_key};
 use status::StatusArgs;
 
 use crate::auth::{self, AuthOptions};

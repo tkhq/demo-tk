@@ -47,7 +47,11 @@ pub(super) async fn run(name: String) -> Result<OperationOutput> {
             )
         })?;
 
-    let switched = set_profile_key(&name, key_file.clone()).await?;
+    let switched = set_profile_key(&name, &key_file).await?;
+    let previous_public_key = match read_key(&previous_key_file).await {
+        Ok(key) => Some(hex::encode(key.compressed_public_key())),
+        Err(_) => None,
+    };
     let api_keys = api_keys_dir()?;
     let api_keys = fs::canonicalize(&api_keys).await.unwrap_or(api_keys);
     let disposable = switched.previous.starts_with(&api_keys) && switched.previous != key_file;
@@ -63,10 +67,6 @@ pub(super) async fn run(name: String) -> Result<OperationOutput> {
         false
     };
     PendingSession::remove(&state, &name).await?;
-    let previous_public_key = match read_key(&previous_key_file).await {
-        Ok(key) => Some(hex::encode(key.compressed_public_key())),
-        Err(_) => None,
-    };
 
     Ok(OperationOutput::result(
         COMMAND,

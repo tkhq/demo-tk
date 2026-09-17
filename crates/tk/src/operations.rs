@@ -7,9 +7,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Error, Result};
 use clap::{Args, Subcommand};
 use reqwest::{Client, Url};
+use serde::de::DeserializeOwned;
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
-use serde_json::{Value, json};
+use serde_json::{Value, from_value, json};
 use tokio::time::{sleep, timeout};
 use turnkey_api_key_stamper::{Stamp, TurnkeyP256ApiKey};
 use turnkey_client::generated::{
@@ -640,6 +641,29 @@ pub async fn submit_activity<T: Serialize>(
     )?;
     let value = post(&client()?, endpoint, body, &auth.stamper, true).await?;
     submission_result(command, value)
+}
+
+pub(crate) async fn query_decoded<T: Serialize, R: DeserializeOwned>(
+    endpoint: &str,
+    request: &T,
+    api_base_url: &ApiBaseUrl,
+    stamper: &TurnkeyP256ApiKey,
+) -> Result<R> {
+    let response = query(
+        &format!("/public/v1/query/{endpoint}"),
+        request,
+        api_base_url,
+        stamper,
+    )
+    .await?;
+    from_value(response).map_err(|error| {
+        ActivityError::new(
+            ActivityErrorKind::MalformedResponse,
+            format!("{endpoint} response was malformed"),
+        )
+        .with_source(error)
+        .into()
+    })
 }
 
 pub(crate) async fn query<T: Serialize>(

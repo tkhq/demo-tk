@@ -4,7 +4,7 @@
 use anyhow::{Context, Error, Result};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, from_slice, from_value, json, to_value, to_vec};
+use serde_json::{Value, from_slice, json, to_value, to_vec};
 use std::fmt::Display;
 use std::io::ErrorKind;
 use std::mem::take;
@@ -30,7 +30,7 @@ use crate::auth::{
 };
 use crate::errors::{ActivityError, ActivityErrorKind, InvalidInput, Malformed, MissingResource};
 use crate::operations::{
-    OperationOutput, client, observed, query, query_activity, submit_activity,
+    OperationOutput, client, observed, query_activity, query_decoded, submit_activity,
 };
 
 const COMMAND: &str = "secret.export";
@@ -206,8 +206,8 @@ pub(super) async fn list_all(auth: &ResolvedAuth) -> Result<Vec<SecretMetadata>>
     let mut secrets = Vec::new();
     let mut after = String::new();
     loop {
-        let response = query(
-            "/public/v1/query/list_secrets",
+        let ListSecretsResponse { secrets: page } = query_decoded(
+            "list_secrets",
             &ListSecretsRequest {
                 organization_id: auth.org_id.to_string(),
                 pagination_options: Some(Pagination {
@@ -220,13 +220,6 @@ pub(super) async fn list_all(auth: &ResolvedAuth) -> Result<Vec<SecretMetadata>>
             &auth.stamper,
         )
         .await?;
-        let ListSecretsResponse { secrets: page } = from_value(response).map_err(|error| {
-            ActivityError::new(
-                ActivityErrorKind::MalformedResponse,
-                "list_secrets response was malformed",
-            )
-            .with_source(error)
-        })?;
         let full = page.len() == 100;
         after = page
             .last()

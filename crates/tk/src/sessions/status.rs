@@ -2,17 +2,18 @@
 
 use anyhow::Result;
 use clap::Args;
-use serde_json::{from_value, json, to_value};
+use serde_json::{json, to_value};
 use std::time::{SystemTime, UNIX_EPOCH};
 use turnkey_client::generated::{
     GetWhoamiRequest,
     services::coordinator::public::v1::{GetApiKeysRequest, GetApiKeysResponse},
 };
 
+use super::CompressedPublicKey;
 use super::duration::ExpiresIn;
 use crate::auth::{SavedProfile, build_turnkey_client, read_key, saved_profile};
-use crate::errors::{ActivityError, ActivityErrorKind, MissingResource, SessionExpiring};
-use crate::operations::{OperationOutput, query};
+use crate::errors::{MissingResource, SessionExpiring};
+use crate::operations::{OperationOutput, query_decoded};
 use crate::resources::expires_at;
 
 const COMMAND: &str = "session.status";
@@ -35,40 +36,31 @@ pub(super) async fn run(args: StatusArgs) -> Result<OperationOutput> {
         api_key_file,
     } = saved_profile(&name).await?;
     let stamper = read_key(&api_key_file).await?;
-    let public_key = hex::encode(stamper.compressed_public_key());
+    let public_key = CompressedPublicKey::of(&stamper);
     let identity = build_turnkey_client(read_key(&api_key_file).await?, &api_base_url)?
         .get_whoami(GetWhoamiRequest {
             organization_id: organization_id.to_string(),
         })
         .await?;
-    let listed: GetApiKeysResponse = from_value(
-        query(
-            "/public/v1/query/get_api_keys",
-            &GetApiKeysRequest {
-                organization_id: organization_id.to_string(),
-                user_id: Some(identity.user_id.clone()),
-            },
-            &api_base_url,
-            &stamper,
-        )
-        .await?,
+    let listed: GetApiKeysResponse = query_decoded(
+        "get_api_keys",
+        &GetApiKeysRequest {
+            organization_id: organization_id.to_string(),
+            user_id: Some(identity.user_id.clone()),
+        },
+        &api_base_url,
+        &stamper,
     )
-    .map_err(|error| {
-        ActivityError::new(
-            ActivityErrorKind::MalformedResponse,
-            "get_api_keys response was malformed",
-        )
-        .with_source(error)
-    })?;
+    .await?;
     let key = listed
         .api_keys
         .into_iter()
         .find(|key| {
             key.credential
                 .as_ref()
-                .is_some_and(|credential| credential.public_key.eq_ignore_ascii_case(&public_key))
+                .is_some_and(|credential| public_key.matches(&credential.public_key))
         })
-        .ok_or_else(|| MissingResource::new("api key", public_key.clone()))?;
+        .ok_or_else(|| MissingResource::new("api key", public_key.to_string()))?;
     let key = to_value(key)?;
     let expires_at_ms = expires_at(&key)?;
     let now_ms = SystemTime::now()
@@ -96,7 +88,7 @@ pub(super) async fn run(args: StatusArgs) -> Result<OperationOutput> {
     {
         return Err(SessionExpiring {
             profile: name,
-            public_key,
+            public_key: public_key.into_string(),
             expires_at_unix_ms: expires_at_ms,
             seconds_left,
             warn_before_seconds: warn_before.seconds(),
