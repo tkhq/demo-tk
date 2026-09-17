@@ -16,6 +16,13 @@ Install the latest release binary (Linux and macOS, x86_64 and arm64):
 curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/tkhq/tk/main/install.sh | sh
 ```
 
+Every pull request push also publishes a prerelease tagged `pr-<number>-<short sha>`.
+Install one by naming it:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/tkhq/tk/main/install.sh | TK_VERSION=pr-44-abc1234 sh
+```
+
 ## Commands
 
 ```bash
