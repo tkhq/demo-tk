@@ -73,14 +73,14 @@ pub(super) async fn list(
 }
 
 /// Identifies the credential and endpoint that own a pending export.
-pub(super) struct Binding {
+struct Binding {
     organization_id: Uuid,
     api_base_url: String,
     api_public_key: String,
 }
 
 impl Binding {
-    pub(super) fn of(auth: &ResolvedAuth) -> Self {
+    fn of(auth: &ResolvedAuth) -> Self {
         Self {
             organization_id: auth.org_id,
             api_base_url: auth.api_base_url.as_str().trim_end_matches('/').to_owned(),
@@ -209,11 +209,11 @@ pub(super) struct Secret {
 }
 
 /// Walks every secret's metadata in the organization, across pages, retaining
-/// those for which `keep` returns true.
-pub(super) async fn list_all(
+/// the values `keep` returns.
+pub(super) async fn list_all<T>(
     auth: &ResolvedAuth,
-    keep: impl Fn(&Secret) -> bool,
-) -> Result<Vec<Secret>> {
+    keep: impl Fn(Secret) -> Option<T>,
+) -> Result<Vec<T>> {
     const PAGE: usize = 100;
     let mut secrets = Vec::new();
     let mut after = String::new();
@@ -245,8 +245,8 @@ pub(super) async fn list_all(
                 name,
                 static_properties,
             };
-            if keep(&secret) {
-                secrets.push(secret);
+            if let Some(kept) = keep(secret) {
+                secrets.push(kept);
             }
             after = secret_id;
         }
@@ -258,15 +258,18 @@ pub(super) async fn list_all(
 }
 
 pub(super) async fn resolve_name(auth: &ResolvedAuth, name: SecretName) -> Result<Uuid> {
-    let matches = list_all(auth, |secret| secret.name.as_deref() == Some(name.as_str())).await?;
+    let matches = list_all(auth, |secret| {
+        (secret.name.as_deref() == Some(name.as_str())).then_some(secret.id)
+    })
+    .await?;
     match matches.as_slice() {
         [] => Err(MissingResource::new("secret", name).into()),
-        [one] => Ok(one.id),
+        [one] => Ok(*one),
         many => Err(InvalidInput(format!(
             "{} secrets are named {name}; export by id instead: {}",
             many.len(),
             many.iter()
-                .map(|secret| secret.id.to_string())
+                .map(Uuid::to_string)
                 .collect::<Vec<_>>()
                 .join(", ")
         ))
@@ -294,8 +297,7 @@ pub(super) async fn run(
         SecretRef::Id(id) => id,
         SecretRef::Name(name) => resolve_name(&auth, name).await?,
     };
-    let binding = Binding::of(&auth);
-    match export_value(&state_dir, &quorum, &auth, &binding, secret_id, context).await? {
+    match export_value(&state_dir, &quorum, &auth, secret_id, context).await? {
         Exported::Completed { record, value } => deliver(record, value, out).await,
         Exported::Pending {
             record,
@@ -322,13 +324,13 @@ pub(super) async fn export_value(
     state_dir: &Path,
     quorum: &QuorumPublicKey,
     auth: &ResolvedAuth,
-    binding: &Binding,
     secret_id: Uuid,
     context: UniqueKeyValues,
 ) -> Result<Exported> {
-    let path = PendingExport::path(state_dir, binding, secret_id);
+    let binding = Binding::of(auth);
+    let path = PendingExport::path(state_dir, &binding, secret_id);
 
-    if let Some(state) = PendingExport::load(&path, binding).await? {
+    if let Some(state) = PendingExport::load(&path, &binding).await? {
         let fetched = query_activity(&client()?, auth, &state.activity_id).await?;
         let record = match observed(COMMAND, export_data(secret_id, fetched)) {
             Ok(record) => record,

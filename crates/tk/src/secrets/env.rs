@@ -6,11 +6,12 @@ use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::fmt::Write;
 use std::mem;
+use turnkey_client::generated::immutable::models::v1::KeyValue;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use super::SecretOutput;
-use super::export::{Binding, Exported, Secret, export_value, list_all};
+use super::export::{Exported, Secret, export_value, list_all};
 use super::input::{UniqueKeyValues, quorum_for};
 use crate::auth::{ResolvedAuth, state_dir};
 use crate::errors::{InvalidInput, PendingApprovals, PendingExport};
@@ -18,22 +19,19 @@ use crate::operations::OperationOutput;
 
 const COMMAND: &str = "secret.env";
 
-/// Returns true when a secret has a name matching `name_prefix` and carries
-/// every requested static property.
+/// Returns true when a secret's `name` matches `name_prefix` and its
+/// `static_properties` carry every requested static property.
 fn matches(
-    secret: &Secret,
+    name: &str,
+    static_properties: &[KeyValue],
     properties: &BTreeMap<String, String>,
     name_prefix: Option<&str>,
 ) -> bool {
-    let Some(name) = secret.name.as_deref() else {
-        return false;
-    };
     if name_prefix.is_some_and(|prefix| !name.starts_with(prefix)) {
         return false;
     }
     properties.iter().all(|(key, value)| {
-        secret
-            .static_properties
+        static_properties
             .iter()
             .any(|property| property.key == *key && property.value == *value)
     })
@@ -104,18 +102,26 @@ pub(super) async fn run(
     let properties: BTreeMap<String, String> = properties.into();
     let selected = select(
         list_all(&auth, |secret| {
-            matches(secret, &properties, name_prefix.as_deref())
+            let Secret {
+                id,
+                name,
+                static_properties,
+            } = secret;
+            let name = name?;
+            matches(
+                &name,
+                &static_properties,
+                &properties,
+                name_prefix.as_deref(),
+            )
+            .then_some((name, id))
         })
-        .await?
-        .into_iter()
-        .filter_map(|secret| secret.name.map(|name| (name, secret.id)))
-        .collect(),
+        .await?,
     )?;
     if selected.is_empty() {
         return Err(InvalidInput("no secrets match the selection".into()).into());
     }
 
-    let binding = Binding::of(&auth);
     let mut exported = Vec::new();
     let mut pending = Vec::new();
     let mut env: BTreeMap<String, Zeroizing<String>> = BTreeMap::new();
@@ -124,7 +130,6 @@ pub(super) async fn run(
             &state_dir,
             &quorum,
             &auth,
-            &binding,
             secret_id,
             UniqueKeyValues::empty(),
         )
@@ -172,7 +177,6 @@ pub(super) async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use turnkey_client::generated::immutable::models::v1::KeyValue;
 
     fn secret(name: &str, properties: &[(&str, &str)]) -> Secret {
         Secret {
@@ -203,8 +207,16 @@ mod tests {
         ];
         let kept: Vec<(String, Uuid)> = secrets
             .into_iter()
-            .filter(|secret| matches(secret, &unilateral, Some("hermes/")))
-            .filter_map(|secret| secret.name.map(|name| (name, secret.id)))
+            .filter_map(|secret| {
+                let Secret {
+                    id,
+                    name,
+                    static_properties,
+                } = secret;
+                let name = name?;
+                matches(&name, &static_properties, &unilateral, Some("hermes/"))
+                    .then_some((name, id))
+            })
             .collect();
         let selected = select(kept).unwrap();
         let vars: Vec<&str> = selected.keys().map(String::as_str).collect();

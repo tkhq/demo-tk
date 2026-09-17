@@ -44,7 +44,6 @@ pub struct ProvisionArgs {
 
 /// A compressed P256 public key as normalized lowercase hex.
 #[derive(Clone, Debug, Serialize)]
-#[cfg_attr(test, derive(PartialEq))]
 #[serde(transparent)]
 pub(crate) struct CompressedPublicKey(String);
 
