@@ -68,7 +68,7 @@ fn user_lifecycle_from_input_json_and_stdin() {
 
 #[test]
 #[ignore]
-fn user_and_tag_create_from_flags() {
+fn user_create_from_flags_resolves_tag_names_and_requires_anchor_key() {
     let run = Run::new();
     let tag_name = run.name("agent");
     let tagged = run.submit(

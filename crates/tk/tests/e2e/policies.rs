@@ -201,7 +201,7 @@ fn quorum_approval_completes_and_rejection_fails_a_consensus_activity() {
 
 #[test]
 #[ignore]
-fn policy_create_from_flags() {
+fn policy_create_from_flags_round_trips_expressions_and_requires_an_effect() {
     let run = Run::new();
     let name = run.name("flag-policy");
     let created = run.submit(
