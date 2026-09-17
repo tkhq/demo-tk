@@ -17,8 +17,10 @@ use turnkey_auth::ssh::{
 use crate::auth::{self, AuthOptions};
 use crate::errors::{InvalidInput, render_error_chain};
 use crate::ssh::registry::{SelectError, SshKeyName};
-use crate::ssh::selection_error;
-use crate::ssh::signer::{BACKOFF, TurnkeySigner};
+use crate::ssh::{
+    selection_error,
+    signer::{BACKOFF, TurnkeySigner},
+};
 
 const CANNOT_EXEC: u8 = 2;
 const DEFAULT_PROGRAM: &str = "ssh-keygen";
