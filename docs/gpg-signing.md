@@ -18,7 +18,7 @@ tk gpg keys export | gpg --import
 echo "$FINGERPRINT:6:" | gpg --import-ownertrust
 
 # Sign a file, or stdin.
-tk gpg sign ./release.tar.gz --output ./release.tar.gz.asc
+tk gpg sign --file ./release.tar.gz --output ./release.tar.gz.asc
 echo hello | tk gpg sign
 ```
 
