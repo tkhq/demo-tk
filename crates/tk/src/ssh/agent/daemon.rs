@@ -29,7 +29,7 @@ use crate::errors::InvalidInput;
 use crate::outcome::{MachineOnly, Outcome};
 use crate::ssh::registry::{SelectError, SshKeyEntry, SshKeyName};
 use crate::ssh::selection_error;
-use crate::ssh::signer::TurnkeySigner;
+use crate::ssh::signer::{BACKOFF, TurnkeySigner};
 
 const START_TIMEOUT: Duration = Duration::from_secs(4);
 const STOP_TIMEOUT: Duration = Duration::from_secs(4);
@@ -40,6 +40,7 @@ type OrganizationClient = Arc<TurnkeyClient<TurnkeyP256ApiKey>>;
 
 struct RegistryKeyring {
     entries: BTreeMap<Ed25519PublicKey, (SshKeyEntry, OrganizationClient)>,
+    backoff: Duration,
 }
 
 impl Keyring for RegistryKeyring {
@@ -56,10 +57,15 @@ impl Keyring for RegistryKeyring {
     fn sign<'a>(&'a self, public_key: &'a Ed25519PublicKey, data: &'a [u8]) -> SignFuture<'a> {
         Box::pin(async move {
             let (entry, client) = self.entries.get(public_key).ok_or(SignError::UnknownKey)?;
-            TurnkeySigner::new(client, entry.organization_id, &entry.private_key_id)
-                .sign_raw_payload(data)
-                .await
-                .map_err(SignError::Signer)
+            TurnkeySigner::new(
+                client,
+                entry.organization_id,
+                &entry.private_key_id,
+                self.backoff,
+            )
+            .sign_raw_payload(data)
+            .await
+            .map_err(SignError::Signer)
         })
     }
 }
@@ -231,7 +237,10 @@ pub async fn internal_run(args: InternalRunArgs, options: &AuthOptions) -> Resul
         keys.push(entry.fingerprint().to_string());
         entries.insert(entry.public_key, (entry, client));
     }
-    let keyring = Arc::new(RegistryKeyring { entries });
+    let keyring = Arc::new(RegistryKeyring {
+        entries,
+        backoff: BACKOFF,
+    });
 
     let lock_file = resolve_lock_file(&args.pid_file);
     let _lock = AgentLock::acquire(lock_file)
@@ -533,16 +542,23 @@ mod tests {
 
     const ORG: &str = "00000000-0000-4000-8000-000000000001";
 
-    /// The server is returned so it outlives the request; a dropped server
-    /// goes back to wiremock's pool and answers another test.
+    /// Answers the signing requests with `responses` in order, repeating the
+    /// last one. The server is returned so it outlives the request; a dropped
+    /// server goes back to wiremock's pool and answers another test.
     async fn keyring_against(
-        response: ResponseTemplate,
+        responses: Vec<ResponseTemplate>,
     ) -> (MockServer, RegistryKeyring, Ed25519PublicKey) {
         let server = MockServer::start().await;
-        Mock::given(path("/public/v1/submit/sign_raw_payload"))
-            .respond_with(response)
-            .mount(&server)
-            .await;
+        let last = responses.len() - 1;
+        for (index, response) in responses.into_iter().enumerate() {
+            let mock =
+                Mock::given(path("/public/v1/submit/sign_raw_payload")).respond_with(response);
+            if index < last {
+                mock.up_to_n_times(1).mount(&server).await;
+            } else {
+                mock.mount(&server).await;
+            }
+        }
         let auth = ResolvedAuth::for_tests(ORG, &server.uri(), TurnkeyP256ApiKey::generate());
         let client = build_turnkey_client(auth.stamper, &auth.api_base_url).unwrap();
         let public_key = Ed25519PublicKey::from_bytes([1; 32]);
@@ -553,6 +569,7 @@ mod tests {
         };
         let keyring = RegistryKeyring {
             entries: [(public_key, (entry, Arc::new(client)))].into(),
+            backoff: Duration::ZERO,
         };
         (server, keyring, public_key)
     }
@@ -575,7 +592,7 @@ mod tests {
     #[tokio::test]
     async fn a_signing_request_needing_approval_is_a_signer_error_classified_as_approval() {
         let (_server, keyring, public_key) =
-            keyring_against(ResponseTemplate::new(200).set_body_json(json!({
+            keyring_against(vec![ResponseTemplate::new(200).set_body_json(json!({
                 "activity": {
                     "type": "ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2",
                     "status": "ACTIVITY_STATUS_CONSENSUS_NEEDED",
@@ -583,7 +600,7 @@ mod tests {
                     "organizationId": ORG,
                     "fingerprint": "sha256:example",
                 }
-            })))
+            }))])
             .await;
         let SignError::Signer(error) = keyring
             .sign(&public_key, b"payload")
@@ -600,9 +617,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_rate_limited_signing_request_is_retried_until_it_completes() {
+        let (server, keyring, public_key) = keyring_against(vec![
+            ResponseTemplate::new(429).set_body_string("Resource exhausted"),
+            ResponseTemplate::new(200).set_body_json(json!({
+                "activity": {
+                    "type": "ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2",
+                    "status": "ACTIVITY_STATUS_COMPLETED",
+                    "id": "activity-1",
+                    "organizationId": ORG,
+                    "fingerprint": "sha256:example",
+                    "result": {
+                        "signRawPayloadResult": {
+                            "r": "11".repeat(32),
+                            "s": "22".repeat(32),
+                            "v": "00",
+                        }
+                    }
+                }
+            })),
+        ])
+        .await;
+        let signature = keyring
+            .sign(&public_key, b"payload")
+            .await
+            .expect("the retried request should sign");
+        let mut expected = [0x11; 64];
+        expected[32..].fill(0x22);
+        assert_eq!(signature, expected);
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
     async fn a_server_error_during_signing_is_a_signer_error_classified_as_api_error() {
-        let (_server, keyring, public_key) =
-            keyring_against(ResponseTemplate::new(500).set_body_string("unavailable")).await;
+        let (server, keyring, public_key) = keyring_against(vec![
+            ResponseTemplate::new(500).set_body_string("unavailable"),
+        ])
+        .await;
         let SignError::Signer(error) = keyring
             .sign(&public_key, b"payload")
             .await
@@ -611,6 +662,7 @@ mod tests {
             panic!("a server error must not be reported as an unknown key")
         };
         assert_eq!(classify(&error).code, ErrorCode::ApiError);
+        assert_eq!(server.received_requests().await.unwrap().len(), 5);
     }
 
     #[tokio::test]

@@ -17,7 +17,8 @@ use turnkey_auth::ssh::{
 use crate::auth::{self, AuthOptions};
 use crate::errors::{InvalidInput, render_error_chain};
 use crate::ssh::registry::{SelectError, SshKeyName};
-use crate::ssh::{selection_error, signer::TurnkeySigner};
+use crate::ssh::selection_error;
+use crate::ssh::signer::{BACKOFF, TurnkeySigner};
 
 const CANNOT_EXEC: u8 = 2;
 const DEFAULT_PROGRAM: &str = "ssh-keygen";
@@ -182,9 +183,14 @@ async fn sign_paths(
         .await?
         .map_err(git_selection_error)?;
     let signed_data = build_signed_data("git", &payload);
-    let signature = TurnkeySigner::new(&client, entry.organization_id, &entry.private_key_id)
-        .sign_raw_payload(&signed_data)
-        .await?;
+    let signature = TurnkeySigner::new(
+        &client,
+        entry.organization_id,
+        &entry.private_key_id,
+        BACKOFF,
+    )
+    .sign_raw_payload(&signed_data)
+    .await?;
     let armored = encode_armored_signature(&entry.public_key.blob(), "git", &signature);
     let signature_path = PathBuf::from(format!("{}.sig", payload_path.display()));
     fs::write(&signature_path, armored)

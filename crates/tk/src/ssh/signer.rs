@@ -1,6 +1,9 @@
 //! Ed25519 signing through Turnkey's raw-payload activity.
 
+use std::time::Duration;
+
 use anyhow::{Error, Result};
+use tokio::time::sleep;
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 use turnkey_client::generated::immutable::common::v1::{HashFunction, PayloadEncoding};
 use turnkey_client::generated::{GetActivityRequest, SignRawPayloadIntentV2, SignRawPayloadResult};
@@ -10,10 +13,27 @@ use uuid::Uuid;
 use crate::errors::{ActivityError, ActivityErrorKind};
 use crate::ssh::registry::PrivateKeyId;
 
+/// SSH clients report any signing failure as a refused operation, so a
+/// rate-limited or transiently failing request is retried here, with
+/// exponential backoff from a base delay, before it surfaces.
+const ATTEMPTS: u32 = 5;
+
+/// Base delay before the second attempt; each later attempt doubles it.
+pub const BACKOFF: Duration = Duration::from_secs(1);
+
+fn transient(error: &TurnkeyClientError) -> bool {
+    match error {
+        TurnkeyClientError::UnexpectedHttpStatus(status, _) => *status == 429 || *status >= 500,
+        TurnkeyClientError::Http(_) => true,
+        _ => false,
+    }
+}
+
 pub struct TurnkeySigner<'a> {
     client: &'a TurnkeyClient<TurnkeyP256ApiKey>,
     organization_id: Uuid,
     private_key_id: &'a PrivateKeyId,
+    backoff: Duration,
 }
 
 impl<'a> TurnkeySigner<'a> {
@@ -21,34 +41,43 @@ impl<'a> TurnkeySigner<'a> {
         client: &'a TurnkeyClient<TurnkeyP256ApiKey>,
         organization_id: Uuid,
         private_key_id: &'a PrivateKeyId,
+        backoff: Duration,
     ) -> Self {
         Self {
             client,
             organization_id,
             private_key_id,
+            backoff,
         }
     }
 
     pub async fn sign_raw_payload(&self, payload: &[u8]) -> Result<[u8; 64]> {
-        let activity = match self
-            .client
-            .sign_raw_payload(
-                self.organization_id.to_string(),
-                self.client.current_timestamp(),
-                SignRawPayloadIntentV2 {
-                    sign_with: self.private_key_id.to_string(),
-                    payload: hex::encode(payload),
-                    encoding: PayloadEncoding::Hexadecimal,
-                    hash_function: HashFunction::NotApplicable,
-                },
-            )
-            .await
-        {
-            Ok(activity) => activity,
-            Err(TurnkeyClientError::ActivityRequiresApproval(activity_id)) => {
-                return Err(self.approval_required_error(activity_id).await);
+        let mut attempt = 1;
+        let activity = loop {
+            match self
+                .client
+                .sign_raw_payload(
+                    self.organization_id.to_string(),
+                    self.client.current_timestamp(),
+                    SignRawPayloadIntentV2 {
+                        sign_with: self.private_key_id.to_string(),
+                        payload: hex::encode(payload),
+                        encoding: PayloadEncoding::Hexadecimal,
+                        hash_function: HashFunction::NotApplicable,
+                    },
+                )
+                .await
+            {
+                Ok(activity) => break activity,
+                Err(TurnkeyClientError::ActivityRequiresApproval(activity_id)) => {
+                    return Err(self.approval_required_error(activity_id).await);
+                }
+                Err(error) if transient(&error) && attempt < ATTEMPTS => {
+                    sleep(self.backoff * (1 << (attempt - 1))).await;
+                    attempt += 1;
+                }
+                Err(error) => return Err(Error::new(error).context("sign the SSH payload")),
             }
-            Err(error) => return Err(Error::new(error).context("sign the SSH payload")),
         };
         let ActivityResult {
             result,
