@@ -1,19 +1,15 @@
 # Git signing
 
-`tk` can sign Git commits and tags either as Git's SSH signing program, backed
-by your Turnkey Ed25519 key, or as its GPG program, backed by a Turnkey
-OpenPGP key.
+`tk` signs Git commits and tags as Git's SSH signing program, backed by a
+Turnkey Ed25519 key, or as its GPG program, backed by a Turnkey OpenPGP key.
 
-Ensure you have followed the [configuration section of the repository readme](../README.md#configuration).
+Follow [authentication](./authentication.md) first.
 
 ## SSH signing
 
-```bash
-# Register the Turnkey Ed25519 key locally.
-tk ssh keys add --private-key-id PRIVATE_KEY_ID
-tk ssh keys list
+Register the key as in [SSH](./ssh-agent.md#keys), then point Git at `tk`:
 
-# Configure Git to sign with the registered key.
+```bash
 SSH_PUBLIC_KEY=$(tk ssh public-key)
 git config --global gpg.format ssh
 git config --global gpg.ssh.program "$(command -v tk)"
@@ -56,9 +52,8 @@ git config user.signingkey \
 
 ## GPG signing
 
-First create and register a Turnkey OpenPGP key and import it into your local
-keyring, as described in [GPG signing](./gpg-signing.md). That setup leaves
-the key's fingerprint in `$FINGERPRINT`.
+Create and import the key as in [GPG signing](./gpg-signing.md), which leaves
+its fingerprint in `$FINGERPRINT`.
 
 ```bash
 # Point git at tk as the GPG program.

@@ -1,21 +1,34 @@
-# SSH agent
+# SSH
 
-Run `tk` as a background SSH agent for registered Turnkey Ed25519 keys.
+Use Turnkey Ed25519 private keys for SSH through a background agent.
 
-Follow the [configuration section of the repository readme](../README.md#configuration).
+Follow [authentication](./authentication.md) first.
+
+## Keys
 
 ```bash
-# Register a key and start the agent.
+# Register a Turnkey private key locally.
 tk ssh keys add --private-key-id PRIVATE_KEY_ID
+tk ssh keys list
+
+# Print a public key, for authorized_keys or GitHub.
+tk ssh public-key
+tk ssh public-key --key SSH_FINGERPRINT
+
+# Forget a key. The Turnkey private key is unchanged.
+tk ssh keys remove SSH_FINGERPRINT
+```
+
+## Agent
+
+```bash
 tk ssh agent start
 export SSH_AUTH_SOCK=~/.config/turnkey/ssh-agent.sock
 
-# List the served keys and connect.
 ssh-add -L
 ssh user@host
 tk ssh agent status
 
-# Stop the agent.
 tk ssh agent stop
 ```
 
@@ -35,3 +48,6 @@ Restart after adding or removing keys:
 tk ssh agent stop
 tk ssh agent start
 ```
+
+To sign Git commits with a registered key, see
+[git signing](./git-signing.md).
