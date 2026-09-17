@@ -4,14 +4,10 @@ use anyhow::{Context, Error, Result};
 use serde_json::{json, to_value};
 use tokio::fs;
 use tracing::debug;
-use turnkey_client::generated::GetWhoamiRequest;
 
-use super::CompressedPublicKey;
 use super::pending::PendingSession;
-use crate::auth::{
-    Profile, api_keys_dir, build_turnkey_client, read_key, saved_profile, set_profile_key,
-    state_dir,
-};
+use super::{CompressedPublicKey, whoami};
+use crate::auth::{Profile, api_keys_dir, read_key, saved_profile, set_profile_key, state_dir};
 use crate::errors::InvalidInput;
 use crate::operations::OperationOutput;
 
@@ -38,11 +34,8 @@ pub(super) async fn run(name: String) -> Result<OperationOutput> {
 
     let key = read_key(&key_file).await?;
     let public_key = CompressedPublicKey::of(&key);
-    let identity = build_turnkey_client(key, &api_base_url)?
-        .get_whoami(GetWhoamiRequest {
-            organization_id: organization_id.to_string(),
-        })
-        .await
+    let identity = whoami(key, &api_base_url, organization_id)
+        .await?
         .map_err(Error::new)
         .with_context(|| {
             format!(

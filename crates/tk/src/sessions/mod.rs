@@ -13,13 +13,32 @@ mod status;
 
 use anyhow::Result;
 use clap::Subcommand;
+use turnkey_api_key_stamper::TurnkeyP256ApiKey;
+use turnkey_client::TurnkeyClientError;
+use turnkey_client::generated::{GetWhoamiRequest, GetWhoamiResponse};
+use uuid::Uuid;
 
 use provision::ProvisionArgs;
 pub(crate) use provision::{CompressedPublicKey, parse_public_key};
 use status::StatusArgs;
 
-use crate::auth::{self, AuthOptions};
+use crate::auth::{self, ApiBaseUrl, AuthOptions, build_turnkey_client};
 use crate::operations::OperationOutput;
+
+/// Asks Turnkey who `key` belongs to within `organization_id`. The outer
+/// error is a client construction failure; the inner one is the whoami call,
+/// left unwrapped so each caller applies its own handling.
+async fn whoami(
+    key: TurnkeyP256ApiKey,
+    api_base_url: &ApiBaseUrl,
+    organization_id: Uuid,
+) -> Result<Result<GetWhoamiResponse, TurnkeyClientError>> {
+    Ok(build_turnkey_client(key, api_base_url)?
+        .get_whoami(GetWhoamiRequest {
+            organization_id: organization_id.to_string(),
+        })
+        .await)
+}
 
 #[derive(Debug, Subcommand)]
 pub enum SessionCommand {

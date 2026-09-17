@@ -4,14 +4,13 @@ use anyhow::Result;
 use clap::Args;
 use serde_json::json;
 use turnkey_client::generated::{
-    GetWhoamiRequest,
     external::data::v1::ApiKey,
     services::coordinator::public::v1::{GetApiKeysRequest, GetApiKeysResponse},
 };
 
-use super::CompressedPublicKey;
 use super::duration::{ExpiresIn, format_duration};
-use crate::auth::{Profile, build_turnkey_client, read_key, saved_profile};
+use super::{CompressedPublicKey, whoami};
+use crate::auth::{Profile, read_key, saved_profile};
 use crate::errors::{MissingResource, SessionExpiring};
 use crate::operations::{OperationOutput, now_unix_ms, query_decoded};
 use crate::resources::expires_at;
@@ -37,11 +36,12 @@ pub(super) async fn run(args: StatusArgs) -> Result<OperationOutput> {
     } = saved_profile(&name).await?;
     let stamper = read_key(&api_key_file).await?;
     let public_key = CompressedPublicKey::of(&stamper);
-    let identity = build_turnkey_client(read_key(&api_key_file).await?, &api_base_url)?
-        .get_whoami(GetWhoamiRequest {
-            organization_id: organization_id.to_string(),
-        })
-        .await?;
+    let identity = whoami(
+        read_key(&api_key_file).await?,
+        &api_base_url,
+        organization_id,
+    )
+    .await??;
     let listed: GetApiKeysResponse = query_decoded(
         "get_api_keys",
         &GetApiKeysRequest {

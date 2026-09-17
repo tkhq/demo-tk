@@ -4,13 +4,10 @@ use anyhow::{Context, Result};
 use serde_json::json;
 use tokio::fs;
 use tracing::debug;
-use turnkey_client::generated::GetWhoamiRequest;
 
 use super::pending::PendingSession;
-use crate::auth::{
-    Profile, SecureCreateError, api_keys_dir, build_turnkey_client, read_key, saved_profile,
-    state_dir,
-};
+use super::whoami;
+use crate::auth::{Profile, SecureCreateError, api_keys_dir, read_key, saved_profile, state_dir};
 use crate::errors::InvalidInput;
 use crate::keygen::{GeneratedApiKey, generate};
 use crate::operations::OperationOutput;
@@ -108,12 +105,12 @@ async fn current_user_id(profile: &Profile) -> Option<String> {
         api_key_file,
     } = profile;
     let identity = async {
-        let client = build_turnkey_client(read_key(api_key_file).await?, api_base_url)?;
-        let response = client
-            .get_whoami(GetWhoamiRequest {
-                organization_id: organization_id.to_string(),
-            })
-            .await?;
+        let response = whoami(
+            read_key(api_key_file).await?,
+            api_base_url,
+            *organization_id,
+        )
+        .await??;
         anyhow::Ok(response.user_id)
     }
     .await;

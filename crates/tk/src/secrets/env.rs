@@ -10,7 +10,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use super::SecretOutput;
-use super::export::{Exported, Secret, export_value, list_all};
+use super::export::{Binding, Exported, Secret, export_value, list_all};
 use super::input::{UniqueKeyValues, quorum_for};
 use crate::auth::{ResolvedAuth, state_dir};
 use crate::errors::{InvalidInput, PendingApprovals};
@@ -18,26 +18,30 @@ use crate::operations::OperationOutput;
 
 const COMMAND: &str = "secret.env";
 
-fn select(
-    secrets: Vec<Secret>,
+/// Returns true when a secret has a name matching `name_prefix` and carries
+/// every requested static property.
+fn matches(
+    secret: &Secret,
     properties: &BTreeMap<String, String>,
     name_prefix: Option<&str>,
-) -> Result<BTreeMap<String, (String, Uuid)>> {
+) -> bool {
+    let Some(name) = secret.name.as_deref() else {
+        return false;
+    };
+    if name_prefix.is_some_and(|prefix| !name.starts_with(prefix)) {
+        return false;
+    }
+    properties.iter().all(|(key, value)| {
+        secret
+            .static_properties
+            .iter()
+            .any(|property| property.key == *key && property.value == *value)
+    })
+}
+
+fn select(secrets: Vec<(String, Uuid)>) -> Result<BTreeMap<String, (String, Uuid)>> {
     let mut by_var: BTreeMap<String, (String, Uuid)> = BTreeMap::new();
-    for secret in secrets {
-        let Some(name) = secret.name else { continue };
-        if name_prefix.is_some_and(|prefix| !name.starts_with(prefix)) {
-            continue;
-        }
-        let has_all = properties.iter().all(|(key, value)| {
-            secret
-                .static_properties
-                .iter()
-                .any(|property| property.key == *key && property.value == *value)
-        });
-        if !has_all {
-            continue;
-        }
+    for (name, id) in secrets {
         let var = name
             .rsplit_once('/')
             .map_or(name.as_str(), |(_, var)| var)
@@ -63,7 +67,7 @@ fn select(
                 .into());
             }
             Entry::Vacant(entry) => {
-                entry.insert((name, secret.id));
+                entry.insert((name, id));
             }
         }
     }
@@ -98,11 +102,20 @@ pub(super) async fn run(
     let quorum = quorum_for(auth.api_base_url.as_str())?;
     let state_dir = state_dir()?;
     let properties: BTreeMap<String, String> = properties.into();
-    let selected = select(list_all(&auth).await?, &properties, name_prefix.as_deref())?;
+    let selected = select(
+        list_all(&auth, |secret| {
+            matches(secret, &properties, name_prefix.as_deref())
+        })
+        .await?
+        .into_iter()
+        .filter_map(|secret| secret.name.map(|name| (name, secret.id)))
+        .collect(),
+    )?;
     if selected.is_empty() {
         return Err(InvalidInput("no secrets match the selection".into()).into());
     }
 
+    let binding = Binding::of(&auth);
     let mut exported = Vec::new();
     let mut pending = Vec::new();
     let mut env: BTreeMap<String, Zeroizing<String>> = BTreeMap::new();
@@ -111,17 +124,21 @@ pub(super) async fn run(
             &state_dir,
             &quorum,
             &auth,
+            &binding,
             secret_id,
             UniqueKeyValues::empty(),
         )
         .await?;
         match attempt {
-            Exported::Pending { record } => {
+            Exported::Pending {
+                record: _,
+                activity_id,
+            } => {
                 let entry = json!({
                     "name": &name,
                     "secretId": secret_id,
                     "var": var,
-                    "activityId": record.data()["activity"]["id"],
+                    "activityId": activity_id,
                 });
                 pending.push((name, entry));
             }
@@ -182,14 +199,24 @@ mod tests {
     }
 
     #[test]
-    fn selects_by_prefix_and_every_property() {
+    fn matches_by_prefix_and_every_property() {
         let unilateral = BTreeMap::from([("consensus".to_owned(), "unilateral".to_owned())]);
         let secrets = vec![
             secret("hermes/API_TOKEN", &[("consensus", "unilateral")]),
             secret("hermes/OTHER", &[("consensus", "approval")]),
             secret("other/API_TOKEN", &[("consensus", "unilateral")]),
+            Secret {
+                id: Uuid::new_v4(),
+                name: None,
+                static_properties: vec![],
+            },
         ];
-        let selected = select(secrets, &unilateral, Some("hermes/")).unwrap();
+        let kept: Vec<(String, Uuid)> = secrets
+            .into_iter()
+            .filter(|secret| matches(secret, &unilateral, Some("hermes/")))
+            .filter_map(|secret| secret.name.map(|name| (name, secret.id)))
+            .collect();
+        let selected = select(kept).unwrap();
         let vars: Vec<&str> = selected.keys().map(String::as_str).collect();
         assert_eq!(vars, ["API_TOKEN"]);
         assert_eq!(selected["API_TOKEN"].0, "hermes/API_TOKEN");
@@ -197,13 +224,7 @@ mod tests {
 
     #[test]
     fn rejects_bad_variable_names_and_duplicates() {
-        let none = BTreeMap::new();
-        let error = select(
-            vec![secret("hermes/not-a-var", &[])],
-            &none,
-            Some("hermes/"),
-        )
-        .unwrap_err();
+        let error = select(vec![("hermes/not-a-var".to_owned(), Uuid::new_v4())]).unwrap_err();
         let InvalidInput(message) = error
             .downcast_ref::<InvalidInput>()
             .expect("expected InvalidInput");
@@ -212,11 +233,10 @@ mod tests {
             "secret hermes/not-a-var does not end in a valid environment variable name; \
              expected <prefix>/<VAR>"
         );
-        let error = select(
-            vec![secret("a/TOKEN", &[]), secret("b/TOKEN", &[])],
-            &none,
-            None,
-        )
+        let error = select(vec![
+            ("a/TOKEN".to_owned(), Uuid::new_v4()),
+            ("b/TOKEN".to_owned(), Uuid::new_v4()),
+        ])
         .unwrap_err();
         let InvalidInput(message) = error
             .downcast_ref::<InvalidInput>()

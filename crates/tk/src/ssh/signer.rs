@@ -25,7 +25,27 @@ fn transient(error: &TurnkeyClientError) -> bool {
     match error {
         TurnkeyClientError::UnexpectedHttpStatus(status, _) => *status == 429 || *status >= 500,
         TurnkeyClientError::Http(_) => true,
-        _ => false,
+        TurnkeyClientError::BuilderMissingApiKey
+        | TurnkeyClientError::ReqwestBuilder(_)
+        | TurnkeyClientError::MissingContentTypeHeader
+        | TurnkeyClientError::HeaderToStrError(_)
+        | TurnkeyClientError::HeaderFromStrError(_)
+        | TurnkeyClientError::UnexpectedMimeType(_)
+        | TurnkeyClientError::Decode(_, _)
+        | TurnkeyClientError::SerdeJsonFailure(_)
+        | TurnkeyClientError::MissingActivity
+        | TurnkeyClientError::MissingResult
+        | TurnkeyClientError::MissingInnerResult
+        | TurnkeyClientError::UnexpectedActivityStatus(_)
+        | TurnkeyClientError::UnexpectedInnerActivityResult(_)
+        | TurnkeyClientError::ActivityFailed(_)
+        | TurnkeyClientError::ActivityRequiresApproval(_)
+        | TurnkeyClientError::ExceededRetries(_)
+        | TurnkeyClientError::RefusedRedirect(_, _)
+        | TurnkeyClientError::StamperError(_)
+        | TurnkeyClientError::UnexpectedSingletonCount(_, _)
+        | TurnkeyClientError::UnexpectedResultCount(_, _, _)
+        | TurnkeyClientError::EnclaveEncrypt(_) => false,
     }
 }
 

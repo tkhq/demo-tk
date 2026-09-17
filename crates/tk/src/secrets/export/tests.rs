@@ -28,6 +28,7 @@ async fn a_submission_that_fails_leaves_no_recipient_key_on_disk() {
         dir.path(),
         &QuorumPublicKey::production_signer(),
         &auth,
+        &binding,
         secret_id,
         UniqueKeyValues::parse(vec![], "--context").unwrap(),
     )
@@ -66,6 +67,7 @@ async fn state_written_against_another_endpoint_is_refused() {
         dir.path(),
         &QuorumPublicKey::production_signer(),
         &auth,
+        &binding,
         secret_id,
         UniqueKeyValues::parse(vec![], "--context").unwrap(),
     )

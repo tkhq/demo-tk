@@ -73,14 +73,14 @@ pub(super) async fn list(
 }
 
 /// Identifies the credential and endpoint that own a pending export.
-struct Binding {
+pub(super) struct Binding {
     organization_id: Uuid,
     api_base_url: String,
     api_public_key: String,
 }
 
 impl Binding {
-    fn of(auth: &ResolvedAuth) -> Self {
+    pub(super) fn of(auth: &ResolvedAuth) -> Self {
         Self {
             organization_id: auth.org_id,
             api_base_url: auth.api_base_url.as_str().trim_end_matches('/').to_owned(),
@@ -208,8 +208,12 @@ pub(super) struct Secret {
     pub(super) static_properties: Vec<KeyValue>,
 }
 
-/// Every secret's metadata in the organization, across pages.
-pub(super) async fn list_all(auth: &ResolvedAuth) -> Result<Vec<Secret>> {
+/// Walks every secret's metadata in the organization, across pages, retaining
+/// those for which `keep` returns true.
+pub(super) async fn list_all(
+    auth: &ResolvedAuth,
+    keep: impl Fn(&Secret) -> bool,
+) -> Result<Vec<Secret>> {
     const PAGE: usize = 100;
     let mut secrets = Vec::new();
     let mut after = String::new();
@@ -229,10 +233,6 @@ pub(super) async fn list_all(auth: &ResolvedAuth) -> Result<Vec<Secret>> {
         )
         .await?;
         let full = page.len() == PAGE;
-        after = page
-            .last()
-            .map(|secret| secret.secret_id.clone())
-            .unwrap_or_default();
         for secret in page {
             let SecretMetadata {
                 secret_id,
@@ -240,11 +240,15 @@ pub(super) async fn list_all(auth: &ResolvedAuth) -> Result<Vec<Secret>> {
                 static_properties,
                 created_at_unix_ms: _,
             } = secret;
-            secrets.push(Secret {
+            let secret = Secret {
                 id: Uuid::parse_str(&secret_id).context("secret id from the API is not a UUID")?,
                 name,
                 static_properties,
-            });
+            };
+            if keep(&secret) {
+                secrets.push(secret);
+            }
+            after = secret_id;
         }
         if !full {
             break;
@@ -254,11 +258,7 @@ pub(super) async fn list_all(auth: &ResolvedAuth) -> Result<Vec<Secret>> {
 }
 
 pub(super) async fn resolve_name(auth: &ResolvedAuth, name: SecretName) -> Result<Uuid> {
-    let matches: Vec<Secret> = list_all(auth)
-        .await?
-        .into_iter()
-        .filter(|secret| secret.name.as_deref() == Some(name.as_str()))
-        .collect();
+    let matches = list_all(auth, |secret| secret.name.as_deref() == Some(name.as_str())).await?;
     match matches.as_slice() {
         [] => Err(MissingResource::new("secret", name).into()),
         [one] => Ok(one.id),
@@ -294,9 +294,13 @@ pub(super) async fn run(
         SecretRef::Id(id) => id,
         SecretRef::Name(name) => resolve_name(&auth, name).await?,
     };
-    match export_value(&state_dir, &quorum, &auth, secret_id, context).await? {
+    let binding = Binding::of(&auth);
+    match export_value(&state_dir, &quorum, &auth, &binding, secret_id, context).await? {
         Exported::Completed { record, value } => deliver(record, value, out).await,
-        Exported::Pending { record } => Ok(record.into()),
+        Exported::Pending {
+            record,
+            activity_id: _,
+        } => Ok(record.into()),
     }
 }
 
@@ -304,6 +308,7 @@ pub(super) async fn run(
 pub(super) enum Exported {
     Pending {
         record: OperationOutput,
+        activity_id: String,
     },
     Completed {
         record: OperationOutput,
@@ -315,13 +320,13 @@ pub(super) async fn export_value(
     state_dir: &Path,
     quorum: &QuorumPublicKey,
     auth: &ResolvedAuth,
+    binding: &Binding,
     secret_id: Uuid,
     context: UniqueKeyValues,
 ) -> Result<Exported> {
-    let binding = Binding::of(auth);
-    let path = PendingExport::path(state_dir, &binding, secret_id);
+    let path = PendingExport::path(state_dir, binding, secret_id);
 
-    if let Some(state) = PendingExport::load(&path, &binding).await? {
+    if let Some(state) = PendingExport::load(&path, binding).await? {
         let fetched = query_activity(&client()?, auth, &state.activity_id).await?;
         let record = match observed(COMMAND, export_data(secret_id, fetched)) {
             Ok(record) => record,
@@ -335,6 +340,7 @@ pub(super) async fn export_value(
         if record.is_pending() {
             return Ok(Exported::Pending {
                 record: pending(record),
+                activity_id: state.activity_id,
             });
         }
         let recipient = state.recipient(&path, quorum)?;
@@ -378,16 +384,11 @@ pub(super) async fn export_value(
                     "pending export has no activity id",
                 )
             })?;
-        let Binding {
-            organization_id,
-            api_base_url,
-            api_public_key,
-        } = binding;
         let state = PendingExport {
             version: 1,
-            organization_id,
-            api_base_url,
-            api_public_key,
+            organization_id: binding.organization_id,
+            api_base_url: binding.api_base_url.clone(),
+            api_public_key: binding.api_public_key.clone(),
             secret_id,
             target_public_key,
             key_material: Zeroizing::new(hex::encode(ikm.as_slice())),
@@ -401,6 +402,7 @@ pub(super) async fn export_value(
         })?;
         return Ok(Exported::Pending {
             record: pending(record),
+            activity_id: state.activity_id,
         });
     }
     let value = decrypt(recipient, &record, auth.org_id)?;

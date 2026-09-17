@@ -972,7 +972,7 @@ pub async fn create_profile(
                 .await
                 .context("resolve credential path")?;
             let key = read_key(&resolved).await?;
-            (resolved, hex::encode(key.compressed_public_key()), None)
+            (resolved, CompressedPublicKey::of(&key), None)
         }
         None => {
             let GeneratedApiKey { public_key, path } = generate(None).await?;
@@ -980,7 +980,7 @@ pub async fn create_profile(
                 .await
                 .context("resolve credential path")
             {
-                Ok(resolved) => (resolved, public_key.into_string(), Some(path)),
+                Ok(resolved) => (resolved, public_key, Some(path)),
                 Err(error) => {
                     let _ = fs::remove_file(&path).await;
                     return Err(error);
@@ -1112,8 +1112,8 @@ pub async fn run_profile(
             if let Some(api_key_file) = api_key_file {
                 let previous = switch_key(profile, &api_key_file).await?;
                 let key = read_key(&profile.api_key_file).await?;
-                record["publicKey"] = CompressedPublicKey::of(&key).into_string().into();
-                record["previousApiKeyFile"] = previous.to_string_lossy().into();
+                record["publicKey"] = serde_json::to_value(CompressedPublicKey::of(&key))?;
+                record["previousApiKeyFile"] = serde_json::to_value(&previous)?;
             }
             record["profile"] = serde_json::to_value(&*profile)?;
             save(&path, &registry).await?;
