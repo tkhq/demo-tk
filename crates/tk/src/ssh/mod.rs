@@ -3,12 +3,18 @@
 use std::fmt::{self, Display, Formatter};
 
 use anyhow::Result;
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, builder::NonEmptyStringValueParser};
 use serde::Serialize;
+use turnkey_client::TurnkeyClientError;
+use turnkey_client::generated::immutable::activity::v1::{
+    CreatePrivateKeysIntentV2, PrivateKeyParams,
+};
+use turnkey_client::generated::immutable::common::v1::Curve;
 use uuid::Uuid;
 
 use crate::auth::{self, AuthOptions, build_turnkey_client};
 use crate::errors::InvalidInput;
+use crate::operations::submit_activity;
 use crate::outcome::{MachineOnly, Outcome};
 
 use registry::{PrivateKeyId, SelectError, SshKeyEntry, SshKeyName};
@@ -36,12 +42,21 @@ pub enum SshCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum KeysCommand {
+    /// Create an Ed25519 private key in Turnkey and register it.
+    Create(CreateArgs),
     /// Fetch and register an Ed25519 private key.
     Add(AddArgs),
     /// List all registered SSH keys without contacting Turnkey.
     List,
     /// Forget a registered key without changing the Turnkey private key.
     Remove(RemoveArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CreateArgs {
+    /// Name of the new Turnkey private key.
+    #[arg(long, value_parser = NonEmptyStringValueParser::new())]
+    name: String,
 }
 
 #[derive(Debug, Args)]
@@ -181,6 +196,55 @@ pub async fn run(command: SshCommand, options: &AuthOptions) -> Result<Outcome> 
                 .map(RegisteredKey::from)
                 .collect(),
         })),
+        SshCommand::Keys {
+            command: KeysCommand::Create(CreateArgs { name }),
+        } => {
+            let resolved = auth::resolve(options).await?;
+            let submitted = submit_activity(
+                &resolved,
+                "ssh.keys.create",
+                "create_private_keys",
+                "ACTIVITY_TYPE_CREATE_PRIVATE_KEYS_V2",
+                &CreatePrivateKeysIntentV2 {
+                    private_keys: vec![PrivateKeyParams {
+                        private_key_name: name,
+                        curve: Curve::Ed25519,
+                        private_key_tags: vec![],
+                        address_formats: vec![],
+                    }],
+                },
+            )
+            .await?;
+            let data = submitted.into_data();
+            let activity = &data["activity"];
+            let private_key_id = match activity["result"]["createPrivateKeysResultV2"]["privateKeys"]
+                [0]["privateKeyId"]
+                .as_str()
+            {
+                Some(id) => PrivateKeyId::from(id.to_owned()),
+                None => {
+                    let activity_id = activity["id"].as_str().unwrap_or_default().to_owned();
+                    return Err(anyhow::Error::new(TurnkeyClientError::ActivityRequiresApproval(
+                        activity_id.clone(),
+                    ))
+                    .context(format!(
+                        "private key creation awaits approval (activity id: {activity_id}); once it completes, register the key with tk ssh keys add --private-key-id <id>"
+                    )));
+                }
+            };
+            let client = build_turnkey_client(resolved.stamper, &resolved.api_base_url)?;
+            let public_key =
+                keys::get_private_key(&client, resolved.org_id, &private_key_id).await?;
+            let entry = SshKeyEntry {
+                organization_id: resolved.org_id,
+                private_key_id,
+                public_key,
+            };
+            let mut record = RegisteredKey::from(entry.clone());
+            auth::register_ssh_key(entry).await?;
+            record.agent_running = agent::is_default_running().await;
+            Ok(Outcome::SshKeyRegistered(record))
+        }
         SshCommand::Keys {
             command: KeysCommand::Add(AddArgs { private_key_id }),
         } => {

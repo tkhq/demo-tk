@@ -7,7 +7,10 @@ Follow [authentication](./authentication.md) first.
 ## Keys
 
 ```bash
-# Register a Turnkey private key locally.
+# Create an Ed25519 private key in Turnkey and register it locally in one step.
+tk ssh keys create --name hermes-ssh
+
+# Or register a Turnkey private key that already exists.
 tk ssh keys add --private-key-id PRIVATE_KEY_ID
 tk ssh keys list
 
@@ -42,7 +45,10 @@ tk ssh agent start --key SSH_FINGERPRINT --key ANOTHER_SSH_FINGERPRINT
 tk ssh agent start --profile agent
 ```
 
-Restart after adding or removing keys:
+The agent resolves its Turnkey credential from the registry when it starts and
+again whenever a signature is refused with HTTP 401 or 403, so a session key
+rotated with `tk session activate` is picked up on the next signature without a
+restart. Restart after adding or removing keys:
 
 ```bash
 tk ssh agent stop

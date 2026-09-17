@@ -567,3 +567,38 @@ fn passthrough_signing_errors_name_the_key_and_git_sign_signs() {
         String::from_utf8_lossy(&checked.stderr)
     );
 }
+
+#[test]
+#[ignore]
+fn ssh_key_create_makes_an_ed25519_key_and_registers_it() {
+    let run = Run::new();
+    let name = run.name("ssh-created");
+    let created = run.ok(run.admin().args(["ssh", "keys", "create", "--name", &name]));
+    assert_eq!(created["reason"], "ssh_key_registered");
+    let private_key_id = text(&created["privateKeyId"]).to_string();
+    assert!(Uuid::parse_str(&private_key_id).is_ok(), "{created}");
+    assert!(
+        text(&created["publicKey"]).starts_with("ssh-ed25519 "),
+        "{created}"
+    );
+
+    // The key is registered locally under its Turnkey id and is an Ed25519 key.
+    let listed = run.ok(run.admin().args(["ssh", "keys", "list"]));
+    assert!(
+        listed["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|key| key["privateKeyId"] == private_key_id),
+        "{listed}"
+    );
+    let printed = run.ok(run
+        .admin()
+        .args(["ssh", "public-key", "--key", &private_key_id]));
+    assert_eq!(printed["publicKey"], created["publicKey"]);
+
+    // Private key labels are unique within an organization.
+    let again = run.err(run.admin().args(["ssh", "keys", "create", "--name", &name]));
+    assert_eq!(again["code"], "api_error", "{again}");
+    assert_eq!(again["httpStatus"], 400, "{again}");
+}
