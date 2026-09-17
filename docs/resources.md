@@ -11,26 +11,26 @@ Follow [authentication](./authentication.md) first.
 
 ```bash
 tk user list
-tk user get USER_ID
+tk user get --id USER_ID
 tk user create --input-json '{"users": [{
   "userName": "agent",
   "apiKeys": [{"apiKeyName": "agent-key", "publicKey": "02…", "curveType": "API_KEY_CURVE_P256"}],
   "authenticators": [], "oauthProviders": [], "userTags": []
 }]}'
 tk user update --input-file ./user-update.json
-tk user delete USER_ID
+tk user delete --id USER_ID
 
 tk user tag list
 tk user tag create --input-json '{"userTagName": "agents", "userIds": []}'
 tk user tag update --input-file ./tag-update.json
-tk user tag delete TAG_ID
+tk user tag delete --id TAG_ID
 ```
 
 ## Policies
 
 ```bash
 tk policy list
-tk policy get POLICY_ID
+tk policy get --id POLICY_ID
 tk policy create --input-file - <<'EOF'
 {
   "policyName": "agents-sign-only",
@@ -42,10 +42,10 @@ tk policy create --input-file - <<'EOF'
 EOF
 tk policy create-batch --input-file ./policies.json
 tk policy update --input-json '{"policyId": "POLICY_ID", "policyNotes": "revised"}'
-tk policy delete POLICY_ID
+tk policy delete --id POLICY_ID
 
 # See how policies evaluated an activity.
-tk policy evaluations ACTIVITY_ID
+tk policy evaluations --activity-id ACTIVITY_ID
 ```
 
 Updates use `policyEffect`, `policyCondition`, `policyConsensus`, and
@@ -59,14 +59,14 @@ tk api-key register --input-json '{
   "userId": "USER_ID",
   "apiKeys": [{"apiKeyName": "ci", "publicKey": "02…", "curveType": "API_KEY_CURVE_P256"}]
 }'
-tk api-key delete --user-id USER_ID API_KEY_ID
+tk api-key delete --user-id USER_ID --id API_KEY_ID
 ```
 
 ## Wallets
 
 ```bash
 tk wallet list
-tk wallet get WALLET_ID
+tk wallet get --id WALLET_ID
 tk wallet create --input-file - <<'EOF'
 {"walletName": "treasury", "accounts": [{
   "curve": "CURVE_SECP256K1",

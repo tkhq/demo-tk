@@ -215,6 +215,7 @@ fn ssh_key_register_list_print_and_remove_by_every_name() {
         "ssh",
         "keys",
         "remove",
+        "--key",
         "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
     ]));
     assert_eq!(unknown_removal["code"], "invalid_input");
@@ -235,9 +236,7 @@ fn ssh_key_register_list_print_and_remove_by_every_name() {
         0o600
     );
 
-    let removed = run.ok(run
-        .admin_offline()
-        .args(["ssh", "keys", "remove", &fingerprint]));
+    let removed = run.remove_ssh_key(&fingerprint);
     assert_eq!(removed, registration_record("ssh_key_removed", &added));
     assert_eq!(
         run.ok(run.admin_offline().args(["ssh", "keys", "list"])),
@@ -246,17 +245,13 @@ fn ssh_key_register_list_print_and_remove_by_every_name() {
 
     register_key(&run, &private_key_id);
     assert_eq!(
-        run.ok(run
-            .admin_offline()
-            .args(["ssh", "keys", "remove", &public_key])),
+        run.remove_ssh_key(&public_key),
         registration_record("ssh_key_removed", &added)
     );
 
     register_key(&run, &private_key_id);
     assert_eq!(
-        run.ok(run
-            .admin_offline()
-            .args(["ssh", "keys", "remove", &private_key_id])),
+        run.remove_ssh_key(&private_key_id),
         registration_record("ssh_key_removed", &added)
     );
     assert_eq!(

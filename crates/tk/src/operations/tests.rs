@@ -116,11 +116,23 @@ fn parser_enforces_body_source_and_safe_path() {
         ErrorKind::ValueValidation
     );
     assert_eq!(
-        ActivityCli::try_parse_from(["tk", "wait", "a", "--timeout", "0"])
+        ActivityCli::try_parse_from(["tk", "wait", "--id", "a", "--timeout", "0"])
             .unwrap_err()
             .kind(),
         ErrorKind::ValueValidation
     );
+}
+
+#[test]
+fn parser_rejects_empty_activity_ids() {
+    for subcommand in ["get", "approve", "reject", "wait"] {
+        assert_eq!(
+            ActivityCli::try_parse_from(["tk", subcommand, "--id", ""])
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidValue
+        );
+    }
 }
 
 #[tokio::test]

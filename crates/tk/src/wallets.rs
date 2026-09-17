@@ -21,6 +21,8 @@ use uuid::Uuid;
 pub enum WalletCommand {
     List,
     Get {
+        /// Wallet to fetch.
+        #[arg(long)]
         id: Uuid,
     },
     Create(BodyArgs),
@@ -294,7 +296,7 @@ mod tests {
     #[test]
     fn wallet_uuid_is_checked_before_authentication() {
         assert_eq!(
-            WalletParser::try_parse_from(["wallet", "get", "not-an-id"])
+            WalletParser::try_parse_from(["wallet", "get", "--id", "not-an-id"])
                 .unwrap_err()
                 .kind(),
             ErrorKind::ValueValidation

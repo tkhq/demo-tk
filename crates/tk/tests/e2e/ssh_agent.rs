@@ -250,7 +250,7 @@ fn agent_serves_every_registered_key_and_reports_its_lifecycle() {
         )
     );
     let mut remove = bare_cli(run.home());
-    let removed = run.human_stdout(remove.args(["ssh", "keys", "remove", &first_id]));
+    let removed = run.human_stdout(remove.args(["ssh", "keys", "remove", "--key", &first_id]));
     assert_eq!(
         removed,
         format!(
@@ -405,9 +405,14 @@ fn agent_start_narrows_by_key_profile_and_organization() {
     assert_eq!(profiled.stop(), json!({"reason": "agent_stopped"}));
 
     // A profile of another organization has nothing to serve.
-    run.ok(run
-        .cli()
-        .args(["profile", "set", &login.name, "--organization-id", &nil]));
+    run.ok(run.cli().args([
+        "profile",
+        "set",
+        "--profile-name",
+        &login.name,
+        "--organization-id",
+        &nil,
+    ]));
     no_agent(
         run.err(
             run.cli()
@@ -422,12 +427,8 @@ fn agent_start_narrows_by_key_profile_and_organization() {
     );
 
     // An empty registry fails before any process is spawned.
-    run.ok(run
-        .admin_offline()
-        .args(["ssh", "keys", "remove", &first_id]));
-    run.ok(run
-        .admin_offline()
-        .args(["ssh", "keys", "remove", &second_id]));
+    run.remove_ssh_key(&first_id);
+    run.remove_ssh_key(&second_id);
     no_agent(
         run.err(
             run.admin_offline()

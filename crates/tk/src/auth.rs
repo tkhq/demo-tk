@@ -100,14 +100,27 @@ pub enum SavedProfileCommand {
     /// List saved profiles and the active selection.
     List,
     /// Show one saved profile.
-    Show { name: String },
+    Show {
+        /// Saved profile to show.
+        #[arg(long = "profile-name", value_parser = NonEmptyStringValueParser::new())]
+        name: String,
+    },
     /// Select a saved profile after checking its credential file.
-    Use { name: String },
+    Use {
+        /// Saved profile to select.
+        #[arg(long = "profile-name", value_parser = NonEmptyStringValueParser::new())]
+        name: String,
+    },
     /// Remove a profile entry; credential files are kept.
-    Delete { name: String },
+    Delete {
+        /// Saved profile to remove.
+        #[arg(long = "profile-name", value_parser = NonEmptyStringValueParser::new())]
+        name: String,
+    },
     /// Update the organization or API endpoint of a saved profile.
     Set {
         /// Saved profile to update.
+        #[arg(long = "profile-name", value_parser = NonEmptyStringValueParser::new())]
         name: String,
     },
 }
@@ -891,7 +904,7 @@ async fn login(args: LoginArgs, options: &AuthOptions) -> Result<OperationOutput
         && requested != *organization_id
     {
         return Err(InvalidInput(format!(
-            "profile {name} is saved with organization {organization_id}; run tk profile set {name} --organization-id {requested} to change it"
+            "profile {name} is saved with organization {organization_id}; run tk profile set --profile-name {name} --organization-id {requested} to change it"
         ))
         .into());
     }
@@ -899,7 +912,7 @@ async fn login(args: LoginArgs, options: &AuthOptions) -> Result<OperationOutput
         && requested != *api_base_url
     {
         return Err(InvalidInput(format!(
-            "profile {name} is saved with API base URL {api_base_url}; run tk profile set {name} --api-base-url {requested} to change it"
+            "profile {name} is saved with API base URL {api_base_url}; run tk profile set --profile-name {name} --api-base-url {requested} to change it"
         ))
         .into());
     }

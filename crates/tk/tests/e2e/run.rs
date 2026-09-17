@@ -331,13 +331,26 @@ impl Run {
     }
 
     pub(crate) fn wait(&self, id: &str) -> Value {
-        let record = self.ok(self
-            .admin()
-            .args(["activity", "wait", id, "--timeout", "90"]));
+        let record =
+            self.ok(self
+                .admin()
+                .args(["activity", "wait", "--id", id, "--timeout", "90"]));
         assert_eq!(record["command"], "activity.wait");
         assert_eq!(record["status"], "completed", "{record}");
         assert_eq!(record["activity"]["id"], id);
         record
+    }
+
+    pub(crate) fn approve(&self, approver: &TurnkeyP256ApiKey, id: &str) -> Value {
+        self.ok(self
+            .as_user(approver)
+            .args(["activity", "approve", "--id", id]))
+    }
+
+    pub(crate) fn remove_ssh_key(&self, key: &str) -> Value {
+        self.ok(self
+            .admin_offline()
+            .args(["ssh", "keys", "remove", "--key", key]))
     }
 
     /// Submits once and waits for pending activities.
@@ -356,8 +369,14 @@ impl Run {
             Some("completed") => Ok(record),
             Some("pending") => {
                 let id = id_of(&record);
-                let (exit, waited, stdout) =
-                    self.attempt(waiter().args(["activity", "wait", &id, "--timeout", "90"]));
+                let (exit, waited, stdout) = self.attempt(waiter().args([
+                    "activity",
+                    "wait",
+                    "--id",
+                    &id,
+                    "--timeout",
+                    "90",
+                ]));
                 if exit != Some(0) {
                     return Err((waited, stdout));
                 }
@@ -473,7 +492,7 @@ impl Run {
     pub(crate) fn import_secret(&self, name: &str, value: &str) -> String {
         let imported = self.submit(
             self.admin()
-                .args(["secret", "import", name])
+                .args(["secret", "import", "--name", name])
                 .write_stdin(value),
             "secret.import",
         );
