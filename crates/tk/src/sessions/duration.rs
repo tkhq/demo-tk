@@ -14,11 +14,16 @@ impl ExpiresIn {
     pub(crate) fn seconds(self) -> u64 {
         self.0
     }
+}
 
-    /// The largest exact unit for a number of seconds, for display.
-    pub(crate) fn from_seconds(seconds: u64) -> Self {
-        Self(seconds)
+/// Renders a number of seconds as its largest exact unit, for display.
+pub(crate) fn format_duration(seconds: u64) -> String {
+    for (unit, size) in [("d", 86_400), ("h", 3_600), ("m", 60)] {
+        if seconds > 0 && seconds.is_multiple_of(size) {
+            return format!("{}{unit}", seconds / size);
+        }
     }
+    format!("{seconds}s")
 }
 
 impl FromStr for ExpiresIn {
@@ -58,13 +63,7 @@ impl FromStr for ExpiresIn {
 
 impl Display for ExpiresIn {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        let seconds = self.0;
-        for (unit, size) in [("d", 86_400), ("h", 3_600), ("m", 60)] {
-            if seconds > 0 && seconds.is_multiple_of(size) {
-                return write!(f, "{}{unit}", seconds / size);
-            }
-        }
-        write!(f, "{seconds}s")
+        f.write_str(&format_duration(self.0))
     }
 }
 
@@ -94,6 +93,6 @@ mod tests {
         assert_eq!("36h".parse::<ExpiresIn>().unwrap().to_string(), "36h");
         assert_eq!("90s".parse::<ExpiresIn>().unwrap().to_string(), "90s");
         assert_eq!("120s".parse::<ExpiresIn>().unwrap().to_string(), "2m");
-        assert_eq!(ExpiresIn::from_seconds(0).to_string(), "0s");
+        assert_eq!(format_duration(0), "0s");
     }
 }

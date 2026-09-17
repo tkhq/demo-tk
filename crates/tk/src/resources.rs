@@ -7,9 +7,10 @@ use std::{
 use anyhow::Result;
 use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 use serde::{Serialize, de::DeserializeOwned};
-use serde_json::{Value, from_slice, to_value};
+use serde_json::{Value, from_slice, json, to_value};
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 use turnkey_client::generated::{
+    external::data::v1::ApiKey,
     immutable::{activity::v1 as intent, common::v1 as common},
     services::coordinator::public::v1 as query,
 };
@@ -93,9 +94,10 @@ pub enum ApiKeyCommand {
     },
 }
 
+/// The `--input-json`/`--input-file` flag pair shared by every command that
+/// accepts a parameters object; requiredness is imposed by each parent's group.
 #[derive(Debug, Args)]
-#[group(required = true, multiple = false)]
-pub struct BodyArgs {
+pub struct Body {
     /// Inline JSON parameters (no activity envelope).
     #[arg(long)]
     input_json: Option<String>,
@@ -104,16 +106,19 @@ pub struct BodyArgs {
     input_file: Option<PathBuf>,
 }
 
+#[derive(Debug, Args)]
+#[command(group(ArgGroup::new("body_source").required(true).args(["input_json", "input_file"])))]
+pub struct BodyArgs {
+    #[command(flatten)]
+    body: Body,
+}
+
 /// Flags for one user, or a full parameters object.
 #[derive(Debug, Args)]
 #[command(group(ArgGroup::new("user_source").required(true).args(["input_json", "input_file", "user_name"])))]
 pub struct CreateUserArgs {
-    /// Inline JSON parameters (no activity envelope).
-    #[arg(long)]
-    input_json: Option<String>,
-    /// Read JSON parameters from a file, or - for stdin.
-    #[arg(long)]
-    input_file: Option<PathBuf>,
+    #[command(flatten)]
+    body: Body,
     /// Name of the single user to create.
     #[arg(long)]
     user_name: Option<String>,
@@ -144,12 +149,8 @@ pub struct CreateUserArgs {
 #[derive(Debug, Args)]
 #[command(group(ArgGroup::new("tag_source").required(true).args(["input_json", "input_file", "name"])))]
 pub struct CreateTagArgs {
-    /// Inline JSON parameters (no activity envelope).
-    #[arg(long)]
-    input_json: Option<String>,
-    /// Read JSON parameters from a file, or - for stdin.
-    #[arg(long)]
-    input_file: Option<PathBuf>,
+    #[command(flatten)]
+    body: Body,
     /// Name of the new tag, with no members.
     #[arg(long)]
     name: Option<String>,
@@ -165,12 +166,8 @@ enum EffectArg {
 #[derive(Debug, Args)]
 #[command(group(ArgGroup::new("policy_source").required(true).args(["input_json", "input_file", "name"])))]
 pub struct CreatePolicyArgs {
-    /// Inline JSON parameters (no activity envelope).
-    #[arg(long)]
-    input_json: Option<String>,
-    /// Read JSON parameters from a file, or - for stdin.
-    #[arg(long)]
-    input_file: Option<PathBuf>,
+    #[command(flatten)]
+    body: Body,
     /// Name of the policy.
     #[arg(long)]
     name: Option<String>,
@@ -224,18 +221,13 @@ pub enum Mutation {
 }
 
 impl BodyArgs {
-    fn parse_from<T: DeserializeOwned + Serialize>(
-        input_json: Option<String>,
-        input_file: Option<PathBuf>,
-    ) -> Result<T> {
-        Self {
-            input_json,
-            input_file,
-        }
-        .parse()
-    }
-
     pub(crate) fn parse<T: DeserializeOwned + Serialize>(self) -> Result<T> {
+        self.body.parse()
+    }
+}
+
+impl Body {
+    fn parse<T: DeserializeOwned + Serialize>(self) -> Result<T> {
         let bytes = match (self.input_json, self.input_file) {
             (Some(json), _) => json.into_bytes(),
             (None, Some(path)) if path.as_os_str() == "-" => {
@@ -340,13 +332,11 @@ impl UserCommand {
             UserCommand::List => PreparedResource::Query(Query::Users),
             UserCommand::Get { id } => PreparedResource::Query(Query::User(id)),
             UserCommand::Create(CreateUserArgs {
-                input_json,
-                input_file,
+                body,
                 user_name: None,
                 ..
             }) => {
-                let params: intent::CreateUsersIntentV4 =
-                    BodyArgs::parse_from(input_json, input_file)?;
+                let params: intent::CreateUsersIntentV4 = body.parse()?;
                 if params.users.is_empty() {
                     return Err(InvalidInput("users must contain at least one user".into()).into());
                 }
@@ -367,7 +357,8 @@ impl UserCommand {
             }) => {
                 let anchor = anchor_key.then(|| intent::ApiKeyParamsV2 {
                     api_key_name: format!("{user_name}-anchor"),
-                    public_key: hex::encode(TurnkeyP256ApiKey::generate().compressed_public_key()),
+                    public_key: CompressedPublicKey::of(&TurnkeyP256ApiKey::generate())
+                        .into_string(),
                     curve_type: common::ApiKeyCurve::P256,
                     expiration_seconds: None,
                 });
@@ -413,13 +404,9 @@ impl UserCommand {
                         user_ids: vec![],
                     }))
                 }
-                TagCommand::Create(CreateTagArgs {
-                    input_json,
-                    input_file,
-                    name: None,
-                }) => PreparedResource::Mutation(Mutation::CreateTag(BodyArgs::parse_from(
-                    input_json, input_file,
-                )?)),
+                TagCommand::Create(CreateTagArgs { body, name: None }) => {
+                    PreparedResource::Mutation(Mutation::CreateTag(body.parse()?))
+                }
                 TagCommand::Update(body) => {
                     PreparedResource::Mutation(Mutation::UpdateTag(body.parse()?))
                 }
@@ -470,13 +457,8 @@ impl PolicyCommand {
                 }))
             }
             PolicyCommand::Create(CreatePolicyArgs {
-                input_json,
-                input_file,
-                name: None,
-                ..
-            }) => PreparedResource::Mutation(Mutation::CreatePolicy(BodyArgs::parse_from(
-                input_json, input_file,
-            )?)),
+                body, name: None, ..
+            }) => PreparedResource::Mutation(Mutation::CreatePolicy(body.parse()?)),
             PolicyCommand::CreateBatch(body) => {
                 let params: intent::CreatePoliciesIntent = body.parse()?;
                 if params.policies.is_empty() {
@@ -533,27 +515,23 @@ impl ApiKeyCommand {
 }
 
 /// Expiry in unix milliseconds from a listed key's `createdAt` seconds and `expirationSeconds`; `None` only when `expirationSeconds` is absent because the key never expires.
-pub(crate) fn expires_at(key: &Value) -> Result<Option<u64>> {
+pub(crate) fn expires_at(key: &ApiKey) -> Result<Option<u64>> {
     let malformed = |reason: &str| {
         ActivityError::new(
             ActivityErrorKind::MalformedResponse,
-            format!("get_api_keys returned key {} {reason}", key["apiKeyId"]),
+            format!("get_api_keys returned key {:?} {reason}", key.api_key_id),
         )
     };
-    let lifetime: u64 = match &key["expirationSeconds"] {
-        Value::Null => return Ok(None),
-        Value::String(seconds) => seconds.parse().map_err(|error| {
-            malformed("with a non numeric expirationSeconds").with_source(error)
-        })?,
-        _ => return Err(malformed("with a non string expirationSeconds").into()),
+    let Some(lifetime) = key.expiration_seconds else {
+        return Ok(None);
     };
-    let created: u64 = match &key["createdAt"]["seconds"] {
-        Value::Null => return Err(malformed("without createdAt.seconds").into()),
-        Value::String(seconds) => seconds.parse().map_err(|error| {
-            malformed("with a non numeric createdAt.seconds").with_source(error)
-        })?,
-        _ => return Err(malformed("with a non string createdAt.seconds").into()),
-    };
+    let created: u64 = key
+        .created_at
+        .as_ref()
+        .ok_or_else(|| malformed("without createdAt.seconds"))?
+        .seconds
+        .parse()
+        .map_err(|error| malformed("with a non numeric createdAt.seconds").with_source(error))?;
     created
         .checked_add(lifetime)
         .and_then(|at| at.checked_mul(1000))
@@ -769,22 +747,22 @@ impl Query {
                 )?,
             ),
             Self::ApiKeys(user_id) => {
-                let mut listed = to_value(
-                    client
-                        .get_api_keys(query::GetApiKeysRequest {
-                            organization_id,
-                            user_id: user_id.map(|id| id.to_string()),
-                        })
-                        .await?,
-                )?;
-                if let Some(keys) = listed["apiKeys"].as_array_mut() {
-                    for key in keys {
-                        let expires_at_ms = expires_at(key)?;
-                        key["expiresAt"] =
-                            expires_at_ms.map_or(Value::Null, |ms| Value::String(ms.to_string()));
-                    }
-                }
-                ("api-key.list", listed)
+                let query::GetApiKeysResponse { api_keys } = client
+                    .get_api_keys(query::GetApiKeysRequest {
+                        organization_id,
+                        user_id: user_id.map(|id| id.to_string()),
+                    })
+                    .await?;
+                let keys = api_keys
+                    .iter()
+                    .map(|api_key| {
+                        let mut key = to_value(api_key)?;
+                        key["expiresAt"] = expires_at(api_key)?
+                            .map_or(Value::Null, |ms| Value::String(ms.to_string()));
+                        Ok(key)
+                    })
+                    .collect::<Result<Vec<Value>>>()?;
+                ("api-key.list", json!({ "apiKeys": keys }))
             }
         };
         Ok(OperationOutput::result(command, data))
@@ -801,7 +779,7 @@ mod tests {
     use serde_json::{from_value, json, to_vec};
     use std::iter::once;
     use tempfile::NamedTempFile;
-    use turnkey_client::generated::external::activity::v1 as activity;
+    use turnkey_client::generated::external::{activity::v1 as activity, data::v1::Timestamp};
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
@@ -888,20 +866,26 @@ mod tests {
         }
     }
 
+    fn listed_key(created_at: Option<&str>, expiration_seconds: Option<u64>) -> ApiKey {
+        ApiKey {
+            credential: None,
+            api_key_id: "key-1".into(),
+            api_key_name: "key".into(),
+            created_at: created_at.map(|seconds| Timestamp {
+                seconds: seconds.into(),
+                nanos: "0".into(),
+            }),
+            updated_at: None,
+            expiration_seconds,
+        }
+    }
+
     #[test]
     fn expires_at_returns_millis_and_none_only_for_a_key_that_never_expires() {
-        let key = json!({
-            "apiKeyId": "key-1",
-            "createdAt": {"seconds": "1700000000", "nanos": "0"},
-            "expirationSeconds": "60",
-        });
+        let key = listed_key(Some("1700000000"), Some(60));
         assert_eq!(expires_at(&key).unwrap(), Some(1_700_000_060_000));
 
-        let never = json!({
-            "apiKeyId": "key-1",
-            "createdAt": {"seconds": "1700000000", "nanos": "0"},
-            "expirationSeconds": null,
-        });
+        let never = listed_key(Some("1700000000"), None);
         assert_eq!(expires_at(&never).unwrap(), None);
     }
 
@@ -909,37 +893,11 @@ mod tests {
     fn expires_at_reports_malformed_fields_naming_the_field_and_key() {
         for (key, chain) in [
             (
-                json!({
-                    "apiKeyId": "key-1",
-                    "createdAt": {"seconds": "1700000000", "nanos": "0"},
-                    "expirationSeconds": "later",
-                }),
-                &[
-                    r#"get_api_keys returned key "key-1" with a non numeric expirationSeconds"#,
-                    "invalid digit found in string",
-                ][..],
-            ),
-            (
-                json!({
-                    "apiKeyId": "key-1",
-                    "createdAt": {"seconds": "1700000000", "nanos": "0"},
-                    "expirationSeconds": 60,
-                }),
-                &[r#"get_api_keys returned key "key-1" with a non string expirationSeconds"#][..],
-            ),
-            (
-                json!({
-                    "apiKeyId": "key-1",
-                    "expirationSeconds": "60",
-                }),
+                listed_key(None, Some(60)),
                 &[r#"get_api_keys returned key "key-1" without createdAt.seconds"#][..],
             ),
             (
-                json!({
-                    "apiKeyId": "key-1",
-                    "createdAt": {"seconds": "soon", "nanos": "0"},
-                    "expirationSeconds": "60",
-                }),
+                listed_key(Some("soon"), Some(60)),
                 &[
                     r#"get_api_keys returned key "key-1" with a non numeric createdAt.seconds"#,
                     "invalid digit found in string",

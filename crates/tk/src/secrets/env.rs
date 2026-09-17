@@ -3,6 +3,9 @@
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
+use std::fmt::Write;
+use std::mem;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
@@ -15,21 +18,12 @@ use crate::operations::OperationOutput;
 
 const COMMAND: &str = "secret.env";
 
-/// A secret selected for export, with the variable name taken from its name.
-#[cfg_attr(test, derive(Debug))]
-struct Selected {
-    name: String,
-    secret_id: Uuid,
-    var: String,
-}
-
 fn select(
     secrets: Vec<Secret>,
     properties: &BTreeMap<String, String>,
     name_prefix: Option<&str>,
-) -> Result<Vec<Selected>> {
-    let mut selected: Vec<Selected> = Vec::new();
-    let mut by_var: BTreeMap<String, usize> = BTreeMap::new();
+) -> Result<BTreeMap<String, (String, Uuid)>> {
+    let mut by_var: BTreeMap<String, (String, Uuid)> = BTreeMap::new();
     for secret in secrets {
         let Some(name) = secret.name else { continue };
         if name_prefix.is_some_and(|prefix| !name.starts_with(prefix)) {
@@ -59,25 +53,25 @@ fn select(
             ))
             .into());
         }
-        if let Some(index) = by_var.insert(var.clone(), selected.len()) {
-            let other = &selected[index].name;
-            return Err(InvalidInput(format!(
-                "secrets {other} and {name} both map to variable {var}; narrow the selection"
-            ))
-            .into());
+        match by_var.entry(var) {
+            Entry::Occupied(entry) => {
+                let (other, _) = entry.get();
+                let var = entry.key();
+                return Err(InvalidInput(format!(
+                    "secrets {other} and {name} both map to variable {var}; narrow the selection"
+                ))
+                .into());
+            }
+            Entry::Vacant(entry) => {
+                entry.insert((name, secret.id));
+            }
         }
-        selected.push(Selected {
-            name,
-            secret_id: secret.id,
-            var,
-        });
     }
-    selected.sort_by(|a, b| a.var.cmp(&b.var));
-    Ok(selected)
+    Ok(by_var)
 }
 
-/// Renders one dotenv line, quoting only when the value needs it.
-fn line(var: &str, value: &str) -> Result<String> {
+/// Renders one dotenv line into `out`, quoting only when the value needs it.
+fn line(out: &mut String, var: &str, value: &str) -> Result<()> {
     if value.contains(['\n', '\r', '\0', '\'']) {
         return Err(InvalidInput(format!(
             "value of {var} contains a newline, NUL, or single quote and cannot be written as a dotenv line"
@@ -88,11 +82,12 @@ fn line(var: &str, value: &str) -> Result<String> {
         && value
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || "_./:+=@,-".contains(c));
-    Ok(if bare {
-        format!("{var}={value}")
+    if bare {
+        write!(out, "{var}={value}")?;
     } else {
-        format!("{var}='{value}'")
-    })
+        write!(out, "{var}='{value}'")?;
+    }
+    Ok(())
 }
 
 pub(super) async fn run(
@@ -111,12 +106,7 @@ pub(super) async fn run(
     let mut exported = Vec::new();
     let mut pending = Vec::new();
     let mut env: BTreeMap<String, Zeroizing<String>> = BTreeMap::new();
-    for Selected {
-        name,
-        secret_id,
-        var,
-    } in selected
-    {
+    for (var, (name, secret_id)) in selected {
         let attempt = export_value(
             &state_dir,
             &quorum,
@@ -156,12 +146,12 @@ pub(super) async fn run(
 
     let mut plain = Zeroizing::new(String::new());
     let mut values = serde_json::Map::new();
-    for (var, value) in env {
+    for (var, mut value) in env {
         if !plain.is_empty() {
             plain.push('\n');
         }
-        plain.push_str(&line(&var, &value)?);
-        values.insert(var, Value::String(value.to_string()));
+        line(&mut plain, &var, &value)?;
+        values.insert(var, Value::String(mem::take(&mut *value)));
     }
     Ok(SecretOutput {
         record: OperationOutput::result(
@@ -200,9 +190,9 @@ mod tests {
             secret("other/API_TOKEN", &[("consensus", "unilateral")]),
         ];
         let selected = select(secrets, &unilateral, Some("hermes/")).unwrap();
-        let vars: Vec<&str> = selected.iter().map(|s| s.var.as_str()).collect();
+        let vars: Vec<&str> = selected.keys().map(String::as_str).collect();
         assert_eq!(vars, ["API_TOKEN"]);
-        assert_eq!(selected[0].name, "hermes/API_TOKEN");
+        assert_eq!(selected["API_TOKEN"].0, "hermes/API_TOKEN");
     }
 
     #[test]
@@ -229,15 +219,19 @@ mod tests {
 
     #[test]
     fn quotes_only_when_needed_and_rejects_unwritable_values() {
-        assert_eq!(line("A", "tok-1.x/y:z+=@,").unwrap(), "A=tok-1.x/y:z+=@,");
-        assert_eq!(line("A", "has space").unwrap(), "A='has space'");
-        assert_eq!(line("A", "").unwrap(), "A=''");
+        let render = |var, value| {
+            let mut out = String::new();
+            line(&mut out, var, value).map(|()| out)
+        };
+        assert_eq!(render("A", "tok-1.x/y:z+=@,").unwrap(), "A=tok-1.x/y:z+=@,");
+        assert_eq!(render("A", "has space").unwrap(), "A='has space'");
+        assert_eq!(render("A", "").unwrap(), "A=''");
         assert_eq!(
-            line("A", "postgres://u:p@h/db?x=1").unwrap(),
+            render("A", "postgres://u:p@h/db?x=1").unwrap(),
             "A='postgres://u:p@h/db?x=1'"
         );
         for bad in ["a\nb", "a'b", "a\0b"] {
-            assert!(line("A", bad).is_err(), "{bad:?} accepted");
+            assert!(render("A", bad).is_err(), "{bad:?} accepted");
         }
     }
 }

@@ -26,6 +26,7 @@ use crate::{
     gpg::registry::{GpgKeyEntry, GpgKeyTable, KeyName, SelectError, SigningKeyName, StoredGpgKey},
     keygen::{GeneratedApiKey, generate},
     operations::OperationOutput,
+    sessions::CompressedPublicKey,
     ssh::registry::{
         SelectError as SshSelectError, SshKeyEntry, SshKeyName, SshKeyTable, StoredSshKey,
     },
@@ -181,10 +182,10 @@ impl Default for Registry {
 
 #[derive(Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct Profile {
-    organization_id: Uuid,
-    api_base_url: ApiBaseUrl,
-    api_key_file: PathBuf,
+pub(crate) struct Profile {
+    pub(crate) organization_id: Uuid,
+    pub(crate) api_base_url: ApiBaseUrl,
+    pub(crate) api_key_file: PathBuf,
 }
 
 #[derive(Debug)]
@@ -725,29 +726,13 @@ async fn resolve_profile(
     })
 }
 
-/// A saved profile's identity, without its credential loaded.
-pub(crate) struct SavedProfile {
-    pub(crate) organization_id: Uuid,
-    pub(crate) api_base_url: ApiBaseUrl,
-    pub(crate) api_key_file: PathBuf,
-}
-
-pub(crate) async fn saved_profile(name: &str) -> Result<SavedProfile> {
+pub(crate) async fn saved_profile(name: &str) -> Result<Profile> {
     let path = registry_path()?;
-    let Profile {
-        organization_id,
-        api_base_url,
-        api_key_file,
-    } = load(&path)
+    Ok(load(&path)
         .await?
         .profiles
         .remove(name)
-        .ok_or_else(|| profile_missing(name))?;
-    Ok(SavedProfile {
-        organization_id,
-        api_base_url,
-        api_key_file,
-    })
+        .ok_or_else(|| profile_missing(name))?)
 }
 
 pub(crate) fn api_keys_dir() -> Result<PathBuf> {
@@ -995,7 +980,7 @@ pub async fn create_profile(
                 .await
                 .context("resolve credential path")
             {
-                Ok(resolved) => (resolved, public_key, Some(path)),
+                Ok(resolved) => (resolved, public_key.into_string(), Some(path)),
                 Err(error) => {
                     let _ = fs::remove_file(&path).await;
                     return Err(error);
@@ -1025,13 +1010,9 @@ pub async fn create_profile(
     Ok(OperationOutput::result("profile.create", record))
 }
 
-pub(crate) struct SwitchedKey {
-    pub(crate) previous: PathBuf,
-    pub(crate) public_key: String,
-}
-
-/// Points a saved profile at another credential file.
-pub(crate) async fn set_profile_key(name: &str, api_key_file: &Path) -> Result<SwitchedKey> {
+/// Points a saved profile at another credential file and returns the previous
+/// one. The caller has already read and validated the credential.
+pub(crate) async fn set_profile_key(name: &str, api_key_file: &Path) -> Result<PathBuf> {
     let path = registry_path()?;
     let _lock = registry_lock(&path).await?;
     let mut registry = load(&path).await?;
@@ -1039,13 +1020,13 @@ pub(crate) async fn set_profile_key(name: &str, api_key_file: &Path) -> Result<S
         .profiles
         .get_mut(name)
         .ok_or_else(|| profile_missing(name))?;
-    let switched = switch_key(profile, api_key_file).await?;
+    let previous = switch_key(profile, api_key_file).await?;
     save(&path, &registry).await?;
-    Ok(switched)
+    Ok(previous)
 }
 
-/// Reads a credential file and makes it the profile's credential.
-async fn switch_key(profile: &mut Profile, api_key_file: &Path) -> Result<SwitchedKey> {
+/// Makes a credential file the profile's credential; returns the previous one.
+async fn switch_key(profile: &mut Profile, api_key_file: &Path) -> Result<PathBuf> {
     let current = match fs::canonicalize(api_key_file).await {
         Ok(current) => current,
         Err(error) if error.kind() == ErrorKind::NotFound => {
@@ -1057,12 +1038,7 @@ async fn switch_key(profile: &mut Profile, api_key_file: &Path) -> Result<Switch
         }
         Err(error) => return Err(error).context("resolve credential path"),
     };
-    let key = read_key(&current).await?;
-    let previous = mem::replace(&mut profile.api_key_file, current);
-    Ok(SwitchedKey {
-        previous,
-        public_key: hex::encode(key.compressed_public_key()),
-    })
+    Ok(mem::replace(&mut profile.api_key_file, current))
 }
 
 pub async fn run_profile(
@@ -1134,9 +1110,10 @@ pub async fn run_profile(
             }
             let mut record = json!({"name": name});
             if let Some(api_key_file) = api_key_file {
-                let switched = switch_key(profile, &api_key_file).await?;
-                record["publicKey"] = switched.public_key.into();
-                record["previousApiKeyFile"] = switched.previous.to_string_lossy().into();
+                let previous = switch_key(profile, &api_key_file).await?;
+                let key = read_key(&profile.api_key_file).await?;
+                record["publicKey"] = CompressedPublicKey::of(&key).into_string().into();
+                record["previousApiKeyFile"] = previous.to_string_lossy().into();
             }
             record["profile"] = serde_json::to_value(&*profile)?;
             save(&path, &registry).await?;

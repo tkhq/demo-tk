@@ -25,10 +25,12 @@ pub(crate) struct PendingSession {
 }
 
 impl PendingSession {
+    fn dir(state: &Path) -> PathBuf {
+        state.join("sessions/pending")
+    }
+
     pub(crate) fn path(state: &Path, profile: &str) -> PathBuf {
-        state
-            .join("sessions/pending")
-            .join(format!("{profile}.json"))
+        Self::dir(state).join(format!("{profile}.json"))
     }
 
     pub(crate) async fn load(state: &Path, profile: &str) -> Result<Option<Self>> {
@@ -59,13 +61,11 @@ impl PendingSession {
     }
 
     pub(crate) async fn create(&self, state: &Path) -> Result<()> {
-        let path = Self::path(state, &self.profile);
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .await
-                .with_context(|| format!("create {}", parent.display()))?;
-        }
-        secure_create(&path, &to_vec(self)?)
+        let dir = Self::dir(state);
+        fs::create_dir_all(&dir)
+            .await
+            .with_context(|| format!("create {}", dir.display()))?;
+        secure_create(&Self::path(state, &self.profile), &to_vec(self)?)
             .await
             .map_err(|error| match error {
                 SecureCreateError::Exists => Error::new(error),
@@ -136,7 +136,7 @@ mod tests {
     async fn malformed_state_is_reported_as_malformed() {
         let dir = tempfile::tempdir().unwrap();
         let path = PendingSession::path(dir.path(), "agent");
-        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::create_dir_all(PendingSession::dir(dir.path())).unwrap();
         fs::write(&path, b"{").unwrap();
         let error = PendingSession::load(dir.path(), "agent").await.unwrap_err();
         assert!(error.downcast_ref::<Malformed>().is_some(), "{error}");

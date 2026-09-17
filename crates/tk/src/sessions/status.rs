@@ -2,15 +2,15 @@
 
 use anyhow::Result;
 use clap::Args;
-use serde_json::{json, to_value};
+use serde_json::json;
 use turnkey_client::generated::{
     GetWhoamiRequest,
     services::coordinator::public::v1::{GetApiKeysRequest, GetApiKeysResponse},
 };
 
 use super::CompressedPublicKey;
-use super::duration::ExpiresIn;
-use crate::auth::{SavedProfile, build_turnkey_client, read_key, saved_profile};
+use super::duration::{ExpiresIn, format_duration};
+use crate::auth::{Profile, build_turnkey_client, read_key, saved_profile};
 use crate::errors::{MissingResource, SessionExpiring};
 use crate::operations::{OperationOutput, now_unix_ms, query_decoded};
 use crate::resources::expires_at;
@@ -29,7 +29,7 @@ pub struct StatusArgs {
 
 pub(super) async fn run(args: StatusArgs) -> Result<OperationOutput> {
     let StatusArgs { name, warn_before } = args;
-    let SavedProfile {
+    let Profile {
         organization_id,
         api_base_url,
         api_key_file,
@@ -60,33 +60,30 @@ pub(super) async fn run(args: StatusArgs) -> Result<OperationOutput> {
                 .is_some_and(|credential| public_key.matches(&credential.public_key))
         })
         .ok_or_else(|| MissingResource::new("api key", public_key.to_string()))?;
-    let key = to_value(key)?;
-    let expires_at_ms = expires_at(&key)?;
     let now_ms = now_unix_ms()?;
-    let seconds_left =
-        expires_at_ms.map(|expires_at_ms| expires_at_ms.saturating_sub(now_ms) / 1000);
+    let expiry = expires_at(&key)?.map(|at| (at, at.saturating_sub(now_ms) / 1000));
 
     let data = json!({
         "profile": name,
         "userId": identity.user_id,
         "publicKey": public_key,
-        "apiKeyId": key["apiKeyId"],
-        "apiKeyName": key["apiKeyName"],
-        "createdAt": key["createdAt"]["seconds"],
-        "expirationSeconds": key["expirationSeconds"],
-        "expiresAt": expires_at_ms.map(|ms| ms.to_string()),
-        "secondsLeft": seconds_left,
-        "expiresIn": seconds_left.map(|left| ExpiresIn::from_seconds(left).to_string()),
+        "apiKeyId": key.api_key_id,
+        "apiKeyName": key.api_key_name,
+        "createdAt": key.created_at.map(|created| created.seconds),
+        "expirationSeconds": key.expiration_seconds.map(|seconds| seconds.to_string()),
+        "expiresAt": expiry.map(|(at, _)| at.to_string()),
+        "secondsLeft": expiry.map(|(_, left)| left),
+        "expiresIn": expiry.map(|(_, left)| format_duration(left)),
         "warnBefore": warn_before.to_string(),
     });
-    if let Some((expires_at_ms, seconds_left)) = expires_at_ms.zip(seconds_left)
-        && seconds_left < warn_before.seconds()
+    if let Some((at, left)) = expiry
+        && left < warn_before.seconds()
     {
         return Err(SessionExpiring {
             profile: name,
-            public_key: public_key.into_string(),
-            expires_at_unix_ms: expires_at_ms,
-            seconds_left,
+            public_key,
+            expires_at_unix_ms: at,
+            seconds_left: left,
             warn_before_seconds: warn_before.seconds(),
         }
         .into());

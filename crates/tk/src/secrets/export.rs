@@ -210,6 +210,7 @@ pub(super) struct Secret {
 
 /// Every secret's metadata in the organization, across pages.
 pub(super) async fn list_all(auth: &ResolvedAuth) -> Result<Vec<Secret>> {
+    const PAGE: usize = 100;
     let mut secrets = Vec::new();
     let mut after = String::new();
     loop {
@@ -218,7 +219,7 @@ pub(super) async fn list_all(auth: &ResolvedAuth) -> Result<Vec<Secret>> {
             &ListSecretsRequest {
                 organization_id: auth.org_id.to_string(),
                 pagination_options: Some(Pagination {
-                    limit: "100".into(),
+                    limit: PAGE.to_string(),
                     before: String::new(),
                     after: take(&mut after),
                 }),
@@ -227,7 +228,7 @@ pub(super) async fn list_all(auth: &ResolvedAuth) -> Result<Vec<Secret>> {
             &auth.stamper,
         )
         .await?;
-        let full = page.len() == 100;
+        let full = page.len() == PAGE;
         after = page
             .last()
             .map(|secret| secret.secret_id.clone())

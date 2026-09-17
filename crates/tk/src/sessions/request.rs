@@ -1,14 +1,14 @@
 //! Generates a credential for a saved profile and records it as pending.
 
-use anyhow::{Context, Error, Result};
+use anyhow::{Context, Result};
 use serde_json::json;
 use tokio::fs;
 use tracing::debug;
 use turnkey_client::generated::GetWhoamiRequest;
 
-use super::{parse_public_key, pending::PendingSession};
+use super::pending::PendingSession;
 use crate::auth::{
-    SavedProfile, SecureCreateError, api_keys_dir, build_turnkey_client, read_key, saved_profile,
+    Profile, SecureCreateError, api_keys_dir, build_turnkey_client, read_key, saved_profile,
     state_dir,
 };
 use crate::errors::InvalidInput;
@@ -20,8 +20,6 @@ const COMMAND: &str = "session.request";
 pub(super) async fn run(name: String, replace: bool) -> Result<OperationOutput> {
     let profile = saved_profile(&name).await?;
     let state = state_dir()?;
-    let api_keys = api_keys_dir()?;
-    let api_keys = fs::canonicalize(&api_keys).await.unwrap_or(api_keys);
 
     if let Some(pending) = PendingSession::load(&state, &name).await? {
         if !replace {
@@ -31,6 +29,8 @@ pub(super) async fn run(name: String, replace: bool) -> Result<OperationOutput> 
             ))
             .into());
         }
+        let api_keys = api_keys_dir()?;
+        let api_keys = fs::canonicalize(&api_keys).await.unwrap_or(api_keys);
         let disposable =
             pending.key_file.starts_with(&api_keys) && pending.key_file != profile.api_key_file;
         if disposable && let Err(error) = fs::remove_file(&pending.key_file).await {
@@ -41,9 +41,6 @@ pub(super) async fn run(name: String, replace: bool) -> Result<OperationOutput> 
 
     let GeneratedApiKey { public_key, path } = generate(None).await?;
     let pending = async {
-        let public_key = parse_public_key(&public_key)
-            .map_err(Error::msg)
-            .map_err(|error| error.context("generated credential public key"))?;
         let key_file = fs::canonicalize(&path)
             .await
             .context("resolve credential path")?;
@@ -105,8 +102,8 @@ pub(super) async fn run(name: String, replace: bool) -> Result<OperationOutput> 
 }
 
 /// The profile's user id when its current credential still works, else `None`.
-async fn current_user_id(profile: &SavedProfile) -> Option<String> {
-    let SavedProfile {
+async fn current_user_id(profile: &Profile) -> Option<String> {
+    let Profile {
         organization_id,
         api_base_url,
         api_key_file,

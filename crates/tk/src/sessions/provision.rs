@@ -18,7 +18,7 @@ use turnkey_client::generated::{
 };
 use uuid::Uuid;
 
-use super::duration::ExpiresIn;
+use super::duration::{ExpiresIn, format_duration};
 use crate::auth::ResolvedAuth;
 use crate::errors::{ActivityError, ActivityErrorKind};
 use crate::operations::{OperationOutput, now_unix_ms, query_decoded, submit_activity};
@@ -110,12 +110,11 @@ pub(super) async fn run(auth: ResolvedAuth, args: ProvisionArgs) -> Result<Opera
             .as_ref()
             .is_some_and(|credential| public_key.matches(&credential.public_key))
     }) {
-        let lifetime = key.expiration_seconds.map(ExpiresIn::from_seconds);
         return Ok(OperationOutput::result(
             COMMAND,
             json!({
                 "userId": user_id,
-                "expiresIn": lifetime.map(|lifetime| lifetime.to_string()),
+                "expiresIn": key.expiration_seconds.map(format_duration),
                 "expirationSeconds": key.expiration_seconds.map(|seconds| seconds.to_string()),
                 "publicKey": public_key,
                 "apiKeyId": key.api_key_id,
@@ -146,10 +145,22 @@ pub(super) async fn run(auth: ResolvedAuth, args: ProvisionArgs) -> Result<Opera
         },
     )
     .await?;
-    let response = submitted.into_data();
-    let activity = &response["activity"];
-    let api_key_id = activity["result"]["createApiKeysResult"]["apiKeyIds"][0].clone();
-    let data = json!({
+    let pending = submitted.is_pending();
+    let mut response = submitted.into_data();
+    let activity = &mut response["activity"];
+    let api_key_id = activity
+        .pointer_mut("/result/createApiKeysResult/apiKeyIds")
+        .and_then(|ids| ids.get_mut(0))
+        .map(Value::take)
+        .unwrap_or(Value::Null);
+    if !pending && api_key_id.as_str().is_none() {
+        return Err(ActivityError::new(
+            ActivityErrorKind::MalformedResponse,
+            "create_api_keys completed without result.createApiKeysResult.apiKeyIds[0]",
+        )
+        .into());
+    }
+    let mut data = json!({
         "userId": user_id,
         "expiresIn": expires_in.to_string(),
         "expirationSeconds": expires_in.seconds().to_string(),
@@ -157,26 +168,16 @@ pub(super) async fn run(auth: ResolvedAuth, args: ProvisionArgs) -> Result<Opera
         "apiKeyName": api_key_name,
         "apiKeyId": api_key_id,
         "activity": {
-            "id": activity["id"],
-            "status": activity["status"],
-            "type": activity["type"],
+            "id": activity["id"].take(),
+            "status": activity["status"].take(),
+            "type": activity["type"].take(),
         },
     });
-    let record = OperationOutput::result(COMMAND, data);
-    if record.is_pending() {
-        let mut data = record.into_data();
+    if pending {
         data["nextStep"] = Value::from(format!(
             "approve activity {} (expiring key for user {user_id}, lifetime {expires_in}), then re-run this command or tk activity wait {0}",
-            activity["id"].as_str().unwrap_or("<ACTIVITY_ID>")
+            data["activity"]["id"].as_str().unwrap_or("<ACTIVITY_ID>")
         ));
-        return Ok(OperationOutput::result(COMMAND, data));
     }
-    if api_key_id.as_str().is_none() {
-        return Err(ActivityError::new(
-            ActivityErrorKind::MalformedResponse,
-            "create_api_keys completed without result.createApiKeysResult.apiKeyIds[0]",
-        )
-        .into());
-    }
-    Ok(record)
+    Ok(OperationOutput::result(COMMAND, data))
 }

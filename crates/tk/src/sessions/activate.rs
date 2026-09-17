@@ -6,9 +6,10 @@ use tokio::fs;
 use tracing::debug;
 use turnkey_client::generated::GetWhoamiRequest;
 
+use super::CompressedPublicKey;
 use super::pending::PendingSession;
 use crate::auth::{
-    SavedProfile, api_keys_dir, build_turnkey_client, read_key, saved_profile, set_profile_key,
+    Profile, api_keys_dir, build_turnkey_client, read_key, saved_profile, set_profile_key,
     state_dir,
 };
 use crate::errors::InvalidInput;
@@ -17,7 +18,7 @@ use crate::operations::OperationOutput;
 const COMMAND: &str = "session.activate";
 
 pub(super) async fn run(name: String) -> Result<OperationOutput> {
-    let SavedProfile {
+    let Profile {
         organization_id,
         api_base_url,
         api_key_file: _,
@@ -30,12 +31,14 @@ pub(super) async fn run(name: String) -> Result<OperationOutput> {
         .into());
     };
     let PendingSession {
-        public_key,
+        public_key: _,
         key_file,
         ..
     } = pending;
 
-    let identity = build_turnkey_client(read_key(&key_file).await?, &api_base_url)?
+    let key = read_key(&key_file).await?;
+    let public_key = CompressedPublicKey::of(&key);
+    let identity = build_turnkey_client(key, &api_base_url)?
         .get_whoami(GetWhoamiRequest {
             organization_id: organization_id.to_string(),
         })
@@ -47,16 +50,16 @@ pub(super) async fn run(name: String) -> Result<OperationOutput> {
             )
         })?;
 
-    let switched = set_profile_key(&name, &key_file).await?;
-    let previous_public_key = match read_key(&switched.previous).await {
-        Ok(key) => Some(hex::encode(key.compressed_public_key())),
+    let previous = set_profile_key(&name, &key_file).await?;
+    let previous_public_key = match read_key(&previous).await {
+        Ok(key) => Some(CompressedPublicKey::of(&key)),
         Err(_) => None,
     };
     let api_keys = api_keys_dir()?;
     let api_keys = fs::canonicalize(&api_keys).await.unwrap_or(api_keys);
-    let disposable = switched.previous.starts_with(&api_keys) && switched.previous != key_file;
+    let disposable = previous.starts_with(&api_keys) && previous != key_file;
     let previous_removed = if disposable {
-        match fs::remove_file(&switched.previous).await {
+        match fs::remove_file(&previous).await {
             Ok(()) => true,
             Err(error) => {
                 debug!(%error, "previous key file was not removed");
@@ -72,10 +75,10 @@ pub(super) async fn run(name: String) -> Result<OperationOutput> {
         COMMAND,
         json!({
             "profile": name,
-            "publicKey": switched.public_key,
+            "publicKey": public_key,
             "keyFile": key_file,
             "previousPublicKey": previous_public_key,
-            "previousKeyFile": switched.previous,
+            "previousKeyFile": previous,
             "previousKeyFileRemoved": previous_removed,
             "identity": to_value(identity)?,
         }),

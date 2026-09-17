@@ -1,6 +1,7 @@
 // This module defines ErrorCode and owns its classification.
 #![allow(clippy::disallowed_types)]
 use crate::auth::SelectedIdentity;
+use crate::sessions::CompressedPublicKey;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::error::Error;
@@ -62,7 +63,7 @@ pub struct PendingApprovals {
 )]
 pub struct SessionExpiring {
     pub profile: String,
-    pub public_key: String,
+    pub public_key: CompressedPublicKey,
     pub expires_at_unix_ms: u64,
     pub seconds_left: u64,
     pub warn_before_seconds: u64,
@@ -133,13 +134,20 @@ pub fn error_details(error: &anyhow::Error) -> Option<Value> {
     if let Some(pending) = error.downcast_ref::<PendingApprovals>() {
         return Some(json!({"pending": pending.pending}));
     }
-    if let Some(expiring) = error.downcast_ref::<SessionExpiring>() {
+    if let Some(SessionExpiring {
+        profile,
+        public_key,
+        expires_at_unix_ms,
+        seconds_left,
+        warn_before_seconds,
+    }) = error.downcast_ref::<SessionExpiring>()
+    {
         return Some(json!({
-            "profile": expiring.profile,
-            "publicKey": expiring.public_key,
-            "expiresAt": expiring.expires_at_unix_ms.to_string(),
-            "secondsLeft": expiring.seconds_left,
-            "warnBeforeSeconds": expiring.warn_before_seconds,
+            "profile": profile,
+            "publicKey": public_key,
+            "expiresAt": expires_at_unix_ms.to_string(),
+            "secondsLeft": seconds_left,
+            "warnBeforeSeconds": warn_before_seconds,
         }));
     }
     error
