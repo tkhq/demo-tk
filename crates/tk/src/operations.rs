@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Error, Result};
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, builder::NonEmptyStringValueParser};
 use reqwest::{Client, Url};
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
@@ -57,25 +57,25 @@ pub enum ActivityCommand {
     /// Fetch one activity by ID.
     Get {
         /// Activity to fetch.
-        #[arg(long)]
+        #[arg(long, value_parser = NonEmptyStringValueParser::new())]
         id: String,
     },
     /// Approve a pending activity by ID.
     Approve {
         /// Activity to approve.
-        #[arg(long)]
+        #[arg(long, value_parser = NonEmptyStringValueParser::new())]
         id: String,
     },
     /// Reject a pending activity by ID.
     Reject {
         /// Activity to reject.
-        #[arg(long)]
+        #[arg(long, value_parser = NonEmptyStringValueParser::new())]
         id: String,
     },
     /// Poll one activity until it reaches a terminal status.
     Wait {
         /// Activity to wait for.
-        #[arg(long)]
+        #[arg(long, value_parser = NonEmptyStringValueParser::new())]
         id: String,
         #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
         timeout: u64,

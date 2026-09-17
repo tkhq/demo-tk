@@ -341,7 +341,6 @@ impl Run {
         record
     }
 
-    /// Approves an activity as the given user.
     pub(crate) fn approve(&self, approver: &TurnkeyP256ApiKey, id: &str) -> Value {
         self.ok(self
             .as_user(approver)
