@@ -303,6 +303,12 @@ impl Run {
         self.record(cmd, 1)
     }
 
+    /// Runs a command whose flags violate the clap contract and returns the
+    /// usage-error record (exit code 2).
+    pub(crate) fn usage_err(&self, cmd: &mut Command) -> Value {
+        self.record(cmd, 2)
+    }
+
     fn human_attempt(&self, cmd: &mut Command) -> (Option<i32>, String, String) {
         for attempt in 1..ATTEMPTS {
             let (code, stdout, stderr) = self.output(cmd);

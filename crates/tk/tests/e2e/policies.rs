@@ -238,7 +238,7 @@ fn policy_create_from_flags_round_trips_expressions_and_requires_an_effect() {
     );
     assert_eq!(got["data"]["policy"]["notes"], "tk e2e flags");
 
-    let no_effect = run.err(run.admin().args([
+    let no_effect = run.usage_err(run.admin().args([
         "policy",
         "create",
         "--name",
@@ -246,5 +246,5 @@ fn policy_create_from_flags_round_trips_expressions_and_requires_an_effect() {
         "--condition",
         "true",
     ]));
-    assert_eq!(no_effect["code"], "invalid_input", "{no_effect}");
+    assert_eq!(no_effect["code"], "usage_error", "{no_effect}");
 }

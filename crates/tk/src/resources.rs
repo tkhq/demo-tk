@@ -166,11 +166,12 @@ enum EffectArg {
 /// Policy fields as flags, or a full parameters object.
 #[derive(Debug, Args)]
 #[command(group(ArgGroup::new("policy_source").required(true).args(["input_json", "input_file", "name"])))]
+#[command(group(ArgGroup::new("policy_rule").multiple(true).args(["condition", "consensus"])))]
 pub struct CreatePolicyArgs {
     #[command(flatten)]
     body: Body,
     /// Name of the policy.
-    #[arg(long)]
+    #[arg(long, requires_all = ["effect", "policy_rule"])]
     name: Option<String>,
     /// Whether matching activities are allowed or denied.
     #[arg(long, value_enum, requires = "name")]
@@ -431,16 +432,8 @@ impl PolicyCommand {
                 ..
             }) => {
                 let Some(effect) = effect else {
-                    return Err(
-                        InvalidInput("--effect allow|deny is required with --name".into()).into(),
-                    );
+                    unreachable!("clap requires --effect with --name");
                 };
-                if condition.is_none() && consensus.is_none() {
-                    return Err(InvalidInput(
-                        "at least one of --condition or --consensus is required with --name".into(),
-                    )
-                    .into());
-                }
                 PreparedResource::Mutation(Mutation::CreatePolicy(intent::CreatePolicyIntentV3 {
                     policy_name,
                     effect: match effect {
@@ -841,6 +834,8 @@ mod tests {
                 "-",
             ],
             vec!["policy", "create"],
+            vec!["policy", "create", "--name", "agent", "--condition", "true"],
+            vec!["policy", "create", "--name", "agent", "--effect", "allow"],
             vec!["user", "create", "--input-json", r#"{"users":[]}"#],
             vec![
                 "api-key",
