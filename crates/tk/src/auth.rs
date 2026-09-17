@@ -36,7 +36,7 @@ const DEFAULT_URL: &str = "https://api.turnkey.com";
 const DEFAULT_PROFILE_NAME: &str = "default";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-#[derive(Debug, Args)]
+#[derive(Clone, Debug, Args)]
 pub struct AuthOptions {
     /// Named profile to use from the identity registry. An explicit profile
     /// always wins over ambient TURNKEY_* environment credentials.

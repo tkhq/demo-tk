@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
+use std::collections::btree_map::Entry;
 use std::env;
 use std::ffi::OsString;
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::{self, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,12 +15,14 @@ use tokio::fs;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
+use tokio::sync::RwLock;
 use tokio::time::{sleep, timeout};
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 use turnkey_auth::ssh::Ed25519PublicKey;
 use turnkey_auth::ssh::agent::{self, AgentIdentity, Keyring, SignError, SignFuture};
 use turnkey_auth::ssh::protocol;
-use turnkey_client::TurnkeyClient;
+use turnkey_client::{TurnkeyClient, TurnkeyClientError};
+use uuid::Uuid;
 
 use super::lock::{AgentLock, is_lock_held_by_other, resolve_lock_file};
 use super::{
@@ -37,17 +41,43 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 
 type OrganizationClient = Arc<TurnkeyClient<TurnkeyP256ApiKey>>;
+type ClientFuture = Pin<Box<dyn Future<Output = Result<OrganizationClient>> + Send>>;
+/// Builds a fresh client for an organization from the current registry, so a
+/// credential rotated while the agent runs is picked up without a restart.
+type ClientRefresh = Arc<dyn Fn(Uuid) -> ClientFuture + Send + Sync>;
 
 struct RegistryKeyring {
-    entries: BTreeMap<Ed25519PublicKey, (SshKeyEntry, OrganizationClient)>,
+    entries: BTreeMap<Ed25519PublicKey, SshKeyEntry>,
+    clients: RwLock<BTreeMap<Uuid, OrganizationClient>>,
+    refresh: ClientRefresh,
     backoff: Duration,
+}
+
+impl RegistryKeyring {
+    async fn client_for(&self, organization_id: Uuid) -> Result<OrganizationClient> {
+        if let Some(client) = self.clients.read().await.get(&organization_id) {
+            return Ok(Arc::clone(client));
+        }
+        self.refresh_client(organization_id).await
+    }
+
+    async fn refresh_client(&self, organization_id: Uuid) -> Result<OrganizationClient> {
+        let client = (self.refresh)(organization_id).await.with_context(|| {
+            format!("select a credential for SSH organization {organization_id}")
+        })?;
+        self.clients
+            .write()
+            .await
+            .insert(organization_id, Arc::clone(&client));
+        Ok(client)
+    }
 }
 
 impl Keyring for RegistryKeyring {
     fn identities(&self) -> Vec<AgentIdentity> {
         self.entries
             .values()
-            .map(|(entry, _)| AgentIdentity {
+            .map(|entry| AgentIdentity {
                 public_key: entry.public_key,
                 comment: format!("turnkey:{}", entry.private_key_id),
             })
@@ -56,10 +86,34 @@ impl Keyring for RegistryKeyring {
 
     fn sign<'a>(&'a self, public_key: &'a Ed25519PublicKey, data: &'a [u8]) -> SignFuture<'a> {
         Box::pin(async move {
-            let (entry, client) = self.entries.get(public_key).ok_or(SignError::UnknownKey)?;
+            let entry = self.entries.get(public_key).ok_or(SignError::UnknownKey)?;
+            let organization_id = entry.organization_id;
+            let client = self
+                .client_for(organization_id)
+                .await
+                .map_err(SignError::Signer)?;
+            let signed = TurnkeySigner::new(
+                &client,
+                organization_id,
+                &entry.private_key_id,
+                self.backoff,
+            )
+            .sign_raw_payload(data)
+            .await;
+            let error = match signed {
+                Ok(signature) => return Ok(signature),
+                Err(error) if credential_rejected(&error) => error,
+                Err(error) => return Err(SignError::Signer(error)),
+            };
+            // The credential was rejected, most likely an expired session key that
+            // has since been rotated in the registry. Re-resolve it and retry once.
+            let client = self
+                .refresh_client(organization_id)
+                .await
+                .map_err(|refresh_error| SignError::Signer(refresh_error.context(error)))?;
             TurnkeySigner::new(
-                client,
-                entry.organization_id,
+                &client,
+                organization_id,
                 &entry.private_key_id,
                 self.backoff,
             )
@@ -215,30 +269,27 @@ pub async fn status(args: AgentPathArgs) -> Result<Outcome> {
 pub async fn internal_run(args: InternalRunArgs, options: &AuthOptions) -> Result<Outcome> {
     let mut registry = auth::LoadedRegistry::load().await?;
     let selected = select_keys(options, args.key, &mut registry)?;
-    let mut clients: BTreeMap<_, OrganizationClient> = BTreeMap::new();
+    let refresh = registry_refresh(options.clone());
+    let mut clients: BTreeMap<Uuid, OrganizationClient> = BTreeMap::new();
     let mut keys = Vec::with_capacity(selected.len());
     let mut entries = BTreeMap::new();
     for entry in selected {
         let organization_id = entry.organization_id;
-        let client = match clients.get(&organization_id) {
-            Some(client) => Arc::clone(client),
-            None => {
-                let auth = registry
-                    .resolve_for_organization(options, organization_id)
-                    .await
-                    .with_context(|| {
-                        format!("select a credential for SSH organization {organization_id}")
-                    })?;
-                let client = Arc::new(build_turnkey_client(auth.stamper, &auth.api_base_url)?);
-                clients.insert(organization_id, Arc::clone(&client));
-                client
-            }
-        };
+        // Resolve every credential up front so a missing one fails the start
+        // instead of the first signature.
+        if let Entry::Vacant(slot) = clients.entry(organization_id) {
+            let client = refresh(organization_id).await.with_context(|| {
+                format!("select a credential for SSH organization {organization_id}")
+            })?;
+            slot.insert(client);
+        }
         keys.push(entry.fingerprint().to_string());
-        entries.insert(entry.public_key, (entry, client));
+        entries.insert(entry.public_key, entry);
     }
     let keyring = Arc::new(RegistryKeyring {
         entries,
+        clients: RwLock::new(clients),
+        refresh,
         backoff: BACKOFF,
     });
 
@@ -255,6 +306,35 @@ pub async fn internal_run(args: InternalRunArgs, options: &AuthOptions) -> Resul
     let result = agent::run(args.socket, keyring).await;
     let _ = fs::remove_file(&args.pid_file).await;
     result.map(|()| Outcome::AgentDaemonExited(MachineOnly {}))
+}
+
+/// True when Turnkey refused the request's credential (HTTP 401 or 403), the
+/// signature of an expired or revoked session key.
+fn credential_rejected(error: &Error) -> bool {
+    error.chain().any(|cause| {
+        matches!(
+            cause.downcast_ref::<TurnkeyClientError>(),
+            Some(TurnkeyClientError::UnexpectedHttpStatus(401 | 403, _))
+        )
+    })
+}
+
+/// Re-reads the registry and builds a client for an organization with the
+/// credential it currently holds.
+fn registry_refresh(options: AuthOptions) -> ClientRefresh {
+    Arc::new(move |organization_id: Uuid| {
+        let options = options.clone();
+        Box::pin(async move {
+            let registry = auth::LoadedRegistry::load().await?;
+            let auth = registry
+                .resolve_for_organization(&options, organization_id)
+                .await?;
+            Ok(Arc::new(build_turnkey_client(
+                auth.stamper,
+                &auth.api_base_url,
+            )?))
+        }) as ClientFuture
+    })
 }
 
 fn select_keys(
@@ -559,7 +639,14 @@ mod tests {
                 mock.mount(&server).await;
             }
         }
-        let auth = ResolvedAuth::for_tests(ORG, &server.uri(), TurnkeyP256ApiKey::generate());
+        let (keyring, public_key) = keyring_for(&server.uri(), None);
+        (server, keyring, public_key)
+    }
+
+    /// A keyring whose initial client talks to `initial` and whose refresh
+    /// closure hands out a client for `refreshed` (or `initial` again).
+    fn keyring_for(initial: &str, refreshed: Option<&str>) -> (RegistryKeyring, Ed25519PublicKey) {
+        let auth = ResolvedAuth::for_tests(ORG, initial, TurnkeyP256ApiKey::generate());
         let client = build_turnkey_client(auth.stamper, &auth.api_base_url).unwrap();
         let public_key = Ed25519PublicKey::from_bytes([1; 32]);
         let entry = SshKeyEntry {
@@ -567,11 +654,66 @@ mod tests {
             private_key_id: PrivateKeyId::from("private-key-id".to_string()),
             public_key,
         };
+        let refreshed = refreshed.unwrap_or(initial).to_owned();
+        let refresh: ClientRefresh = Arc::new(move |_organization_id: Uuid| {
+            let refreshed = refreshed.clone();
+            Box::pin(async move {
+                let auth = ResolvedAuth::for_tests(ORG, &refreshed, TurnkeyP256ApiKey::generate());
+                Ok(Arc::new(build_turnkey_client(
+                    auth.stamper,
+                    &auth.api_base_url,
+                )?))
+            }) as ClientFuture
+        });
         let keyring = RegistryKeyring {
-            entries: [(public_key, (entry, Arc::new(client)))].into(),
+            entries: [(public_key, entry)].into(),
+            clients: RwLock::new([(auth.org_id, Arc::new(client))].into()),
+            refresh,
             backoff: Duration::ZERO,
         };
-        (server, keyring, public_key)
+        (keyring, public_key)
+    }
+
+    #[tokio::test]
+    async fn a_rejected_credential_is_re_resolved_and_the_signature_retried_once() {
+        let expired = MockServer::start().await;
+        Mock::given(path("/public/v1/submit/sign_raw_payload"))
+            .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+                "code": 16, "message": "expired api key", "turnkeyErrorCode": "API_KEY_EXPIRED"
+            })))
+            .mount(&expired)
+            .await;
+        let fresh = MockServer::start().await;
+        Mock::given(path("/public/v1/submit/sign_raw_payload"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "activity": {
+                    "type": "ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2",
+                    "status": "ACTIVITY_STATUS_COMPLETED",
+                    "id": "activity-2",
+                    "organizationId": ORG,
+                    "fingerprint": "sha256:example",
+                    "result": {"signRawPayloadResult": {"r": "11".repeat(32), "s": "22".repeat(32), "v": "00"}}
+                }
+            })))
+            .mount(&fresh)
+            .await;
+        let (keyring, public_key) = keyring_for(&expired.uri(), Some(&fresh.uri()));
+
+        let signature = keyring
+            .sign(&public_key, b"payload")
+            .await
+            .expect("the retry with the refreshed credential should sign");
+        assert_eq!(&signature[..32], &[0x11; 32]);
+        assert_eq!(&signature[32..], &[0x22; 32]);
+        assert_eq!(expired.received_requests().await.unwrap().len(), 1);
+        assert_eq!(fresh.received_requests().await.unwrap().len(), 1);
+        // The refreshed client is kept for the next signature.
+        let second = keyring
+            .sign(&public_key, b"again")
+            .await
+            .expect("second signature");
+        assert_eq!(&second[..32], &[0x11; 32]);
+        assert_eq!(fresh.received_requests().await.unwrap().len(), 2);
     }
 
     /// The directory is returned so it outlives the paths inside it.
