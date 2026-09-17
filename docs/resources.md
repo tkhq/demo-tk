@@ -59,7 +59,7 @@ tk api-key register --input-json '{
   "userId": "USER_ID",
   "apiKeys": [{"apiKeyName": "ci", "publicKey": "02…", "curveType": "API_KEY_CURVE_P256"}]
 }'
-tk api-key delete --user-id USER_ID API_KEY_ID
+tk api-key delete --user-id USER_ID --id API_KEY_ID
 ```
 
 ## Wallets

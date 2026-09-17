@@ -347,6 +347,12 @@ impl Run {
             .args(["activity", "approve", "--id", id]))
     }
 
+    pub(crate) fn remove_ssh_key(&self, key: &str) -> Value {
+        self.ok(self
+            .admin_offline()
+            .args(["ssh", "keys", "remove", "--key", key]))
+    }
+
     /// Submits once and waits for pending activities.
     fn submit_once(
         &self,

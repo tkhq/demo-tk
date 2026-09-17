@@ -427,12 +427,8 @@ fn agent_start_narrows_by_key_profile_and_organization() {
     );
 
     // An empty registry fails before any process is spawned.
-    run.ok(run
-        .admin_offline()
-        .args(["ssh", "keys", "remove", "--key", &first_id]));
-    run.ok(run
-        .admin_offline()
-        .args(["ssh", "keys", "remove", "--key", &second_id]));
+    run.remove_ssh_key(&first_id);
+    run.remove_ssh_key(&second_id);
     no_agent(
         run.err(
             run.admin_offline()
