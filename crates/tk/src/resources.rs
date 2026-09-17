@@ -156,7 +156,7 @@ pub struct CreateTagArgs {
 }
 
 #[derive(Clone, Debug, ValueEnum)]
-pub enum EffectArg {
+enum EffectArg {
     Allow,
     Deny,
 }

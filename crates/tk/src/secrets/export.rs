@@ -296,12 +296,6 @@ pub(super) struct Exported {
     pub(super) value: Option<Zeroizing<String>>,
 }
 
-impl Exported {
-    pub(super) fn is_pending(&self) -> bool {
-        self.value.is_none()
-    }
-}
-
 pub(super) async fn export_value(
     state_dir: &Path,
     quorum: &QuorumPublicKey,

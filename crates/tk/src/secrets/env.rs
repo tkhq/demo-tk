@@ -125,19 +125,18 @@ pub(super) async fn run(
             UniqueKeyValues::parse(vec![], "--context")?,
         )
         .await?;
-        if attempt.is_pending() {
-            pending.push(json!({
+        let Exported { record, value } = attempt;
+        match value {
+            None => pending.push(json!({
                 "name": name,
                 "secretId": secret_id,
                 "var": var,
-                "activityId": attempt.record.data()["activity"]["id"],
-            }));
-            continue;
-        }
-        let Exported { value, .. } = attempt;
-        if let Some(value) = value {
-            exported.push(json!({"name": name, "secretId": secret_id, "var": var}));
-            env.insert(var, value);
+                "activityId": record.data()["activity"]["id"],
+            })),
+            Some(value) => {
+                exported.push(json!({"name": name, "secretId": secret_id, "var": var}));
+                env.insert(var, value);
+            }
         }
     }
     if !pending.is_empty() {

@@ -421,7 +421,9 @@ fn secret_env_exports_matching_secrets_as_dotenv() {
     ]));
     assert_eq!(
         human,
-        "API_TOKEN=tok-1\nDB_URL='postgres://u:p@h/db?x=1 y'\n"
+        r#"API_TOKEN=tok-1
+DB_URL='postgres://u:p@h/db?x=1 y'
+"#
     );
 
     let record = run.ok(run.admin().args([
