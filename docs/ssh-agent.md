@@ -45,11 +45,9 @@ tk ssh agent start --key SSH_FINGERPRINT --key ANOTHER_SSH_FINGERPRINT
 tk ssh agent start --profile agent
 ```
 
-The agent resolves its Turnkey credential from the registry when it starts and
-again whenever a signature is refused with HTTP 401 or 403, so a session key
-rotated with `tk session activate` is picked up on the next signature without a
-restart. The set of keys served is read only at start, so restart after adding
-or removing keys:
+A session key rotated with `tk session activate` is picked up automatically on
+the next signature, without a restart. The set of keys served is read only at
+start, so restart after adding or removing keys:
 
 ```bash
 tk ssh agent stop
