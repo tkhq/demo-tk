@@ -50,9 +50,8 @@ tk --profile hermes secret env --name-prefix hermes/ --property consensus=unilat
 # GITHUB_TOKEN=github_pat_...
 ```
 
-Values are written bare when they contain only letters, digits, and
-`_./:+=@,-`, and single-quoted otherwise. A value containing a newline, NUL, or
-single quote is refused. `--message-format json` returns the same values under
+`tk secret env` refuses a value containing a newline, NUL, or single quote.
+`--message-format json` returns the same values under
 `data.env` plus the selected secrets under `data.exported`.
 
 Each secret is one export activity. If any of them needs approval the command

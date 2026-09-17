@@ -27,65 +27,56 @@ sequenceDiagram
 
 Only the public key and user id cross from the agent to the provisioner; the
 provisioner registers the expiring key and never sees the private half; the
-approver signs off on the registration activity; the profile switch happens
-entirely on the agent host.
+approver signs off on the registration activity.
 
-## Request
+## Request (agent)
 
 ```bash
 tk session request --profile-name agent
-tk session request --profile-name agent --replace   # drop an unregistered request
+
+# Drop an unregistered request and start a new one.
+tk session request --profile-name agent --replace
 ```
 
 The profile must already exist. The request is remembered under
 `~/.config/turnkey/tk/sessions/pending/<profile>.json` until `activate` uses it.
-`userId` is read with the profile's current credential and is `null` if that
-credential no longer works; pass the user id to the provisioner by other means
-then.
 
-## Provision
+## Provision (provisioner)
 
 ```bash
+# Registers the agent's public key on its user as an expiring API key.
 tk --profile provisioner session provision --user-id USER_UUID --public-key PK --expires-in 7d
 ```
 
-Runs as the provisioner and submits `CREATE_API_KEYS_V2` with
-`expirationSeconds`. The record always shows `userId`, `expiresIn`, and
-`publicKey` so an approver can check them. If the key is already registered on
-that user the command reports it with `alreadyRegistered: true` and submits
-nothing, so re-running after approval is safe.
-
-Durations take `s`, `m`, `h`, or `d` suffixes, from `1s` to `365d`.
-
-## Activate
+## Activate (agent)
 
 ```bash
+# Verifies the pending key with whoami, then repoints the profile at it.
 tk session activate --profile-name agent
 ```
-
-Verifies the pending key with `whoami`, then repoints the profile at it. Until
-the key is registered the command fails with `unauthorized` and the profile is
-unchanged. A previous key file is deleted only if `tk` generated it under
-`~/.config/turnkey/tk/api-keys/`.
 
 ## Status
 
 ```bash
+# Reports the key's expiresAt, secondsLeft, and expiresIn.
 tk session status --profile-name agent
+
+# Exits 1 with code session_expiring when less than 24h is left (default 48h),
+# which makes it usable as a cron check.
 tk session status --profile-name agent --warn-before 24h
 ```
 
-Looks up the profile's key on its user and reports `expiresAt` (unix ms),
-`secondsLeft`, and `expiresIn`. A key without expiration reports `null` for
-those and always exits 0. Inside the warning window the command exits 1 with
-code `session_expiring` and the same fields under `details`, which makes it
-usable as a cron check.
-
 ## Policies
 
-The provisioner needs an ALLOW policy on `ACTIVITY_TYPE_CREATE_API_KEYS_V2`,
-usually with a consensus expression that also requires a human approver. The
-agent needs a DENY on `activity.resource == 'CREDENTIAL'`; without it Turnkey
-lets a user register keys on itself by default, and a short-lived key could
-mint a permanent one. Neither the target user's tags nor `expirationSeconds`
-are visible to policies, so the approver checks both from the record.
+```bash
+# Let the provisioner register keys, but only with a human approver's sign-off.
+tk policy create --name provision-session-keys --effect allow \
+  --condition "activity.type == 'ACTIVITY_TYPE_CREATE_API_KEYS_V2'" \
+  --consensus "approvers.any(user, user.id == 'PROVISIONER_USER_ID') && approvers.any(user, user.tags.contains('HUMAN_TAG_ID'))"
+
+# By default Turnkey lets a user register keys on itself, so a short-lived
+# agent key could mint a permanent one; deny the agent credential activities.
+tk policy create --name agents-no-credentials --effect deny \
+  --condition "activity.resource == 'CREDENTIAL'" \
+  --consensus "approvers.any(user, user.tags.contains('AGENT_TAG_ID'))"
+```
