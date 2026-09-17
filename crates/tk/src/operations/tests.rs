@@ -123,6 +123,18 @@ fn parser_enforces_body_source_and_safe_path() {
     );
 }
 
+#[test]
+fn parser_rejects_empty_activity_ids() {
+    for subcommand in ["get", "approve", "reject", "wait"] {
+        assert_eq!(
+            ActivityCli::try_parse_from(["tk", subcommand, "--id", ""])
+                .unwrap_err()
+                .kind(),
+            ErrorKind::InvalidValue
+        );
+    }
+}
+
 #[tokio::test]
 async fn reject_success_and_malformed_submission_are_distinct() {
     let server = MockServer::start().await;

@@ -306,6 +306,18 @@ fn profile_create_and_login_reject_local_mismatches() {
     assert_eq!(ambient_profile["code"], "invalid_input");
 }
 
+#[test]
+fn saved_profile_commands_reject_empty_profile_names() {
+    let temp = TempDir::new().unwrap();
+    for subcommand in ["show", "use", "delete", "set"] {
+        let parsed = failure(
+            command(&temp).args(["profile", subcommand, "--profile-name", ""]),
+            2,
+        );
+        assert_eq!(parsed["code"], "usage_error");
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn nonunicode_credential_environment_does_not_fall_back() {
