@@ -1,13 +1,13 @@
 //! Generates a credential for a saved profile and records it as pending.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Error, Result};
 use serde_json::json;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tracing::debug;
 use turnkey_client::generated::GetWhoamiRequest;
 
-use super::pending::PendingSession;
+use super::{parse_public_key, pending::PendingSession};
 use crate::auth::{
     SavedProfile, SecureCreateError, api_keys_dir, build_turnkey_client, read_key, saved_profile,
     state_dir,
@@ -41,6 +41,13 @@ pub(super) async fn run(name: String, replace: bool) -> Result<OperationOutput> 
     }
 
     let GeneratedApiKey { public_key, path } = generate(None).await?;
+    let public_key = match parse_public_key(&public_key).map_err(Error::msg) {
+        Ok(public_key) => public_key,
+        Err(error) => {
+            let _ = fs::remove_file(&path).await;
+            return Err(error.context("generated credential public key"));
+        }
+    };
     let key_file = match fs::canonicalize(&path)
         .await
         .context("resolve credential path")
@@ -86,7 +93,7 @@ pub(super) async fn run(name: String, replace: bool) -> Result<OperationOutput> 
         key_file,
         ..
     } = pending;
-    let user_hint = user_id.as_deref().unwrap_or("<USER_ID>").to_owned();
+    let user_hint = user_id.as_deref().unwrap_or("<USER_ID>");
     Ok(OperationOutput::result(
         COMMAND,
         json!({

@@ -4,7 +4,8 @@
 
 use anyhow::Result;
 use clap::Args;
-use serde::Serialize;
+use serde::de::{self, Deserializer};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fmt::{self, Display, Formatter};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -44,8 +45,16 @@ pub struct ProvisionArgs {
 
 /// A compressed P256 public key as normalized lowercase hex.
 #[derive(Clone, Debug, Serialize)]
+#[cfg_attr(test, derive(PartialEq))]
 #[serde(transparent)]
 pub(crate) struct CompressedPublicKey(String);
+
+impl<'de> Deserialize<'de> for CompressedPublicKey {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        parse_public_key(&text).map_err(de::Error::custom)
+    }
+}
 
 impl CompressedPublicKey {
     pub(crate) fn of(key: &TurnkeyP256ApiKey) -> Self {
@@ -166,10 +175,7 @@ pub(super) async fn run(auth: ResolvedAuth, args: ProvisionArgs) -> Result<Opera
         ));
         return Ok(OperationOutput::result(COMMAND, data));
     }
-    if activity["result"]["createApiKeysResult"]["apiKeyIds"][0]
-        .as_str()
-        .is_none()
-    {
+    if api_key_id.as_str().is_none() {
         return Err(ActivityError::new(
             ActivityErrorKind::MalformedResponse,
             "create_api_keys completed without result.createApiKeysResult.apiKeyIds[0]",

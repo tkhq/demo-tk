@@ -20,7 +20,7 @@ pub(super) async fn run(name: String) -> Result<OperationOutput> {
     let SavedProfile {
         organization_id,
         api_base_url,
-        api_key_file: previous_key_file,
+        api_key_file: _,
     } = saved_profile(&name).await?;
     let state = state_dir()?;
     let Some(pending) = PendingSession::load(&state, &name).await? else {
@@ -48,7 +48,7 @@ pub(super) async fn run(name: String) -> Result<OperationOutput> {
         })?;
 
     let switched = set_profile_key(&name, &key_file).await?;
-    let previous_public_key = match read_key(&previous_key_file).await {
+    let previous_public_key = match read_key(&switched.previous).await {
         Ok(key) => Some(hex::encode(key.compressed_public_key())),
         Err(_) => None,
     };

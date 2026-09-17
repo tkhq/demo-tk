@@ -2,6 +2,7 @@ use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::io::{self, Read};
 use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Error, Result};
@@ -208,9 +209,14 @@ fn url(base: &str, path: &str) -> Result<Url> {
 }
 
 pub(crate) fn client() -> Result<Client> {
-    transport(Client::builder())
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client.clone());
+    }
+    let client = transport(Client::builder())
         .build()
-        .context("could not initialize HTTP client")
+        .context("could not initialize HTTP client")?;
+    Ok(CLIENT.get_or_init(|| client).clone())
 }
 
 async fn post(

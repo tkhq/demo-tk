@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 use uuid::Uuid;
 
+use super::CompressedPublicKey;
 use crate::auth::{SecureCreateError, secure_create};
 use crate::errors::{InvalidInput, Malformed};
 
@@ -18,7 +19,7 @@ pub(crate) struct PendingSession {
     pub(crate) version: u32,
     pub(crate) profile: String,
     pub(crate) organization_id: Uuid,
-    pub(crate) public_key: String,
+    pub(crate) public_key: CompressedPublicKey,
     pub(crate) key_file: PathBuf,
     pub(crate) requested_at_unix_ms: u64,
 }
@@ -87,14 +88,16 @@ impl PendingSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sessions::parse_public_key;
     use std::fs;
 
     fn sample(profile: &str) -> PendingSession {
+        let key = "02abababababababababababababababababababababababababababababababab";
         PendingSession {
             version: 1,
             profile: profile.into(),
             organization_id: Uuid::nil(),
-            public_key: "02ab".into(),
+            public_key: parse_public_key(key).unwrap(),
             key_file: PathBuf::from("/keys/02ab.json"),
             requested_at_unix_ms: 1_700_000_000_000,
         }

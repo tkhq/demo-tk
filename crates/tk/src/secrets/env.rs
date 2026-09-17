@@ -29,8 +29,8 @@ fn select(
     properties: &BTreeMap<String, String>,
     name_prefix: Option<&str>,
 ) -> Result<Vec<Selected>> {
-    let mut selected = Vec::new();
-    let mut by_var: BTreeMap<String, String> = BTreeMap::new();
+    let mut selected: Vec<Selected> = Vec::new();
+    let mut by_var: BTreeMap<String, usize> = BTreeMap::new();
     for secret in secrets {
         let Some(name) = secret.name else { continue };
         if name_prefix.is_some_and(|prefix| !name.starts_with(prefix)) {
@@ -60,7 +60,8 @@ fn select(
             ))
             .into());
         }
-        if let Some(other) = by_var.insert(var.clone(), name.clone()) {
+        if let Some(index) = by_var.insert(var.clone(), selected.len()) {
+            let other = &selected[index].name;
             return Err(InvalidInput(format!(
                 "secrets {other} and {name} both map to variable {var}; narrow the selection"
             ))

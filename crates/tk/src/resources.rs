@@ -225,6 +225,17 @@ pub enum Mutation {
 }
 
 impl BodyArgs {
+    fn parse_from<T: DeserializeOwned + Serialize>(
+        input_json: Option<String>,
+        input_file: Option<PathBuf>,
+    ) -> Result<T> {
+        Self {
+            input_json,
+            input_file,
+        }
+        .parse()
+    }
+
     pub(crate) fn parse<T: DeserializeOwned + Serialize>(self) -> Result<T> {
         let bytes = match (self.input_json, self.input_file) {
             (Some(json), _) => json.into_bytes(),
@@ -335,11 +346,8 @@ impl UserCommand {
                 user_name: None,
                 ..
             }) => {
-                let params: intent::CreateUsersIntentV4 = BodyArgs {
-                    input_json,
-                    input_file,
-                }
-                .parse()?;
+                let params: intent::CreateUsersIntentV4 =
+                    BodyArgs::parse_from(input_json, input_file)?;
                 if params.users.is_empty() {
                     return Err(InvalidInput("users must contain at least one user".into()).into());
                 }
@@ -414,13 +422,9 @@ impl UserCommand {
                     input_json,
                     input_file,
                     name: None,
-                }) => PreparedResource::Mutation(Mutation::CreateTag(
-                    BodyArgs {
-                        input_json,
-                        input_file,
-                    }
-                    .parse()?,
-                )),
+                }) => PreparedResource::Mutation(Mutation::CreateTag(BodyArgs::parse_from(
+                    input_json, input_file,
+                )?)),
                 TagCommand::Update(body) => {
                     PreparedResource::Mutation(Mutation::UpdateTag(body.parse()?))
                 }
@@ -475,13 +479,9 @@ impl PolicyCommand {
                 input_file,
                 name: None,
                 ..
-            }) => PreparedResource::Mutation(Mutation::CreatePolicy(
-                BodyArgs {
-                    input_json,
-                    input_file,
-                }
-                .parse()?,
-            )),
+            }) => PreparedResource::Mutation(Mutation::CreatePolicy(BodyArgs::parse_from(
+                input_json, input_file,
+            )?)),
             PolicyCommand::CreateBatch(body) => {
                 let params: intent::CreatePoliciesIntent = body.parse()?;
                 if params.policies.is_empty() {
