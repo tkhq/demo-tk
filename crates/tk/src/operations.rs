@@ -364,24 +364,25 @@ impl PreparedRequest {
         let value = post(&client()?, endpoint, body, &auth.stamper, mutation).await?;
         match kind {
             RequestKind::Query => Ok(OperationOutput::result(command, value)),
-            RequestKind::Submit => submission_result(command, value),
+            RequestKind::Submit => submission_result(command, value).map(|(_, output)| output),
         }
     }
 }
 
-fn submission_result(command: &'static str, data: Value) -> Result<OperationOutput> {
-    if data
+fn submission_result(command: &'static str, data: Value) -> Result<(String, OperationOutput)> {
+    let Some(id) = data
         .pointer("/activity/id")
         .and_then(Value::as_str)
-        .is_none_or(str::is_empty)
-    {
+        .filter(|id| !id.is_empty())
+        .map(str::to_owned)
+    else {
         return Err(ActivityError::new(
             ActivityErrorKind::SubmissionUnknown,
             "response omitted activity identity; inspect activities before resubmitting",
         )
         .into());
-    }
-    terminal(OperationOutput::result(command, data), true)
+    };
+    Ok((id, terminal(OperationOutput::result(command, data), true)?))
 }
 
 fn terminal(output: OperationOutput, submitted: bool) -> Result<OperationOutput> {
@@ -639,6 +640,22 @@ pub async fn submit_activity<T: Serialize>(
     kind: &str,
     parameters: &T,
 ) -> Result<OperationOutput> {
+    Ok(
+        submit_activity_with_id(auth, command, endpoint, kind, parameters)
+            .await?
+            .1,
+    )
+}
+
+/// Submits an activity and returns the server-assigned activity id (proven
+/// non-empty at the submission boundary) alongside the output.
+pub(crate) async fn submit_activity_with_id<T: Serialize>(
+    auth: &ResolvedAuth,
+    command: &'static str,
+    endpoint: &str,
+    kind: &str,
+    parameters: &T,
+) -> Result<(String, OperationOutput)> {
     let body = encode(&envelope(kind, auth.org_id, parameters)?)?;
     let endpoint = url(
         auth.api_base_url.as_str(),

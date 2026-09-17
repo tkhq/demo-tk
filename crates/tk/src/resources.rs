@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs,
     io::{self, Read},
     path::PathBuf,
@@ -20,7 +21,7 @@ use crate::{
     auth::{ResolvedAuth, build_turnkey_client},
     errors::{ActivityError, ActivityErrorKind, InvalidInput, Malformed, MissingResource},
     operations::{OperationOutput, query_decoded, submit_activity},
-    sessions::{CompressedPublicKey, duration::ExpiresIn, parse_public_key},
+    sessions::{CompressedPublicKey, duration::ExpiresIn, p256_api_key, parse_public_key},
 };
 
 #[derive(Debug, Subcommand)]
@@ -355,21 +356,17 @@ impl UserCommand {
                 anchor_key,
                 ..
             }) => {
-                let anchor = anchor_key.then(|| intent::ApiKeyParamsV2 {
-                    api_key_name: format!("{user_name}-anchor"),
-                    public_key: CompressedPublicKey::of(&TurnkeyP256ApiKey::generate())
-                        .into_string(),
-                    curve_type: common::ApiKeyCurve::P256,
-                    expiration_seconds: None,
+                let anchor = anchor_key.then(|| {
+                    p256_api_key(
+                        format!("{user_name}-anchor"),
+                        CompressedPublicKey::of(&TurnkeyP256ApiKey::generate()),
+                        None,
+                    )
                 });
                 let api_keys = anchor
                     .into_iter()
-                    .chain(public_key.map(|public_key| intent::ApiKeyParamsV2 {
-                        api_key_name: format!("{user_name}-key"),
-                        public_key: public_key.into_string(),
-                        curve_type: common::ApiKeyCurve::P256,
-                        expiration_seconds:
-                            expires_in.map(|expires_in| expires_in.seconds().to_string()),
+                    .chain(public_key.map(|public_key| {
+                        p256_api_key(format!("{user_name}-key"), public_key, expires_in)
                     }))
                     .collect();
                 let params = intent::CreateUsersIntentV4 {
@@ -659,16 +656,20 @@ async fn resolve_tag_names(auth: &ResolvedAuth, names: Vec<String>) -> Result<Ve
         &auth.stamper,
     )
     .await?;
+    let mut ids_by_name: HashMap<&str, Vec<&str>> = HashMap::new();
+    for tag in &listed.user_tags {
+        ids_by_name
+            .entry(tag.tag_name.as_str())
+            .or_default()
+            .push(tag.tag_id.as_str());
+    }
     names
         .into_iter()
         .map(|name| {
-            let matches: Vec<&str> = listed
-                .user_tags
-                .iter()
-                .filter(|tag| tag.tag_name == name)
-                .map(|tag| tag.tag_id.as_str())
-                .collect();
-            match matches.as_slice() {
+            match ids_by_name
+                .get(name.as_str())
+                .map_or(&[] as &[&str], Vec::as_slice)
+            {
                 [] => Err(MissingResource::new("user tag", name).into()),
                 [one] => Ok((*one).to_owned()),
                 many => Err(InvalidInput(format!(

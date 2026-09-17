@@ -4,8 +4,7 @@
 
 use anyhow::Result;
 use clap::Args;
-use serde::de::{self, Deserializer};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 use std::fmt::{self, Display, Formatter};
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
@@ -22,7 +21,7 @@ use uuid::Uuid;
 use super::duration::{ExpiresIn, format_duration};
 use crate::auth::ResolvedAuth;
 use crate::errors::{ActivityError, ActivityErrorKind};
-use crate::operations::{OperationOutput, now_unix_ms, query_decoded, submit_activity};
+use crate::operations::{OperationOutput, now_unix_ms, query_decoded, submit_activity_with_id};
 
 const COMMAND: &str = "session.provision";
 
@@ -49,13 +48,6 @@ pub struct ProvisionArgs {
 #[serde(transparent)]
 pub(crate) struct CompressedPublicKey(String);
 
-impl<'de> Deserialize<'de> for CompressedPublicKey {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let text = String::deserialize(deserializer)?;
-        parse_public_key(&text).map_err(de::Error::custom)
-    }
-}
-
 impl CompressedPublicKey {
     pub(crate) fn of(key: &TurnkeyP256ApiKey) -> Self {
         Self(hex::encode(key.compressed_public_key()))
@@ -64,15 +56,26 @@ impl CompressedPublicKey {
     pub(crate) fn matches(&self, hex: &str) -> bool {
         self.0.eq_ignore_ascii_case(hex)
     }
-
-    pub(crate) fn into_string(self) -> String {
-        self.0
-    }
 }
 
 impl Display for CompressedPublicKey {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+/// API key creation parameters for a P256 key, rendering the optional
+/// lifetime as whole seconds.
+pub(crate) fn p256_api_key(
+    api_key_name: String,
+    public_key: CompressedPublicKey,
+    expires_in: Option<ExpiresIn>,
+) -> ApiKeyParamsV2 {
+    ApiKeyParamsV2 {
+        api_key_name,
+        public_key: public_key.0,
+        curve_type: ApiKeyCurve::P256,
+        expiration_seconds: expires_in.map(|expires_in| expires_in.seconds().to_string()),
     }
 }
 
@@ -138,18 +141,17 @@ pub(super) async fn run(auth: ResolvedAuth, args: ProvisionArgs) -> Result<Opera
         Some(label) => label,
         None => format!("session-{expires_in}-{}", now_unix_ms()? / 1000),
     };
-    let submitted = submit_activity(
+    let (activity_id, submitted) = submit_activity_with_id(
         &auth,
         COMMAND,
         "create_api_keys",
         "ACTIVITY_TYPE_CREATE_API_KEYS_V2",
         &CreateApiKeysIntentV2 {
-            api_keys: vec![ApiKeyParamsV2 {
-                api_key_name: api_key_name.clone(),
-                public_key: public_key.to_string(),
-                curve_type: ApiKeyCurve::P256,
-                expiration_seconds: Some(expires_in.seconds().to_string()),
-            }],
+            api_keys: vec![p256_api_key(
+                api_key_name.clone(),
+                public_key.clone(),
+                Some(expires_in),
+            )],
             user_id: user_id.to_string(),
         },
     )
@@ -169,17 +171,9 @@ pub(super) async fn run(auth: ResolvedAuth, args: ProvisionArgs) -> Result<Opera
         )
         .into());
     }
-    let activity_id = activity["id"].take();
-    let Some(activity_id_str) = activity_id.as_str() else {
-        return Err(ActivityError::new(
-            ActivityErrorKind::MalformedResponse,
-            "create_api_keys submitted without activity.id",
-        )
-        .into());
-    };
     let next_step = pending.then(|| {
         format!(
-            "approve activity {activity_id_str} (expiring key for user {user_id}, lifetime {expires_in}), then re-run this command or tk activity wait {activity_id_str}"
+            "approve activity {activity_id} (expiring key for user {user_id}, lifetime {expires_in}), then re-run this command or tk activity wait {activity_id}"
         )
     });
     let mut data = json!({

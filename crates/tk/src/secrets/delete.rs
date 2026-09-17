@@ -8,7 +8,7 @@ use turnkey_client::generated::immutable::activity::v1::DeleteSecretsIntent;
 use super::export::resolve_name;
 use super::input::SecretRef;
 use crate::auth::ResolvedAuth;
-use crate::operations::{OperationOutput, submit_activity};
+use crate::operations::{OperationOutput, submit_activity_with_id};
 
 const COMMAND: &str = "secret.delete";
 
@@ -17,7 +17,7 @@ pub(super) async fn run(auth: ResolvedAuth, secret: SecretRef) -> Result<Operati
         SecretRef::Id(id) => id,
         SecretRef::Name(name) => resolve_name(&auth, name).await?,
     };
-    let submitted = submit_activity(
+    let (activity_id, submitted) = submit_activity_with_id(
         &auth,
         COMMAND,
         "delete_secrets",
@@ -34,7 +34,7 @@ pub(super) async fn run(auth: ResolvedAuth, secret: SecretRef) -> Result<Operati
         json!({
             "secretId": secret_id,
             "activity": {
-                "id": activity["id"].take(),
+                "id": activity_id,
                 "status": activity["status"].take(),
                 "type": activity["type"].take(),
                 "result": activity["result"].take(),

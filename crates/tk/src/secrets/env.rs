@@ -13,7 +13,7 @@ use super::SecretOutput;
 use super::export::{Binding, Exported, Secret, export_value, list_all};
 use super::input::{UniqueKeyValues, quorum_for};
 use crate::auth::{ResolvedAuth, state_dir};
-use crate::errors::{InvalidInput, PendingApprovals};
+use crate::errors::{InvalidInput, PendingApprovals, PendingExport};
 use crate::operations::OperationOutput;
 
 const COMMAND: &str = "secret.env";
@@ -134,13 +134,12 @@ pub(super) async fn run(
                 record: _,
                 activity_id,
             } => {
-                let entry = json!({
-                    "name": &name,
-                    "secretId": secret_id,
-                    "var": var,
-                    "activityId": activity_id,
+                pending.push(PendingExport {
+                    name,
+                    secret_id,
+                    var,
+                    activity_id,
                 });
-                pending.push((name, entry));
             }
             Exported::Completed { record: _, value } => {
                 exported.push(json!({"name": name, "secretId": secret_id, "var": var}));
@@ -149,16 +148,7 @@ pub(super) async fn run(
         }
     }
     if !pending.is_empty() {
-        let (names, pending): (Vec<String>, Vec<Value>) = pending.into_iter().unzip();
-        return Err(PendingApprovals {
-            message: format!(
-                "{} secret export(s) await approval: {}; approve them and run the same command again",
-                pending.len(),
-                names.join(", ")
-            ),
-            pending: Value::Array(pending),
-        }
-        .into());
+        return Err(PendingApprovals { pending }.into());
     }
 
     let mut plain = Zeroizing::new(String::new());

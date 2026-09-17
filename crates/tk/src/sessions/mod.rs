@@ -19,7 +19,7 @@ use turnkey_client::generated::{GetWhoamiRequest, GetWhoamiResponse};
 use uuid::Uuid;
 
 use provision::ProvisionArgs;
-pub(crate) use provision::{CompressedPublicKey, parse_public_key};
+pub(crate) use provision::{CompressedPublicKey, p256_api_key, parse_public_key};
 use status::StatusArgs;
 
 use crate::auth::{self, ApiBaseUrl, AuthOptions, build_turnkey_client};

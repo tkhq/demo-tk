@@ -30,7 +30,7 @@ use crate::auth::{
 };
 use crate::errors::{ActivityError, ActivityErrorKind, InvalidInput, Malformed, MissingResource};
 use crate::operations::{
-    OperationOutput, client, observed, query_activity, query_decoded, submit_activity,
+    OperationOutput, client, observed, query_activity, query_decoded, submit_activity_with_id,
 };
 
 const COMMAND: &str = "secret.export";
@@ -300,11 +300,13 @@ pub(super) async fn run(
         Exported::Pending {
             record,
             activity_id: _,
-        } => Ok(record.into()),
+        } => Ok(pending(record).into()),
     }
 }
 
-/// One export attempt: the record to report and, when the activity completed, the decrypted value.
+/// One export attempt: the raw activity record and, when the activity completed,
+/// the decrypted value. Pending records still carry the activity result; callers
+/// choose how to present them (see [`pending`]).
 pub(super) enum Exported {
     Pending {
         record: OperationOutput,
@@ -339,7 +341,7 @@ pub(super) async fn export_value(
         };
         if record.is_pending() {
             return Ok(Exported::Pending {
-                record: pending(record),
+                record,
                 activity_id: state.activity_id,
             });
         }
@@ -358,7 +360,7 @@ pub(super) async fn export_value(
     OsRng.fill_bytes(&mut *ikm);
     let recipient = ExportClient::dangerous_from_bytes(*ikm, quorum);
     let target_public_key = recipient.target_public_key()?;
-    let submitted = submit_activity(
+    let (activity_id, submitted) = submit_activity_with_id(
         auth,
         COMMAND,
         "export_secrets",
@@ -375,15 +377,6 @@ pub(super) async fn export_value(
     .await?;
     let record = OperationOutput::result(COMMAND, export_data(secret_id, submitted.into_data()));
     if record.is_pending() {
-        let activity_id = record.data()["activity"]["id"]
-            .as_str()
-            .map(str::to_owned)
-            .ok_or_else(|| {
-                ActivityError::new(
-                    ActivityErrorKind::MalformedResponse,
-                    "pending export has no activity id",
-                )
-            })?;
         let state = PendingExport {
             version: 1,
             organization_id: binding.organization_id,
@@ -401,7 +394,7 @@ pub(super) async fn export_value(
             )
         })?;
         return Ok(Exported::Pending {
-            record: pending(record),
+            record,
             activity_id: state.activity_id,
         });
     }
@@ -409,6 +402,8 @@ pub(super) async fn export_value(
     Ok(Exported::Completed { record, value })
 }
 
+/// Renders a pending export for the export command: strips ciphertext and adds
+/// the resume instruction.
 fn pending(record: OperationOutput) -> OperationOutput {
     let mut data = record.into_data();
     strip_result(&mut data);

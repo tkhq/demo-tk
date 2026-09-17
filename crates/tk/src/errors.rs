@@ -48,12 +48,25 @@ pub(crate) fn assert_malformed_response(error: &anyhow::Error, chain: &[&str]) {
     assert_eq!(rendered, chain);
 }
 
+/// One secret export that is waiting on an approval activity.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingExport {
+    pub name: String,
+    pub secret_id: Uuid,
+    pub var: String,
+    pub activity_id: String,
+}
+
 /// Activities that still need approval before a command can finish.
 #[derive(Debug, thiserror::Error)]
-#[error("{message}")]
+#[error(
+    "{} secret export(s) await approval: {}; approve them and run the same command again",
+    .pending.len(),
+    .pending.iter().map(|entry| entry.name.as_str()).collect::<Vec<_>>().join(", ")
+)]
 pub struct PendingApprovals {
-    pub message: String,
-    pub pending: Value,
+    pub pending: Vec<PendingExport>,
 }
 
 /// A credential ends within the caller's warning window.
