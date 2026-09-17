@@ -33,7 +33,8 @@ pub struct ProvisionArgs {
     /// Lifetime of the key, for example 7d, 48h, 30m.
     #[arg(long, default_value = "7d")]
     expires_in: ExpiresIn,
-    /// API key label; defaults to session-<expires-in>-<unix seconds>.
+    /// API key label; defaults to session-EXPIRES_IN-UNIX_SECONDS, for example
+    /// session-7d-1789000000.
     #[arg(long)]
     label: Option<String>,
 }

@@ -43,7 +43,7 @@ pub enum SecretCommand {
         properties: Vec<KeyValue>,
     },
     /// Export every matching secret and print dotenv lines for a process's
-    /// startup environment. Names are <prefix>/<VAR>; VAR is the line's key.
+    /// startup environment. Names are PREFIX/VAR; VAR is the line's key.
     #[command(group = ArgGroup::new("selector").required(true).multiple(true))]
     Env {
         /// Only secrets carrying this static property (repeatable; all must match).
