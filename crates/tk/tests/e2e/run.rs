@@ -341,6 +341,13 @@ impl Run {
         record
     }
 
+    /// Approves an activity as the given user.
+    pub(crate) fn approve(&self, approver: &TurnkeyP256ApiKey, id: &str) -> Value {
+        self.ok(self
+            .as_user(approver)
+            .args(["activity", "approve", "--id", id]))
+    }
+
     /// Submits once and waits for pending activities.
     fn submit_once(
         &self,

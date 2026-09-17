@@ -290,7 +290,7 @@ fn profile_create_and_login_reject_local_mismatches() {
     assert_eq!(
         org_mismatch["message"],
         format!(
-            "profile default is saved with organization {ORG}; run tk profile set default --organization-id {other_org} to change it"
+            "profile default is saved with organization {ORG}; run tk profile set --profile-name default --organization-id {other_org} to change it"
         )
     );
     let url_mismatch = failure(
@@ -300,7 +300,7 @@ fn profile_create_and_login_reject_local_mismatches() {
     assert_eq!(url_mismatch["code"], "invalid_input");
     assert_eq!(
         url_mismatch["message"],
-        "profile default is saved with API base URL https://api.turnkey.com; run tk profile set default --api-base-url https://example.com to change it"
+        "profile default is saved with API base URL https://api.turnkey.com; run tk profile set --profile-name default --api-base-url https://example.com to change it"
     );
     let ambient_profile = failure(command(&temp).env("TK_PROFILE", "ambient").arg("login"), 1);
     assert_eq!(ambient_profile["code"], "invalid_input");

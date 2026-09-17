@@ -132,10 +132,7 @@ fn quorum_approval_completes_and_rejection_fails_a_consensus_activity() {
     assert_eq!(timed_out["code"], "wait_timeout");
     assert_eq!(timed_out["details"]["activity"], pending["activity"]);
 
-    let approved =
-        run.ok(run
-            .as_user(&approver)
-            .args(["activity", "approve", "--id", &tag_activity]));
+    let approved = run.approve(&approver, &tag_activity);
     assert_eq!(approved["command"], "activity.approve");
     assert_eq!(approved["activity"]["id"], tag_activity);
     assert!(

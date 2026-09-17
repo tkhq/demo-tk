@@ -227,9 +227,7 @@ fn secret_export_with_consensus_finishes_by_rerunning_the_command() {
         "re-run must not create a second activity"
     );
 
-    let approved = run.ok(run
-        .as_user(&approver)
-        .args(["activity", "approve", "--id", &activity]));
+    let approved = run.approve(&approver, &activity);
     assert_eq!(approved["activity"]["id"], activity);
     run.wait(&activity);
 
@@ -277,9 +275,7 @@ fn secret_export_with_consensus_finishes_by_rerunning_the_command() {
     assert!(state.exists(), "the retry keeps its own recovery key");
 
     // The retry is a complete export in its own right: approved, it delivers.
-    run.ok(run
-        .as_user(&approver)
-        .args(["activity", "approve", "--id", &fresh_activity]));
+    run.approve(&approver, &fresh_activity);
     run.wait(&fresh_activity);
     let retried = run.ok(run
         .as_user(&submitter)
@@ -353,9 +349,7 @@ fn a_pending_export_belongs_to_the_credential_that_started_it() {
         second_activity
     );
 
-    run.ok(run
-        .as_user(&approver)
-        .args(["activity", "approve", "--id", &first_activity]));
+    run.approve(&approver, &first_activity);
     run.wait(&first_activity);
     let delivered = run.ok(run
         .as_user(&owner)
