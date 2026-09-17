@@ -71,14 +71,13 @@ pub(super) async fn run(args: StatusArgs) -> Result<OperationOutput> {
         .ok_or_else(|| MissingResource::new("api key", public_key.clone()))?;
     let key = to_value(key)?;
     let expires_at = expires_at(&key);
+    let expires_at_ms = expires_at.as_str().and_then(|ms| ms.parse::<u64>().ok());
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0);
-    let seconds_left = expires_at
-        .as_str()
-        .and_then(|ms| ms.parse::<u64>().ok())
-        .map(|expires_at_ms| expires_at_ms.saturating_sub(now_ms) / 1000);
+    let seconds_left =
+        expires_at_ms.map(|expires_at_ms| expires_at_ms.saturating_sub(now_ms) / 1000);
 
     let data = json!({
         "profile": name,
@@ -93,13 +92,13 @@ pub(super) async fn run(args: StatusArgs) -> Result<OperationOutput> {
         "expiresIn": seconds_left.map(|left| ExpiresIn::from_seconds(left).to_string()),
         "warnBefore": warn_before.to_string(),
     });
-    if let Some(seconds_left) = seconds_left
+    if let Some((expires_at_ms, seconds_left)) = expires_at_ms.zip(seconds_left)
         && seconds_left < warn_before.seconds()
     {
         return Err(SessionExpiring {
             profile: name,
             public_key,
-            expires_at_unix_ms: now_ms.saturating_add(seconds_left.saturating_mul(1000)),
+            expires_at_unix_ms: expires_at_ms,
             seconds_left,
             warn_before_seconds: warn_before.seconds(),
         }

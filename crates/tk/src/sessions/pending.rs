@@ -67,11 +67,7 @@ impl PendingSession {
         secure_create(&path, &to_vec(self)?)
             .await
             .map_err(|error| match error {
-                SecureCreateError::Exists => InvalidInput(format!(
-                    "a session request for profile {} is already pending; run tk session activate --profile-name {0}, or tk session request --profile-name {0} --replace to start over",
-                    self.profile
-                ))
-                .into(),
+                SecureCreateError::Exists => Error::new(error),
                 SecureCreateError::Io(error) => {
                     Error::new(error).context("write pending session state")
                 }
@@ -124,7 +120,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         sample("agent").create(dir.path()).await.unwrap();
         let error = sample("agent").create(dir.path()).await.unwrap_err();
-        assert!(error.downcast_ref::<InvalidInput>().is_some(), "{error}");
+        assert!(
+            matches!(
+                error.downcast_ref::<SecureCreateError>(),
+                Some(SecureCreateError::Exists)
+            ),
+            "{error}"
+        );
     }
 
     #[tokio::test]

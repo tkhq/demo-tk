@@ -155,7 +155,7 @@ pub struct CreateTagArgs {
     name: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Debug, ValueEnum)]
 pub enum EffectArg {
     Allow,
     Deny,
@@ -164,6 +164,7 @@ pub enum EffectArg {
 /// Policy fields as flags, or a full parameters object.
 #[derive(Debug, Args)]
 #[command(group(ArgGroup::new("policy_source").required(true).args(["input_json", "input_file", "name"])))]
+#[command(group(ArgGroup::new("policy_rule").multiple(true).args(["condition", "consensus"])))]
 pub struct CreatePolicyArgs {
     /// Inline JSON parameters (no activity envelope).
     #[arg(long)]
@@ -172,7 +173,7 @@ pub struct CreatePolicyArgs {
     #[arg(long)]
     input_file: Option<PathBuf>,
     /// Name of the policy.
-    #[arg(long)]
+    #[arg(long, requires_all = ["effect", "policy_rule"])]
     name: Option<String>,
     /// Whether matching activities are allowed or denied.
     #[arg(long, value_enum, requires = "name")]
@@ -448,16 +449,8 @@ impl PolicyCommand {
                 ..
             }) => {
                 let Some(effect) = effect else {
-                    return Err(
-                        InvalidInput("--effect allow|deny is required with --name".into()).into(),
-                    );
+                    unreachable!("clap requires --effect with --name");
                 };
-                if condition.is_none() && consensus.is_none() {
-                    return Err(InvalidInput(
-                        "at least one of --condition or --consensus is required with --name".into(),
-                    )
-                    .into());
-                }
                 PreparedResource::Mutation(Mutation::CreatePolicy(intent::CreatePolicyIntentV3 {
                     policy_name,
                     effect: match effect {
@@ -566,7 +559,7 @@ impl PreparedResource {
 
 impl Mutation {
     async fn run(self, auth: ResolvedAuth) -> Result<OperationOutput> {
-        let resolved = match self {
+        let (command, endpoint, kind, params) = match self {
             Self::CreateUsersWithTagNames {
                 mut params,
                 tag_names,
@@ -575,11 +568,13 @@ impl Mutation {
                 for user in &mut params.users {
                     user.user_tags.extend(tag_ids.iter().cloned());
                 }
-                Self::CreateUsers(params)
+                (
+                    "user.create",
+                    "create_users",
+                    "ACTIVITY_TYPE_CREATE_USERS_V4",
+                    to_value(params)?,
+                )
             }
-            other => other,
-        };
-        let (command, endpoint, kind, params) = match resolved {
             Self::CreateUsers(p) => (
                 "user.create",
                 "create_users",
@@ -658,9 +653,6 @@ impl Mutation {
                 "ACTIVITY_TYPE_DELETE_API_KEYS",
                 to_value(p)?,
             ),
-            Self::CreateUsersWithTagNames { .. } => {
-                return Err(InvalidInput("tag names were not resolved".into()).into());
-            }
         };
         submit_activity(&auth, command, endpoint, kind, &params).await
     }
@@ -864,6 +856,8 @@ mod tests {
                 "-",
             ],
             vec!["policy", "create"],
+            vec!["policy", "create", "--name", "agent", "--condition", "true"],
+            vec!["policy", "create", "--name", "agent", "--effect", "allow"],
             vec!["user", "create", "--input-json", r#"{"users":[]}"#],
             vec![
                 "api-key",

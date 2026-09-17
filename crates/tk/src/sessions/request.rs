@@ -9,8 +9,10 @@ use turnkey_client::generated::GetWhoamiRequest;
 
 use super::pending::PendingSession;
 use crate::auth::{
-    SavedProfile, api_keys_dir, build_turnkey_client, read_key, saved_profile, state_dir,
+    SavedProfile, SecureCreateError, api_keys_dir, build_turnkey_client, read_key, saved_profile,
+    state_dir,
 };
+use crate::errors::InvalidInput;
 use crate::keygen::{GeneratedApiKey, generate};
 use crate::operations::OperationOutput;
 
@@ -24,7 +26,7 @@ pub(super) async fn run(name: String, replace: bool) -> Result<OperationOutput> 
 
     if let Some(pending) = PendingSession::load(&state, &name).await? {
         if !replace {
-            return Err(crate::errors::InvalidInput(format!(
+            return Err(InvalidInput(format!(
                 "a session request for profile {name} is already pending (public key {}); run tk session activate --profile-name {name}, or pass --replace to start over",
                 pending.public_key
             ))
@@ -63,6 +65,16 @@ pub(super) async fn run(name: String, replace: bool) -> Result<OperationOutput> 
     };
     if let Err(error) = pending.create(&state).await {
         let _ = fs::remove_file(&pending.key_file).await;
+        if matches!(
+            error.downcast_ref::<SecureCreateError>(),
+            Some(SecureCreateError::Exists)
+        ) {
+            return Err(InvalidInput(format!(
+                "a session request for profile {} is already pending; run tk session activate --profile-name {0}, or tk session request --profile-name {0} --replace to start over",
+                pending.profile
+            ))
+            .into());
+        }
         return Err(error);
     }
 

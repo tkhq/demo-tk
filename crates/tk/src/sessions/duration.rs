@@ -7,7 +7,7 @@ use std::str::FromStr;
 const MAX_SECONDS: u64 = 365 * 24 * 60 * 60;
 
 /// A lifetime in whole seconds, parsed from `<n>[s|m|h|d]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct ExpiresIn(u64);
 
 impl ExpiresIn {

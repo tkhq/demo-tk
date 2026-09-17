@@ -61,7 +61,7 @@ trap cleanup EXIT HUP INT TERM
 version=${TK_VERSION:-}
 if [ -n "$version" ]; then
     case "$version" in
-        *[!A-Za-z0-9._-]*|"")
+        *[!A-Za-z0-9._-]*)
             echo "error: TK_VERSION must be a release or prerelease tag such as v0.2.0 or pr-44-abc1234" >&2
             exit 1
             ;;

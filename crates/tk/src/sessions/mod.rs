@@ -6,7 +6,7 @@
 
 mod activate;
 pub(crate) mod duration;
-pub(crate) mod pending;
+mod pending;
 mod provision;
 mod request;
 mod status;
@@ -14,9 +14,9 @@ mod status;
 use anyhow::Result;
 use clap::Subcommand;
 
-pub use provision::ProvisionArgs;
+use provision::ProvisionArgs;
 pub(crate) use provision::parse_public_key;
-pub use status::StatusArgs;
+use status::StatusArgs;
 
 use crate::auth::{self, AuthOptions};
 use crate::operations::OperationOutput;
