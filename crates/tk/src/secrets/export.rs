@@ -293,19 +293,21 @@ pub(super) async fn run(
         SecretRef::Id(id) => id,
         SecretRef::Name(name) => resolve_name(&auth, name).await?,
     };
-    let Exported { record, value } =
-        export_value(&state_dir, &quorum, &auth, secret_id, context).await?;
-    match value {
-        Some(value) => deliver(record, value, out).await,
-        None => Ok(record.into()),
+    match export_value(&state_dir, &quorum, &auth, secret_id, context).await? {
+        Exported::Completed { record, value } => deliver(record, value, out).await,
+        Exported::Pending { record } => Ok(record.into()),
     }
 }
 
-/// One export attempt: the record to report and, when the activity completed,
-/// the decrypted value.
-pub(super) struct Exported {
-    pub(super) record: OperationOutput,
-    pub(super) value: Option<Zeroizing<String>>,
+/// One export attempt: the record to report and, when the activity completed, the decrypted value.
+pub(super) enum Exported {
+    Pending {
+        record: OperationOutput,
+    },
+    Completed {
+        record: OperationOutput,
+        value: Zeroizing<String>,
+    },
 }
 
 pub(super) async fn export_value(
@@ -330,9 +332,8 @@ pub(super) async fn export_value(
             }
         };
         if record.is_pending() {
-            return Ok(Exported {
+            return Ok(Exported::Pending {
                 record: pending(record),
-                value: None,
             });
         }
         let recipient = state.recipient(&path, quorum)?;
@@ -343,10 +344,7 @@ pub(super) async fn export_value(
             )
         })?;
         remove(&path).await?;
-        return Ok(Exported {
-            record,
-            value: Some(value),
-        });
+        return Ok(Exported::Completed { record, value });
     }
 
     let mut ikm = Zeroizing::new([0u8; 32]);
@@ -400,16 +398,12 @@ pub(super) async fn export_value(
                 state.activity_id
             )
         })?;
-        return Ok(Exported {
+        return Ok(Exported::Pending {
             record: pending(record),
-            value: None,
         });
     }
     let value = decrypt(recipient, &record, auth.org_id)?;
-    Ok(Exported {
-        record,
-        value: Some(value),
-    })
+    Ok(Exported::Completed { record, value })
 }
 
 fn pending(record: OperationOutput) -> OperationOutput {

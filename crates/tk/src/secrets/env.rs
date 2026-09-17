@@ -125,9 +125,8 @@ pub(super) async fn run(
             UniqueKeyValues::empty(),
         )
         .await?;
-        let Exported { record, value } = attempt;
-        match value {
-            None => {
+        match attempt {
+            Exported::Pending { record } => {
                 let entry = json!({
                     "name": &name,
                     "secretId": secret_id,
@@ -136,7 +135,7 @@ pub(super) async fn run(
                 });
                 pending.push((name, entry));
             }
-            Some(value) => {
+            Exported::Completed { record: _, value } => {
                 exported.push(json!({"name": name, "secretId": secret_id, "var": var}));
                 env.insert(var, value);
             }
