@@ -1,7 +1,7 @@
 //! Exports a set of secrets as dotenv lines for a process's environment.
 
 use anyhow::Result;
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 use std::fmt::Write;
@@ -145,7 +145,7 @@ pub(super) async fn run(
     }
 
     let mut plain = Zeroizing::new(String::new());
-    let mut values = serde_json::Map::new();
+    let mut values = Map::new();
     for (var, mut value) in env {
         if !plain.is_empty() {
             plain.push('\n');
@@ -204,16 +204,26 @@ mod tests {
             Some("hermes/"),
         )
         .unwrap_err();
-        assert!(error.downcast_ref::<InvalidInput>().is_some(), "{error}");
+        let InvalidInput(message) = error
+            .downcast_ref::<InvalidInput>()
+            .expect("expected InvalidInput");
+        assert_eq!(
+            message,
+            "secret hermes/not-a-var does not end in a valid environment variable name; \
+             expected <prefix>/<VAR>"
+        );
         let error = select(
             vec![secret("a/TOKEN", &[]), secret("b/TOKEN", &[])],
             &none,
             None,
         )
         .unwrap_err();
-        assert!(
-            error.to_string().contains("both map to variable TOKEN"),
-            "{error}"
+        let InvalidInput(message) = error
+            .downcast_ref::<InvalidInput>()
+            .expect("expected InvalidInput");
+        assert_eq!(
+            message,
+            "secrets a/TOKEN and b/TOKEN both map to variable TOKEN; narrow the selection"
         );
     }
 

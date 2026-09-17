@@ -1,5 +1,5 @@
 use crate::{
-    auth::{KeyCurve, StoredApiKey, secure_create, state_dir},
+    auth::{KeyCurve, StoredApiKey, api_keys_dir, secure_create},
     operations::OperationOutput,
     sessions::CompressedPublicKey,
 };
@@ -49,7 +49,7 @@ pub(crate) async fn generate(output: Option<PathBuf>) -> Result<GeneratedApiKey>
     let path = match output {
         Some(path) => path,
         None => {
-            let dir = state_dir()?.join("api-keys");
+            let dir = api_keys_dir()?;
             fs::create_dir_all(&dir)
                 .await
                 .with_context(|| format!("create {}", dir.display()))?;

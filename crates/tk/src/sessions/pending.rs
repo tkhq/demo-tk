@@ -21,7 +21,6 @@ pub(crate) struct PendingSession {
     pub(crate) organization_id: Uuid,
     pub(crate) public_key: CompressedPublicKey,
     pub(crate) key_file: PathBuf,
-    pub(crate) requested_at_unix_ms: u64,
 }
 
 impl PendingSession {
@@ -29,7 +28,7 @@ impl PendingSession {
         state.join("sessions/pending")
     }
 
-    pub(crate) fn path(state: &Path, profile: &str) -> PathBuf {
+    fn path(state: &Path, profile: &str) -> PathBuf {
         Self::dir(state).join(format!("{profile}.json"))
     }
 
@@ -99,7 +98,6 @@ mod tests {
             organization_id: Uuid::nil(),
             public_key: parse_public_key(key).unwrap(),
             key_file: PathBuf::from("/keys/02ab.json"),
-            requested_at_unix_ms: 1_700_000_000_000,
         }
     }
 
@@ -139,6 +137,15 @@ mod tests {
         fs::create_dir_all(PendingSession::dir(dir.path())).unwrap();
         fs::write(&path, b"{").unwrap();
         let error = PendingSession::load(dir.path(), "agent").await.unwrap_err();
-        assert!(error.downcast_ref::<Malformed>().is_some(), "{error}");
+        let malformed = error
+            .downcast_ref::<Malformed>()
+            .expect("the error should be Malformed");
+        assert_eq!(
+            malformed.to_string(),
+            format!(
+                "pending session state {} is malformed; delete it to start over",
+                path.display()
+            )
+        );
     }
 }

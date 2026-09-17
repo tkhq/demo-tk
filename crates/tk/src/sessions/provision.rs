@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use std::fmt::{self, Display, Formatter};
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 use turnkey_client::generated::{
+    external::data::v1::ApiKey,
     immutable::{
         activity::v1::{ApiKeyParamsV2, CreateApiKeysIntentV2},
         common::v1::ApiKeyCurve,
@@ -110,16 +111,24 @@ pub(super) async fn run(auth: ResolvedAuth, args: ProvisionArgs) -> Result<Opera
             .as_ref()
             .is_some_and(|credential| public_key.matches(&credential.public_key))
     }) {
+        let ApiKey {
+            credential: _,
+            api_key_id,
+            api_key_name,
+            created_at,
+            updated_at: _,
+            expiration_seconds,
+        } = key;
         return Ok(OperationOutput::result(
             COMMAND,
             json!({
                 "userId": user_id,
-                "expiresIn": key.expiration_seconds.map(format_duration),
-                "expirationSeconds": key.expiration_seconds.map(|seconds| seconds.to_string()),
+                "expiresIn": expiration_seconds.map(format_duration),
+                "expirationSeconds": expiration_seconds.map(|seconds| seconds.to_string()),
                 "publicKey": public_key,
-                "apiKeyId": key.api_key_id,
-                "apiKeyName": key.api_key_name,
-                "createdAt": key.created_at.map(|at| at.seconds),
+                "apiKeyId": api_key_id,
+                "apiKeyName": api_key_name,
+                "createdAt": created_at.map(|at| at.seconds),
                 "alreadyRegistered": true,
             }),
         ));

@@ -97,7 +97,7 @@ pub enum ApiKeyCommand {
 /// The `--input-json`/`--input-file` flag pair shared by every command that
 /// accepts a parameters object; requiredness is imposed by each parent's group.
 #[derive(Debug, Args)]
-pub struct Body {
+struct Body {
     /// Inline JSON parameters (no activity envelope).
     #[arg(long)]
     input_json: Option<String>,

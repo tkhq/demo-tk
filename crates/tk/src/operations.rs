@@ -654,11 +654,15 @@ pub(crate) async fn query_decoded<T: Serialize, R: DeserializeOwned>(
     api_base_url: &ApiBaseUrl,
     stamper: &TurnkeyP256ApiKey,
 ) -> Result<R> {
-    let response = query(
-        &format!("/public/v1/query/{endpoint}"),
-        request,
-        api_base_url,
+    let response = post(
+        &client()?,
+        url(
+            api_base_url.as_str(),
+            &format!("/public/v1/query/{endpoint}"),
+        )?,
+        encode(request)?,
         stamper,
+        false,
     )
     .await?;
     from_value(response).map_err(|error| {
@@ -669,22 +673,6 @@ pub(crate) async fn query_decoded<T: Serialize, R: DeserializeOwned>(
         .with_source(error)
         .into()
     })
-}
-
-pub(crate) async fn query<T: Serialize>(
-    path: &str,
-    request: &T,
-    api_base_url: &ApiBaseUrl,
-    stamper: &TurnkeyP256ApiKey,
-) -> Result<Value> {
-    post(
-        &client()?,
-        url(api_base_url.as_str(), path)?,
-        encode(request)?,
-        stamper,
-        false,
-    )
-    .await
 }
 
 #[cfg(test)]

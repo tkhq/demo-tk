@@ -13,7 +13,7 @@ use crate::auth::{
 };
 use crate::errors::InvalidInput;
 use crate::keygen::{GeneratedApiKey, generate};
-use crate::operations::{OperationOutput, now_unix_ms};
+use crate::operations::OperationOutput;
 
 const COMMAND: &str = "session.request";
 
@@ -50,7 +50,6 @@ pub(super) async fn run(name: String, replace: bool) -> Result<OperationOutput> 
             organization_id: profile.organization_id,
             public_key,
             key_file,
-            requested_at_unix_ms: now_unix_ms()?,
         };
         if let Err(error) = pending.create(&state).await {
             if matches!(

@@ -5,6 +5,7 @@ use clap::Args;
 use serde_json::json;
 use turnkey_client::generated::{
     GetWhoamiRequest,
+    external::data::v1::ApiKey,
     services::coordinator::public::v1::{GetApiKeysRequest, GetApiKeysResponse},
 };
 
@@ -62,15 +63,23 @@ pub(super) async fn run(args: StatusArgs) -> Result<OperationOutput> {
         .ok_or_else(|| MissingResource::new("api key", public_key.to_string()))?;
     let now_ms = now_unix_ms()?;
     let expiry = expires_at(&key)?.map(|at| (at, at.saturating_sub(now_ms) / 1000));
+    let ApiKey {
+        credential: _,
+        api_key_id,
+        api_key_name,
+        created_at,
+        updated_at: _,
+        expiration_seconds,
+    } = key;
 
     let data = json!({
         "profile": name,
         "userId": identity.user_id,
         "publicKey": public_key,
-        "apiKeyId": key.api_key_id,
-        "apiKeyName": key.api_key_name,
-        "createdAt": key.created_at.map(|created| created.seconds),
-        "expirationSeconds": key.expiration_seconds.map(|seconds| seconds.to_string()),
+        "apiKeyId": api_key_id,
+        "apiKeyName": api_key_name,
+        "createdAt": created_at.map(|created| created.seconds),
+        "expirationSeconds": expiration_seconds.map(|seconds| seconds.to_string()),
         "expiresAt": expiry.map(|(at, _)| at.to_string()),
         "secondsLeft": expiry.map(|(_, left)| left),
         "expiresIn": expiry.map(|(_, left)| format_duration(left)),

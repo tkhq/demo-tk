@@ -1,5 +1,5 @@
 use crate::run::{Run, result};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::fs;
 
 #[test]
@@ -17,7 +17,10 @@ fn session_request_generates_a_pending_credential() {
     assert!(public_key.starts_with("02") || public_key.starts_with("03"));
     assert_eq!(public_key.len(), 66);
     assert_eq!(requested["data"]["organizationId"], run.org());
-    assert!(requested["data"]["userId"].is_string(), "{requested}");
+    assert_eq!(
+        requested["data"]["userId"], admin.record["data"]["identity"]["userId"],
+        "{requested}"
+    );
     assert_eq!(requested["data"]["curve"], "p256");
     let key_file = requested["data"]["keyFile"].as_str().unwrap().to_string();
     assert!(
@@ -113,7 +116,10 @@ fn session_provision_registers_an_expiring_key_once() {
     assert_eq!(again["data"]["apiKeyName"], "first-session");
     assert_eq!(again["data"]["expirationSeconds"], "7200");
     assert_eq!(again["data"]["expiresIn"], "2h");
-    assert!(again["data"]["apiKeyId"].is_string(), "{again}");
+    assert_eq!(
+        again["data"]["apiKeyId"], provisioned["data"]["apiKeyId"],
+        "{again}"
+    );
     assert!(again.get("activity").is_none(), "{again}");
 
     let listed = run.ok(run
@@ -150,8 +156,7 @@ fn session_loop_rotates_an_agent_profile_and_reports_status() {
         .args(["api-key", "generate", "--output"])
         .arg(&first_key_file));
     let first_public = generated["data"]["publicKey"].as_str().unwrap().to_string();
-    let stored: serde_json::Value =
-        serde_json::from_slice(&fs::read(&first_key_file).unwrap()).unwrap();
+    let stored: Value = serde_json::from_slice(&fs::read(&first_key_file).unwrap()).unwrap();
     run.secrets
         .borrow_mut()
         .push(stored["private_key"].as_str().unwrap().to_string());

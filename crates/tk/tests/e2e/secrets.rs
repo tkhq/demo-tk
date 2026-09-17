@@ -409,24 +409,7 @@ fn secret_env_exports_matching_secrets_as_dotenv() {
         "secret.import",
     );
 
-    let human = run.human_stdout(run.admin().args([
-        "secret",
-        "env",
-        "--name-prefix",
-        &format!("{prefix}/"),
-        "--property",
-        "consensus=unilateral",
-        "--message-format",
-        "human",
-    ]));
-    assert_eq!(
-        human,
-        r#"API_TOKEN=tok-1
-DB_URL='postgres://u:p@h/db?x=1 y'
-"#
-    );
-
-    let record = run.ok(run.admin().args([
+    let record = run.env(run.admin().args([
         "secret",
         "env",
         "--name-prefix",
@@ -449,10 +432,30 @@ DB_URL='postgres://u:p@h/db?x=1 y'
         .collect();
     assert_eq!(exported, ["API_TOKEN", "DB_URL"]);
 
+    // Human mode prints only the dotenv lines; a still-pending export exits
+    // non-zero, which human_stdout retries, resuming the saved activity.
+    let human = run.human_stdout(run.admin().args([
+        "secret",
+        "env",
+        "--name-prefix",
+        &format!("{prefix}/"),
+        "--property",
+        "consensus=unilateral",
+        "--message-format",
+        "human",
+    ]));
+    assert_eq!(
+        human,
+        r#"API_TOKEN=tok-1
+DB_URL='postgres://u:p@h/db?x=1 y'
+"#
+    );
+
     // Without the property filter the approval secret is included too.
-    let all = run.ok(run
-        .admin()
-        .args(["secret", "env", "--name-prefix", &format!("{prefix}/")]));
+    let all = run.env(
+        run.admin()
+            .args(["secret", "env", "--name-prefix", &format!("{prefix}/")]),
+    );
     assert_eq!(all["data"]["env"]["OTHER"], "nope");
 
     let nothing =

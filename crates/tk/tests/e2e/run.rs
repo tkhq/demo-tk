@@ -396,6 +396,39 @@ impl Run {
         panic!("secret.export did not deliver within {ATTEMPTS} attempts")
     }
 
+    /// Runs `secret env` until every export delivers, waiting on pending
+    /// approvals and retrying transient activity failures.
+    pub(crate) fn env(&self, cmd: &mut Command) -> Value {
+        for attempt in 1..=ATTEMPTS {
+            let (exit, record, stdout) = self.attempt(cmd);
+            if exit != Some(0) {
+                if record["code"] == "approval_required" {
+                    let pending = record["details"]["pending"]
+                        .as_array()
+                        .unwrap_or_else(|| panic!("secret.env pending list missing: {record}"));
+                    for entry in pending {
+                        self.wait(entry["activityId"].as_str().unwrap());
+                    }
+                    continue;
+                }
+                if activity_failed(&record) && attempt < ATTEMPTS {
+                    eprintln!(
+                        "secret.env failed server-side, attempt {attempt}/{ATTEMPTS}: {record}"
+                    );
+                    backoff(attempt);
+                    continue;
+                }
+                panic!("secret.env failed\nstdout: {stdout}");
+            }
+            assert_eq!(record["command"], "secret.env", "{record}");
+            match record["status"].as_str() {
+                Some("completed") => return record,
+                other => panic!("unexpected secret.env status {other:?}: {record}"),
+            }
+        }
+        panic!("secret.env did not deliver within {ATTEMPTS} attempts")
+    }
+
     /// Submits a raw activity request as `bundle` and returns its completed
     /// record. The timestamp lives in the body, so the body is rebuilt on
     /// every attempt: the API folds a byte-identical request back into the
