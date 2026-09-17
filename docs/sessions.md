@@ -4,31 +4,35 @@ A session key is a Turnkey API key with an expiration. `tk session` splits its
 lifecycle so that the private key never leaves the machine that uses it and the
 identity allowed to register keys never sees it.
 
+```mermaid
+sequenceDiagram
+    participant Agent as agent host
+    participant Provisioner as provisioner host
+    participant Approver as human approver
+    participant Turnkey
+
+    Agent->>Agent: tk session request --profile-name agent
+    Note over Agent: new keypair under ~/.config/turnkey/tk/api-keys/<br/>private key never leaves this host
+    Agent->>Provisioner: public key + user id (any transport)
+    Provisioner->>Turnkey: tk --profile provisioner session provision<br/>--user-id U --public-key PK --expires-in 7d
+    Turnkey-->>Provisioner: status pending, activity id
+    Approver->>Turnkey: approves the activity
+    Provisioner->>Turnkey: same provision command again
+    Turnkey-->>Provisioner: completed, apiKeyId
+    Agent->>Turnkey: tk session activate --profile-name agent (whoami with the new key)
+    Note over Agent: profile repointed at the new key,<br/>old generated key file removed
+    Agent->>Turnkey: tk session status --profile-name agent
+    Turnkey-->>Agent: expiresAt, secondsLeft; exit 1 with code session_expiring<br/>when under --warn-before (default 48h)
 ```
-agent host                                provisioner host              human
-----------                                ----------------              -----
-tk session request --profile-name agent
-  -> new keypair under ~/.config/turnkey/tk/api-keys/
-  -> prints publicKey and userId
-                     ---- public key + user id (any transport) ---->
-                                          tk --profile provisioner \
-                                            session provision --user-id U \
-                                            --public-key PK --expires-in 7d
-                                          -> status pending, activity id
-                                                                       approves
-                                          same command again
-                                          -> completed, apiKeyId
-                     <---- done ----
-tk session activate --profile-name agent
-  -> profile now uses the new key; old generated key file removed
-tk session status --profile-name agent
-  -> expiresAt, secondsLeft; exit 1 with code session_expiring
-     when under --warn-before (default 48h)
-```
+
+Only the public key and user id cross from the agent to the provisioner; the
+provisioner registers the expiring key and never sees the private half; the
+approver signs off on the registration activity; the profile switch happens
+entirely on the agent host.
 
 ## Request
 
-```sh
+```bash
 tk session request --profile-name agent
 tk session request --profile-name agent --replace   # drop an unregistered request
 ```
@@ -41,7 +45,7 @@ then.
 
 ## Provision
 
-```sh
+```bash
 tk --profile provisioner session provision --user-id USER_UUID --public-key PK --expires-in 7d
 ```
 
@@ -55,7 +59,7 @@ Durations take `s`, `m`, `h`, or `d` suffixes, from `1s` to `365d`.
 
 ## Activate
 
-```sh
+```bash
 tk session activate --profile-name agent
 ```
 
@@ -66,7 +70,7 @@ unchanged. A previous key file is deleted only if `tk` generated it under
 
 ## Status
 
-```sh
+```bash
 tk session status --profile-name agent
 tk session status --profile-name agent --warn-before 24h
 ```

@@ -31,7 +31,7 @@ tk secret export --name api-token --message-format json | jq -r .data.value
 Secrets are immutable and names are unique, so rotating a value is a delete
 followed by an import under the same name:
 
-```sh
+```bash
 tk secret delete --name api-token
 echo -n "$NEW_API_TOKEN" | tk secret import api-token --property env=prod
 ```
@@ -46,7 +46,7 @@ replacement, since the name is taken until the deletion completes.
 properties, and prints one dotenv line per secret. The variable name is the
 part of the secret name after the last `/`.
 
-```sh
+```bash
 tk secret import hermes/ANTHROPIC_API_KEY --property consensus=unilateral
 tk secret import hermes/GITHUB_TOKEN --property consensus=unilateral
 tk --profile hermes secret env --name-prefix hermes/ --property consensus=unilateral

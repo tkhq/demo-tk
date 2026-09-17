@@ -26,6 +26,21 @@ tk user tag update --input-file ./tag-update.json
 tk user tag delete TAG_ID
 ```
 
+The common single-resource cases also take flags instead of a JSON body:
+
+```bash
+tk user tag create --name agents
+tk user create --user-name agent --tag-name agents --public-key 02… --expires-in 7d --anchor-key
+```
+
+`--tag-name` is resolved against the organization's tags before submission and
+must match exactly one; `--tag` takes a tag ID directly. `--expires-in` gives
+the API key a lifetime, for example `7d`; omit it for a key that never
+expires. Turnkey requires every user to hold one long-lived credential, so a
+user meant to live on expiring keys needs `--anchor-key`: it registers a
+never-expiring key whose private half is generated locally and discarded, so
+nothing can use it.
+
 ## Policies
 
 ```bash
@@ -47,6 +62,17 @@ tk policy delete POLICY_ID
 # See how policies evaluated an activity.
 tk policy evaluations ACTIVITY_ID
 ```
+
+A single policy also takes flags instead of a JSON body:
+
+```bash
+tk policy create --name agents-export --effect allow \
+  --consensus "approvers.any(user, user.tags.contains('TAG_ID'))" \
+  --condition "activity.type == 'ACTIVITY_TYPE_EXPORT_SECRETS'"
+```
+
+`--effect` takes `allow` or `deny`; `--notes` stores free-text notes with the
+policy.
 
 Updates use `policyEffect`, `policyCondition`, `policyConsensus`, and
 `policyNotes`.
