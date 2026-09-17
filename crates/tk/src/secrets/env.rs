@@ -3,12 +3,11 @@
 use anyhow::Result;
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use turnkey_client::generated::SecretMetadata;
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use super::SecretOutput;
-use super::export::{Exported, export_value, list_all};
+use super::export::{Exported, Secret, export_value, list_all};
 use super::input::{UniqueKeyValues, quorum_for};
 use crate::auth::{ResolvedAuth, state_dir};
 use crate::errors::{InvalidInput, PendingApprovals};
@@ -25,7 +24,7 @@ struct Selected {
 }
 
 fn select(
-    secrets: Vec<SecretMetadata>,
+    secrets: Vec<Secret>,
     properties: &BTreeMap<String, String>,
     name_prefix: Option<&str>,
 ) -> Result<Vec<Selected>> {
@@ -69,7 +68,7 @@ fn select(
         }
         selected.push(Selected {
             name,
-            secret_id: Uuid::parse_str(&secret.secret_id)?,
+            secret_id: secret.id,
             var,
         });
     }
@@ -179,9 +178,9 @@ mod tests {
     use super::*;
     use turnkey_client::generated::immutable::models::v1::KeyValue;
 
-    fn secret(name: &str, properties: &[(&str, &str)]) -> SecretMetadata {
-        SecretMetadata {
-            secret_id: Uuid::new_v4().to_string(),
+    fn secret(name: &str, properties: &[(&str, &str)]) -> Secret {
+        Secret {
+            id: Uuid::new_v4(),
             name: Some(name.into()),
             static_properties: properties
                 .iter()
@@ -190,7 +189,6 @@ mod tests {
                     value: (*value).into(),
                 })
                 .collect(),
-            created_at_unix_ms: 0,
         }
     }
 

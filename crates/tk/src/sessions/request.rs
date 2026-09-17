@@ -2,7 +2,6 @@
 
 use anyhow::{Context, Error, Result};
 use serde_json::json;
-use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::fs;
 use tracing::debug;
 use turnkey_client::generated::GetWhoamiRequest;
@@ -14,7 +13,7 @@ use crate::auth::{
 };
 use crate::errors::InvalidInput;
 use crate::keygen::{GeneratedApiKey, generate};
-use crate::operations::OperationOutput;
+use crate::operations::{OperationOutput, now_unix_ms};
 
 const COMMAND: &str = "session.request";
 
@@ -41,49 +40,44 @@ pub(super) async fn run(name: String, replace: bool) -> Result<OperationOutput> 
     }
 
     let GeneratedApiKey { public_key, path } = generate(None).await?;
-    let public_key = match parse_public_key(&public_key).map_err(Error::msg) {
-        Ok(public_key) => public_key,
-        Err(error) => {
-            let _ = fs::remove_file(&path).await;
-            return Err(error.context("generated credential public key"));
+    let pending = async {
+        let public_key = parse_public_key(&public_key)
+            .map_err(Error::msg)
+            .map_err(|error| error.context("generated credential public key"))?;
+        let key_file = fs::canonicalize(&path)
+            .await
+            .context("resolve credential path")?;
+        let pending = PendingSession {
+            version: 1,
+            profile: name,
+            organization_id: profile.organization_id,
+            public_key,
+            key_file,
+            requested_at_unix_ms: now_unix_ms()?,
+        };
+        if let Err(error) = pending.create(&state).await {
+            if matches!(
+                error.downcast_ref::<SecureCreateError>(),
+                Some(SecureCreateError::Exists)
+            ) {
+                return Err(InvalidInput(format!(
+                    "a session request for profile {} is already pending; run tk session activate --profile-name {0}, or tk session request --profile-name {0} --replace to start over",
+                    pending.profile
+                ))
+                .into());
+            }
+            return Err(error);
         }
-    };
-    let key_file = match fs::canonicalize(&path)
-        .await
-        .context("resolve credential path")
-    {
-        Ok(key_file) => key_file,
+        anyhow::Ok(pending)
+    }
+    .await;
+    let pending = match pending {
+        Ok(pending) => pending,
         Err(error) => {
             let _ = fs::remove_file(&path).await;
             return Err(error);
         }
     };
-    let requested_at_unix_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0);
-    let pending = PendingSession {
-        version: 1,
-        profile: name,
-        organization_id: profile.organization_id,
-        public_key,
-        key_file,
-        requested_at_unix_ms,
-    };
-    if let Err(error) = pending.create(&state).await {
-        let _ = fs::remove_file(&pending.key_file).await;
-        if matches!(
-            error.downcast_ref::<SecureCreateError>(),
-            Some(SecureCreateError::Exists)
-        ) {
-            return Err(InvalidInput(format!(
-                "a session request for profile {} is already pending; run tk session activate --profile-name {0}, or tk session request --profile-name {0} --replace to start over",
-                pending.profile
-            ))
-            .into());
-        }
-        return Err(error);
-    }
 
     let user_id = current_user_id(&profile).await;
     let PendingSession {

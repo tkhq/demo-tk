@@ -16,7 +16,7 @@ use turnkey_client::generated::{
     external::options::v1::Pagination,
     immutable::{
         activity::v1::{ExportSecretParams, ExportSecretsIntent},
-        models::v1::TransportEncryptionSuite,
+        models::v1::{KeyValue, TransportEncryptionSuite},
     },
 };
 use turnkey_enclave_encrypt::{QuorumPublicKey, client::ExportClient};
@@ -201,8 +201,15 @@ impl PendingExport {
     }
 }
 
+/// One secret's metadata with its id parsed at the API boundary.
+pub(super) struct Secret {
+    pub(super) id: Uuid,
+    pub(super) name: Option<String>,
+    pub(super) static_properties: Vec<KeyValue>,
+}
+
 /// Every secret's metadata in the organization, across pages.
-pub(super) async fn list_all(auth: &ResolvedAuth) -> Result<Vec<SecretMetadata>> {
+pub(super) async fn list_all(auth: &ResolvedAuth) -> Result<Vec<Secret>> {
     let mut secrets = Vec::new();
     let mut after = String::new();
     loop {
@@ -225,7 +232,19 @@ pub(super) async fn list_all(auth: &ResolvedAuth) -> Result<Vec<SecretMetadata>>
             .last()
             .map(|secret| secret.secret_id.clone())
             .unwrap_or_default();
-        secrets.extend(page);
+        for secret in page {
+            let SecretMetadata {
+                secret_id,
+                name,
+                static_properties,
+                created_at_unix_ms: _,
+            } = secret;
+            secrets.push(Secret {
+                id: Uuid::parse_str(&secret_id).context("secret id from the API is not a UUID")?,
+                name,
+                static_properties,
+            });
+        }
         if !full {
             break;
         }
@@ -234,19 +253,19 @@ pub(super) async fn list_all(auth: &ResolvedAuth) -> Result<Vec<SecretMetadata>>
 }
 
 pub(super) async fn resolve_name(auth: &ResolvedAuth, name: SecretName) -> Result<Uuid> {
-    let matches: Vec<SecretMetadata> = list_all(auth)
+    let matches: Vec<Secret> = list_all(auth)
         .await?
         .into_iter()
         .filter(|secret| secret.name.as_deref() == Some(name.as_str()))
         .collect();
     match matches.as_slice() {
         [] => Err(MissingResource::new("secret", name).into()),
-        [one] => Uuid::parse_str(&one.secret_id).context("secret id from the API is not a UUID"),
+        [one] => Ok(one.id),
         many => Err(InvalidInput(format!(
             "{} secrets are named {name}; export by id instead: {}",
             many.len(),
             many.iter()
-                .map(|secret| secret.secret_id.as_str())
+                .map(|secret| secret.id.to_string())
                 .collect::<Vec<_>>()
                 .join(", ")
         ))

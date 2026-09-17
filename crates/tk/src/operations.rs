@@ -2,7 +2,6 @@ use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::io::{self, Read};
 use std::path::PathBuf;
-use std::sync::OnceLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Error, Result};
@@ -209,14 +208,9 @@ fn url(base: &str, path: &str) -> Result<Url> {
 }
 
 pub(crate) fn client() -> Result<Client> {
-    static CLIENT: OnceLock<Client> = OnceLock::new();
-    if let Some(client) = CLIENT.get() {
-        return Ok(client.clone());
-    }
-    let client = transport(Client::builder())
+    transport(Client::builder())
         .build()
-        .context("could not initialize HTTP client")?;
-    Ok(CLIENT.get_or_init(|| client).clone())
+        .context("could not initialize HTTP client")
 }
 
 async fn post(
@@ -284,12 +278,17 @@ fn encode<T: Serialize>(value: &T) -> Result<String> {
     serde_json::to_string(value).context("could not encode request")
 }
 
-fn envelope<T: Serialize>(kind: &str, organization_id: Uuid, parameters: &T) -> Result<Value> {
-    let timestamp_ms = SystemTime::now()
+/// Milliseconds since the Unix epoch, saturated to `u64::MAX` in the far
+/// future; errs when the system clock precedes the epoch.
+pub(crate) fn now_unix_ms() -> Result<u64> {
+    let elapsed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .context("system clock precedes Unix epoch")?
-        .as_millis()
-        .to_string();
+        .context("system clock precedes Unix epoch")?;
+    Ok(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+}
+
+fn envelope<T: Serialize>(kind: &str, organization_id: Uuid, parameters: &T) -> Result<Value> {
+    let timestamp_ms = now_unix_ms()?.to_string();
     Ok(json!({
         "type": kind,
         "timestampMs": timestamp_ms,

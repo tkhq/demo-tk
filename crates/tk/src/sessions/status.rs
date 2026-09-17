@@ -3,7 +3,6 @@
 use anyhow::Result;
 use clap::Args;
 use serde_json::{json, to_value};
-use std::time::{SystemTime, UNIX_EPOCH};
 use turnkey_client::generated::{
     GetWhoamiRequest,
     services::coordinator::public::v1::{GetApiKeysRequest, GetApiKeysResponse},
@@ -13,7 +12,7 @@ use super::CompressedPublicKey;
 use super::duration::ExpiresIn;
 use crate::auth::{SavedProfile, build_turnkey_client, read_key, saved_profile};
 use crate::errors::{MissingResource, SessionExpiring};
-use crate::operations::{OperationOutput, query_decoded};
+use crate::operations::{OperationOutput, now_unix_ms, query_decoded};
 use crate::resources::expires_at;
 
 const COMMAND: &str = "session.status";
@@ -63,10 +62,7 @@ pub(super) async fn run(args: StatusArgs) -> Result<OperationOutput> {
         .ok_or_else(|| MissingResource::new("api key", public_key.to_string()))?;
     let key = to_value(key)?;
     let expires_at_ms = expires_at(&key)?;
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
-        .unwrap_or(0);
+    let now_ms = now_unix_ms()?;
     let seconds_left =
         expires_at_ms.map(|expires_at_ms| expires_at_ms.saturating_sub(now_ms) / 1000);
 

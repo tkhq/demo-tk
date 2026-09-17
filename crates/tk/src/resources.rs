@@ -204,7 +204,11 @@ pub enum Query {
 }
 
 pub enum Mutation {
-    CreateUsers(intent::CreateUsersIntentV4),
+    /// `tag_names` are `--tag-name` values still needing resolution to tag ids.
+    CreateUsers {
+        params: intent::CreateUsersIntentV4,
+        tag_names: Vec<String>,
+    },
     UpdateUser(intent::UpdateUserIntent),
     DeleteUsers(intent::DeleteUsersIntent),
     CreateTag(intent::CreateUserTagIntent),
@@ -217,11 +221,6 @@ pub enum Mutation {
     DeletePolicies(intent::DeletePoliciesIntent),
     RegisterKeys(intent::CreateApiKeysIntentV2),
     DeleteKeys(intent::DeleteApiKeysIntent),
-    /// Users whose `--tag-name` values still need resolving to tag ids.
-    CreateUsersWithTagNames {
-        params: intent::CreateUsersIntentV4,
-        tag_names: Vec<String>,
-    },
 }
 
 impl BodyArgs {
@@ -351,7 +350,10 @@ impl UserCommand {
                 if params.users.is_empty() {
                     return Err(InvalidInput("users must contain at least one user".into()).into());
                 }
-                PreparedResource::Mutation(Mutation::CreateUsers(params))
+                PreparedResource::Mutation(Mutation::CreateUsers {
+                    params,
+                    tag_names: vec![],
+                })
             }
             UserCommand::Create(CreateUserArgs {
                 user_name: Some(user_name),
@@ -390,14 +392,7 @@ impl UserCommand {
                         user_tags: tags.iter().map(ToString::to_string).collect(),
                     }],
                 };
-                if tag_names.is_empty() {
-                    PreparedResource::Mutation(Mutation::CreateUsers(params))
-                } else {
-                    PreparedResource::Mutation(Mutation::CreateUsersWithTagNames {
-                        params,
-                        tag_names,
-                    })
-                }
+                PreparedResource::Mutation(Mutation::CreateUsers { params, tag_names })
             }
             UserCommand::Update(body) => {
                 PreparedResource::Mutation(Mutation::UpdateUser(body.parse()?))
@@ -581,13 +576,15 @@ impl PreparedResource {
 impl Mutation {
     async fn run(self, auth: ResolvedAuth) -> Result<OperationOutput> {
         let (command, endpoint, kind, params) = match self {
-            Self::CreateUsersWithTagNames {
+            Self::CreateUsers {
                 mut params,
                 tag_names,
             } => {
-                let tag_ids = resolve_tag_names(&auth, tag_names).await?;
-                for user in &mut params.users {
-                    user.user_tags.extend(tag_ids.iter().cloned());
+                if !tag_names.is_empty() {
+                    let tag_ids = resolve_tag_names(&auth, tag_names).await?;
+                    for user in &mut params.users {
+                        user.user_tags.extend(tag_ids.iter().cloned());
+                    }
                 }
                 (
                     "user.create",
@@ -596,12 +593,6 @@ impl Mutation {
                     to_value(params)?,
                 )
             }
-            Self::CreateUsers(p) => (
-                "user.create",
-                "create_users",
-                "ACTIVITY_TYPE_CREATE_USERS_V4",
-                to_value(p)?,
-            ),
             Self::UpdateUser(p) => (
                 "user.update",
                 "update_user",

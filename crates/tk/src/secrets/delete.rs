@@ -27,17 +27,17 @@ pub(super) async fn run(auth: ResolvedAuth, secret: SecretRef) -> Result<Operati
         },
     )
     .await?;
-    let response = submitted.into_data();
-    let activity = &response["activity"];
+    let mut response = submitted.into_data();
+    let activity = &mut response["activity"];
     Ok(OperationOutput::result(
         COMMAND,
         json!({
             "secretId": secret_id,
             "activity": {
-                "id": activity["id"],
-                "status": activity["status"],
-                "type": activity["type"],
-                "result": activity["result"],
+                "id": activity["id"].take(),
+                "status": activity["status"].take(),
+                "type": activity["type"].take(),
+                "result": activity["result"].take(),
             },
         }),
     ))

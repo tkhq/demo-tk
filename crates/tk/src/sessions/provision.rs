@@ -8,7 +8,6 @@ use serde::de::{self, Deserializer};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fmt::{self, Display, Formatter};
-use std::time::{SystemTime, UNIX_EPOCH};
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 use turnkey_client::generated::{
     immutable::{
@@ -22,7 +21,7 @@ use uuid::Uuid;
 use super::duration::ExpiresIn;
 use crate::auth::ResolvedAuth;
 use crate::errors::{ActivityError, ActivityErrorKind};
-use crate::operations::{OperationOutput, query_decoded, submit_activity};
+use crate::operations::{OperationOutput, now_unix_ms, query_decoded, submit_activity};
 
 const COMMAND: &str = "session.provision";
 
@@ -127,13 +126,10 @@ pub(super) async fn run(auth: ResolvedAuth, args: ProvisionArgs) -> Result<Opera
         ));
     }
 
-    let api_key_name = label.unwrap_or_else(|| {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_secs())
-            .unwrap_or(0);
-        format!("session-{expires_in}-{now}")
-    });
+    let api_key_name = match label {
+        Some(label) => label,
+        None => format!("session-{expires_in}-{}", now_unix_ms()? / 1000),
+    };
     let submitted = submit_activity(
         &auth,
         COMMAND,
