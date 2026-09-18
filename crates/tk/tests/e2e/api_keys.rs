@@ -1,6 +1,5 @@
 use crate::run::{Run, result};
 use serde_json::{Value, json};
-use std::fs;
 
 #[test]
 #[ignore]
@@ -9,15 +8,10 @@ fn registered_api_key_is_listed_for_its_user_and_gone_after_delete() {
     let (user_id, _) = run.create_user("user-keys");
 
     let key_path = run.home.path().join("registered.json");
-    let generated = run.ok(run
-        .cli()
-        .args(["api-key", "generate", "--output"])
-        .arg(&key_path));
-    let public_key = generated["data"]["publicKey"].as_str().unwrap().to_string();
-    let stored: Value = serde_json::from_slice(&fs::read(&key_path).unwrap()).unwrap();
-    run.secrets
-        .borrow_mut()
-        .push(stored["private_key"].as_str().unwrap().to_string());
+    let public_key = run.generate_key(&key_path)["data"]["publicKey"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let key_name = run.name("key");
     let registered = run.submit(
@@ -51,6 +45,7 @@ fn registered_api_key_is_listed_for_its_user_and_gone_after_delete() {
         .unwrap_or_else(|| panic!("registered key missing from list: {listed}"));
     assert_eq!(ours["apiKeyName"], key_name);
     assert_eq!(ours["credential"]["publicKey"], public_key);
+    assert_eq!(ours["expiresAt"], Value::Null, "{ours}");
 
     let deleted = run.submit(
         run.admin()

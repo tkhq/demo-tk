@@ -4,7 +4,7 @@
 use anyhow::{Context, Error, Result};
 use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, from_slice, from_value, json, to_value, to_vec};
+use serde_json::{Value, from_slice, json, to_value, to_vec};
 use std::fmt::Display;
 use std::io::ErrorKind;
 use std::mem::take;
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 use tracing::warn;
 use turnkey_client::generated::{
-    ListSecretsRequest, ListSecretsResponse,
+    ListSecretsRequest, ListSecretsResponse, SecretMetadata,
     external::options::v1::Pagination,
     immutable::{
         activity::v1::{ExportSecretParams, ExportSecretsIntent},
@@ -29,9 +29,7 @@ use crate::auth::{
     ResolvedAuth, SecureCreateError, build_turnkey_client, secure_create, state_dir,
 };
 use crate::errors::{ActivityError, ActivityErrorKind, InvalidInput, Malformed, MissingResource};
-use crate::operations::{
-    OperationOutput, client, observed, query, query_activity, submit_activity,
-};
+use crate::operations::{OperationOutput, observed, query, query_activity, submit_activity};
 
 const COMMAND: &str = "secret.export";
 const NEXT_STEP: &str = "After approval, run the same export command again.";
@@ -73,19 +71,27 @@ pub(super) async fn list(
 }
 
 /// Identifies the credential and endpoint that own a pending export.
-struct Binding {
+#[derive(Clone)]
+pub(super) struct Binding {
     organization_id: Uuid,
     api_base_url: String,
     api_public_key: String,
 }
 
 impl Binding {
-    fn of(auth: &ResolvedAuth) -> Self {
+    pub(super) fn of(auth: &ResolvedAuth) -> Self {
         Self {
             organization_id: auth.org_id,
             api_base_url: auth.api_base_url.as_str().trim_end_matches('/').to_owned(),
             api_public_key: hex::encode(auth.stamper.compressed_public_key()),
         }
+    }
+
+    pub(super) fn pending_dir(&self, state: &Path) -> PathBuf {
+        state
+            .join("secrets/pending")
+            .join(self.organization_id.to_string())
+            .join(&self.api_public_key)
     }
 }
 
@@ -103,12 +109,8 @@ struct PendingExport {
 }
 
 impl PendingExport {
-    fn path(state: &Path, binding: &Binding, secret_id: Uuid) -> PathBuf {
-        state
-            .join("secrets/pending")
-            .join(binding.organization_id.to_string())
-            .join(&binding.api_public_key)
-            .join(format!("{secret_id}.json"))
+    fn path(dir: &Path, secret_id: Uuid) -> PathBuf {
+        dir.join(format!("{secret_id}.json"))
     }
 
     async fn load(path: &Path, binding: &Binding) -> Result<Option<Self>> {
@@ -201,11 +203,14 @@ impl PendingExport {
     }
 }
 
-async fn resolve_name(auth: &ResolvedAuth, name: SecretName) -> Result<Uuid> {
-    let mut matches = Vec::new();
+pub(super) async fn list_all(
+    auth: &ResolvedAuth,
+    mut keep: impl FnMut(&SecretMetadata) -> bool,
+) -> Result<Vec<SecretMetadata>> {
+    let mut secrets = Vec::new();
     let mut after = String::new();
     loop {
-        let response = query(
+        let ListSecretsResponse { secrets: page } = query(
             "/public/v1/query/list_secrets",
             &ListSecretsRequest {
                 organization_id: auth.org_id.to_string(),
@@ -215,30 +220,24 @@ async fn resolve_name(auth: &ResolvedAuth, name: SecretName) -> Result<Uuid> {
                     after: take(&mut after),
                 }),
             },
-            &auth.api_base_url,
-            &auth.stamper,
+            auth,
         )
         .await?;
-        let ListSecretsResponse { secrets: page } = from_value(response).map_err(|error| {
-            ActivityError::new(
-                ActivityErrorKind::MalformedResponse,
-                "list_secrets response was malformed",
-            )
-            .with_source(error)
-        })?;
         let full = page.len() == 100;
         after = page
             .last()
             .map(|secret| secret.secret_id.clone())
             .unwrap_or_default();
-        matches.extend(
-            page.into_iter()
-                .filter(|secret| secret.name.as_deref() == Some(name.as_str())),
-        );
+        secrets.extend(page.into_iter().filter(&mut keep));
         if !full {
             break;
         }
     }
+    Ok(secrets)
+}
+
+pub(super) async fn resolve_name(auth: &ResolvedAuth, name: SecretName) -> Result<Uuid> {
+    let matches = list_all(auth, |secret| secret.name.as_deref() == Some(name.as_str())).await?;
     match matches.as_slice() {
         [] => Err(MissingResource::new("secret", name).into()),
         [one] => Uuid::parse_str(&one.secret_id).context("secret id from the API is not a UUID"),
@@ -254,7 +253,7 @@ async fn resolve_name(auth: &ResolvedAuth, name: SecretName) -> Result<Uuid> {
     }
 }
 
-async fn remove(path: &Path) -> Result<()> {
+pub(super) async fn remove(path: &Path) -> Result<()> {
     match fs::remove_file(path).await {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
@@ -270,26 +269,49 @@ pub(super) async fn run(
 ) -> Result<SecretOutput> {
     let quorum = quorum_for(auth.api_base_url.as_str())?;
     let state_dir = state_dir()?;
-    export(&state_dir, quorum, auth, secret, out, context).await
-}
-
-async fn export(
-    state_dir: &Path,
-    quorum: QuorumPublicKey,
-    auth: ResolvedAuth,
-    secret: SecretRef,
-    out: Option<PathBuf>,
-    context: UniqueKeyValues,
-) -> Result<SecretOutput> {
-    let binding = Binding::of(&auth);
     let secret_id = match secret {
         SecretRef::Id(id) => id,
         SecretRef::Name(name) => resolve_name(&auth, name).await?,
     };
-    let path = PendingExport::path(state_dir, &binding, secret_id);
+    let binding = Binding::of(&auth);
+    let pending_dir = binding.pending_dir(&state_dir);
+    match export_value(&pending_dir, &quorum, binding, &auth, secret_id, context).await? {
+        Exported::Decrypted {
+            record,
+            value,
+            consumed,
+        } => {
+            let delivered = deliver(record, value, out).await?;
+            if let Some(path) = consumed {
+                remove(&path).await?;
+            }
+            Ok(delivered)
+        }
+        Exported::Pending(record) => Ok(record.into()),
+    }
+}
+
+pub(super) enum Exported {
+    Pending(OperationOutput),
+    Decrypted {
+        record: OperationOutput,
+        value: Zeroizing<String>,
+        consumed: Option<PathBuf>,
+    },
+}
+
+pub(super) async fn export_value(
+    pending_dir: &Path,
+    quorum: &QuorumPublicKey,
+    binding: Binding,
+    auth: &ResolvedAuth,
+    secret_id: Uuid,
+    context: UniqueKeyValues,
+) -> Result<Exported> {
+    let path = PendingExport::path(pending_dir, secret_id);
 
     if let Some(state) = PendingExport::load(&path, &binding).await? {
-        let fetched = query_activity(&client()?, &auth, &state.activity_id).await?;
+        let fetched = query_activity(auth, &state.activity_id).await?;
         let record = match observed(COMMAND, export_data(secret_id, fetched)) {
             Ok(record) => record,
             Err(error) => {
@@ -300,26 +322,28 @@ async fn export(
             }
         };
         if record.is_pending() {
-            return Ok(pending(record));
+            return Ok(Exported::Pending(pending(record)));
         }
-        let recipient = state.recipient(&path, &quorum)?;
+        let recipient = state.recipient(&path, quorum)?;
         let value = decrypt(recipient, &record, auth.org_id).with_context(|| {
             format!(
                 "decrypt the completed export; delete {} to start a new export",
                 path.display()
             )
         })?;
-        let delivered = deliver(record, value, out).await?;
-        remove(&path).await?;
-        return Ok(delivered);
+        return Ok(Exported::Decrypted {
+            record,
+            value,
+            consumed: Some(path),
+        });
     }
 
     let mut ikm = Zeroizing::new([0u8; 32]);
     OsRng.fill_bytes(&mut *ikm);
-    let recipient = ExportClient::dangerous_from_bytes(*ikm, &quorum);
+    let recipient = ExportClient::dangerous_from_bytes(*ikm, quorum);
     let target_public_key = recipient.target_public_key()?;
     let submitted = submit_activity(
-        &auth,
+        auth,
         COMMAND,
         "export_secrets",
         "ACTIVITY_TYPE_EXPORT_SECRETS",
@@ -344,16 +368,11 @@ async fn export(
                     "pending export has no activity id",
                 )
             })?;
-        let Binding {
-            organization_id,
-            api_base_url,
-            api_public_key,
-        } = binding;
         let state = PendingExport {
             version: 1,
-            organization_id,
-            api_base_url,
-            api_public_key,
+            organization_id: binding.organization_id,
+            api_base_url: binding.api_base_url,
+            api_public_key: binding.api_public_key,
             secret_id,
             target_public_key,
             key_material: Zeroizing::new(hex::encode(ikm.as_slice())),
@@ -365,17 +384,21 @@ async fn export(
                 state.activity_id
             )
         })?;
-        return Ok(pending(record));
+        return Ok(Exported::Pending(pending(record)));
     }
     let value = decrypt(recipient, &record, auth.org_id)?;
-    deliver(record, value, out).await
+    Ok(Exported::Decrypted {
+        record,
+        value,
+        consumed: None,
+    })
 }
 
-fn pending(record: OperationOutput) -> SecretOutput {
+fn pending(record: OperationOutput) -> OperationOutput {
     let mut data = record.into_data();
     strip_result(&mut data);
     data["nextStep"] = NEXT_STEP.into();
-    OperationOutput::result(COMMAND, data).into()
+    OperationOutput::result(COMMAND, data)
 }
 
 fn decrypt(

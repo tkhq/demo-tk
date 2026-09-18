@@ -7,6 +7,7 @@ use crate::operations::{ActivityCommand, RequestArgs, run_activity};
 use crate::output::{ColorChoice, Ctx, ErrorMessage, MessageFormat, Shell, StdCtx};
 use crate::resources::{ApiKeyCommand, PolicyCommand, PreparedResource, UserCommand};
 use crate::secrets::{PreparedSecret, SecretCommand};
+use crate::sessions::{self, SessionCommand};
 use crate::ssh::{self, SshCommand};
 use crate::wallets::{PreparedWalletCommand, SignCommand, WalletCommand};
 use anyhow::Result;
@@ -55,6 +56,8 @@ Output format:
                                 be observed; inspect before resubmitting
         wait_timeout            activity wait ran out of time; resume with the
                                 same ID
+        session_expiring        the profile's credential ends within the
+                                --warn-before window; request a new session
         command_error           fallback for everything else
     Exit codes: 0 success, 1 runtime error, 2 usage error."#;
 
@@ -133,11 +136,14 @@ impl Cli {
         );
         match command {
             Commands::Profile {
-                command: ProfileCommand::Saved(SavedProfileCommand::Set { .. }),
+                command:
+                    ProfileCommand::Saved(SavedProfileCommand::Set {
+                        api_key_file: None, ..
+                    }),
             } if auth.organization_id().is_none() && auth.api_base_url().is_none() => {
                 handle_parse_error(Cli::command().error(
                     ErrorKind::MissingRequiredArgument,
-                    "profile set requires --organization-id or --api-base-url",
+                    "profile set requires --organization-id, --api-base-url, or --api-key-file",
                 ))
             }
             Commands::Profile {
@@ -225,6 +231,7 @@ async fn run_operation(
             .await;
             return emit(&mut ctx, result);
         }
+        Operation::Session { command } => sessions::run(command, options).await,
         Operation::Login(login) => auth::run_auth(AuthCommand::Login(login), options).await,
         Operation::Whoami => auth::run_auth(AuthCommand::Whoami, options).await,
         Operation::Auth { command } => auth::run_auth(command, options).await,
@@ -358,6 +365,11 @@ enum Operation {
         #[command(subcommand)]
         command: SecretCommand,
     },
+    /// Short-lived credentials for agent profiles.
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
     /// Create PGP keys as wallet accounts, register them, export them, and sign with them.
     Gpg {
         #[command(subcommand)]
@@ -403,6 +415,7 @@ impl Operation {
             Operation::Wallet { .. } => "wallet",
             Operation::Sign { .. } => "sign",
             Operation::Secret { .. } => "secret",
+            Operation::Session { .. } => "session",
             Operation::Gpg { .. } => "gpg",
             Operation::Login(_) => "login",
             Operation::Whoami => "whoami",

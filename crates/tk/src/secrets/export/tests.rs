@@ -23,13 +23,14 @@ async fn a_submission_that_fails_leaves_no_recipient_key_on_disk() {
         .await;
     let (dir, auth, secret_id) = fixture(&server);
     let binding = Binding::of(&auth);
+    let pending_dir = binding.pending_dir(dir.path());
 
-    let error = export(
-        dir.path(),
-        QuorumPublicKey::production_signer(),
-        auth,
-        SecretRef::Id(secret_id),
-        None,
+    let error = export_value(
+        &pending_dir,
+        &QuorumPublicKey::production_signer(),
+        binding,
+        &auth,
+        secret_id,
         UniqueKeyValues::parse(vec![], "--context").unwrap(),
     )
     .await
@@ -37,7 +38,7 @@ async fn a_submission_that_fails_leaves_no_recipient_key_on_disk() {
     .expect("export should have failed");
 
     assert_eq!(classify(&error).code, ErrorCode::ApiError);
-    assert!(!PendingExport::path(dir.path(), &binding, secret_id).exists());
+    assert!(!PendingExport::path(&pending_dir, secret_id).exists());
 }
 
 #[tokio::test]
@@ -45,7 +46,8 @@ async fn state_written_against_another_endpoint_is_refused() {
     let server = MockServer::start().await;
     let (dir, auth, secret_id) = fixture(&server);
     let binding = Binding::of(&auth);
-    let path = PendingExport::path(dir.path(), &binding, secret_id);
+    let pending_dir = binding.pending_dir(dir.path());
+    let path = PendingExport::path(&pending_dir, secret_id);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(
         &path,
@@ -63,12 +65,12 @@ async fn state_written_against_another_endpoint_is_refused() {
     )
     .unwrap();
 
-    let error = export(
-        dir.path(),
-        QuorumPublicKey::production_signer(),
-        auth,
-        SecretRef::Id(secret_id),
-        None,
+    let error = export_value(
+        &pending_dir,
+        &QuorumPublicKey::production_signer(),
+        binding,
+        &auth,
+        secret_id,
         UniqueKeyValues::parse(vec![], "--context").unwrap(),
     )
     .await

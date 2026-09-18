@@ -1,6 +1,6 @@
 use anyhow::{Context, Error, Result, bail};
 use clap::{Args, Subcommand, builder::NonEmptyStringValueParser};
-use reqwest::{ClientBuilder, Url, redirect::Policy};
+use reqwest::{Client, ClientBuilder, Url, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
@@ -9,6 +9,7 @@ use std::{
     io::{self, ErrorKind},
     mem,
     path::{Path, PathBuf},
+    sync::OnceLock,
     time::{Duration, SystemTime},
 };
 use tokio::{
@@ -18,7 +19,7 @@ use tokio::{
 use tracing::debug;
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 use turnkey_client::TurnkeyClient;
-use turnkey_client::generated::GetWhoamiRequest;
+use turnkey_client::generated::{GetWhoamiRequest, GetWhoamiResponse};
 use uuid::Uuid;
 
 use crate::{
@@ -26,6 +27,7 @@ use crate::{
     gpg::registry::{GpgKeyEntry, GpgKeyTable, KeyName, SelectError, SigningKeyName, StoredGpgKey},
     keygen::{GeneratedApiKey, generate},
     operations::OperationOutput,
+    sessions::public_key::CompressedPublicKey,
     ssh::registry::{
         SelectError as SshSelectError, SshKeyEntry, SshKeyName, SshKeyTable, StoredSshKey,
     },
@@ -105,10 +107,15 @@ pub enum SavedProfileCommand {
     Use { name: String },
     /// Remove a profile entry; credential files are kept.
     Delete { name: String },
-    /// Update the organization or API endpoint of a saved profile.
+    /// Update the organization, API endpoint, or credential file of a saved
+    /// profile.
     Set {
         /// Saved profile to update.
         name: String,
+        /// Existing P256 credential JSON file to use from now on; it is read
+        /// before the registry changes.
+        #[arg(long)]
+        api_key_file: Option<PathBuf>,
     },
 }
 
@@ -176,10 +183,10 @@ impl Default for Registry {
 
 #[derive(Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-struct Profile {
-    organization_id: Uuid,
-    api_base_url: ApiBaseUrl,
-    api_key_file: PathBuf,
+pub(crate) struct Profile {
+    pub(crate) organization_id: Uuid,
+    pub(crate) api_base_url: ApiBaseUrl,
+    pub(crate) api_key_file: PathBuf,
 }
 
 #[derive(Debug)]
@@ -265,6 +272,19 @@ pub struct ResolvedAuth {
     pub api_base_url: ApiBaseUrl,
     pub stamper: TurnkeyP256ApiKey,
     pub source: CredentialSource,
+    pub http: OnceLock<Client>,
+}
+
+impl ResolvedAuth {
+    pub fn http(&self) -> Result<&Client> {
+        if let Some(client) = self.http.get() {
+            return Ok(client);
+        }
+        let client = transport(Client::builder())
+            .build()
+            .context("could not initialize HTTP client")?;
+        Ok(self.http.get_or_init(|| client))
+    }
 }
 
 #[cfg(test)]
@@ -276,11 +296,12 @@ impl ResolvedAuth {
                 .expect("test API base URL is a valid HTTP(S) URL"),
             stamper,
             source: CredentialSource::Environment,
+            http: OnceLock::new(),
         }
     }
 }
 
-pub fn transport(builder: ClientBuilder) -> ClientBuilder {
+fn transport(builder: ClientBuilder) -> ClientBuilder {
     builder.redirect(Policy::none()).timeout(REQUEST_TIMEOUT)
 }
 
@@ -294,6 +315,18 @@ pub fn build_turnkey_client(
         .with_reqwest_builder(transport)
         .build()
         .context("failed to build Turnkey client")
+}
+
+pub(crate) async fn whoami(
+    client: &TurnkeyClient<TurnkeyP256ApiKey>,
+    organization_id: Uuid,
+) -> Result<GetWhoamiResponse> {
+    client
+        .get_whoami(GetWhoamiRequest {
+            organization_id: organization_id.to_string(),
+        })
+        .await
+        .map_err(Error::new)
 }
 
 fn env(name: &str) -> Option<String> {
@@ -503,7 +536,7 @@ fn parse_key(private: &str, public: &str) -> Result<TurnkeyP256ApiKey> {
         .map_err(|_| InvalidInput("invalid P256 credential pair".into()).into())
 }
 
-async fn read_key(path: &Path) -> Result<TurnkeyP256ApiKey> {
+pub(crate) async fn read_key(path: &Path) -> Result<TurnkeyP256ApiKey> {
     let text = fs::read_to_string(path)
         .await
         .with_context(|| format!("read credential {}", path.display()))?;
@@ -699,6 +732,7 @@ fn resolve_environment(options: &AuthOptions) -> Result<Option<ResolvedAuth>> {
         api_base_url: endpoint_override(options)?.unwrap_or_default(),
         stamper: parse_key(&private, &public)?,
         source: CredentialSource::Environment,
+        http: OnceLock::new(),
     }))
 }
 
@@ -717,6 +751,46 @@ async fn resolve_profile(
         api_base_url: endpoint_override(options)?.unwrap_or_else(|| api_base_url.clone()),
         stamper: read_key(api_key_file).await?,
         source: CredentialSource::Profile(name),
+        http: OnceLock::new(),
+    })
+}
+
+pub(crate) async fn saved_profile(name: &str) -> Result<Profile> {
+    let path = registry_path()?;
+    load(&path)
+        .await?
+        .profiles
+        .remove(name)
+        .ok_or_else(|| profile_missing(name))
+        .map_err(Into::into)
+}
+
+pub(crate) async fn remove_generated_key(path: &Path) -> bool {
+    let removed: Result<bool> = async {
+        let api_keys = state_dir()?.join("api-keys");
+        let api_keys = fs::canonicalize(&api_keys).await.unwrap_or(api_keys);
+        if !path.starts_with(&api_keys) {
+            return Ok(false);
+        }
+        let registry_path = registry_path()?;
+        let _lock = registry_lock(&registry_path).await?;
+        let registry = load(&registry_path).await?;
+        if registry
+            .profiles
+            .values()
+            .any(|profile| profile.api_key_file == path)
+        {
+            return Ok(false);
+        }
+        fs::remove_file(path)
+            .await
+            .with_context(|| format!("remove {}", path.display()))?;
+        Ok(true)
+    }
+    .await;
+    removed.unwrap_or_else(|error| {
+        debug!(%error, "generated key file was not removed");
+        false
     })
 }
 
@@ -836,12 +910,9 @@ pub async fn run_auth(command: AuthCommand, options: &AuthOptions) -> Result<Ope
         }
         AuthCommand::Whoami => {
             let auth = resolve(options).await?;
-            let identity = build_turnkey_client(auth.stamper, &auth.api_base_url)?
-                .get_whoami(GetWhoamiRequest {
-                    organization_id: auth.org_id.to_string(),
-                })
+            let client = build_turnkey_client(auth.stamper, &auth.api_base_url)?;
+            let identity = whoami(&client, auth.org_id)
                 .await
-                .map_err(Error::new)
                 .context("Turnkey API request failed")?;
             Ok(OperationOutput::result(
                 "auth.whoami",
@@ -903,12 +974,9 @@ async fn login(args: LoginArgs, options: &AuthOptions) -> Result<OperationOutput
         ))
         .into());
     }
-    let identity = build_turnkey_client(read_key(api_key_file).await?, api_base_url)?
-        .get_whoami(GetWhoamiRequest {
-            organization_id: organization_id.to_string(),
-        })
+    let client = build_turnkey_client(read_key(api_key_file).await?, api_base_url)?;
+    let identity = whoami(&client, *organization_id)
         .await
-        .map_err(Error::new)
         .context("Turnkey API request failed")?;
     let _lock = registry_lock(&path).await?;
     let mut registry = load(&path).await?;
@@ -953,20 +1021,11 @@ pub async fn create_profile(
                 .await
                 .context("resolve credential path")?;
             let key = read_key(&resolved).await?;
-            (resolved, hex::encode(key.compressed_public_key()), None)
+            (resolved, CompressedPublicKey::from(&key), None)
         }
         None => {
             let GeneratedApiKey { public_key, path } = generate(None).await?;
-            match fs::canonicalize(&path)
-                .await
-                .context("resolve credential path")
-            {
-                Ok(resolved) => (resolved, public_key, Some(path)),
-                Err(error) => {
-                    let _ = fs::remove_file(&path).await;
-                    return Err(error);
-                }
-            }
+            (path.clone(), public_key, Some(path))
         }
     };
     let profile = Profile {
@@ -989,6 +1048,19 @@ pub async fn create_profile(
         return Err(error);
     }
     Ok(OperationOutput::result("profile.create", record))
+}
+
+pub(crate) async fn set_profile_key(name: &str, api_key_file: PathBuf) -> Result<PathBuf> {
+    let path = registry_path()?;
+    let _lock = registry_lock(&path).await?;
+    let mut registry = load(&path).await?;
+    let profile = registry
+        .profiles
+        .get_mut(name)
+        .ok_or_else(|| profile_missing(name))?;
+    let previous = mem::replace(&mut profile.api_key_file, api_key_file);
+    save(&path, &registry).await?;
+    Ok(previous)
 }
 
 pub async fn run_profile(
@@ -1047,7 +1119,7 @@ pub async fn run_profile(
                 json!({"name": name, "credentialFilesDeleted": false}),
             ))
         }
-        SavedProfileCommand::Set { name } => {
+        SavedProfileCommand::Set { name, api_key_file } => {
             let profile = registry
                 .profiles
                 .get_mut(&name)
@@ -1058,12 +1130,27 @@ pub async fn run_profile(
             if let Some(api_base_url) = &options.api_base_url {
                 profile.api_base_url = ApiBaseUrl::try_from(api_base_url.clone())?;
             }
-            let record = serde_json::to_value(&*profile)?;
+            let mut record = json!({"name": name});
+            if let Some(api_key_file) = api_key_file {
+                let current = match fs::canonicalize(&api_key_file).await {
+                    Ok(current) => current,
+                    Err(error) if error.kind() == ErrorKind::NotFound => {
+                        return Err(InvalidInput(format!(
+                            "credential file {} does not exist",
+                            api_key_file.display()
+                        ))
+                        .into());
+                    }
+                    Err(error) => return Err(error).context("resolve credential path"),
+                };
+                let key = read_key(&current).await?;
+                let previous = mem::replace(&mut profile.api_key_file, current);
+                record["publicKey"] = CompressedPublicKey::from(&key).to_string().into();
+                record["previousApiKeyFile"] = previous.to_string_lossy().into();
+            }
+            record["profile"] = serde_json::to_value(&*profile)?;
             save(&path, &registry).await?;
-            Ok(OperationOutput::result(
-                "profile.set",
-                json!({"name": name, "profile": record}),
-            ))
+            Ok(OperationOutput::result("profile.set", record))
         }
     }
 }
