@@ -26,6 +26,49 @@ tk secret export --name db-password --out ./password.txt   # new file, mode 0600
 tk secret export --name api-token --message-format json | jq -r .data.value
 ```
 
+## Rotation
+
+Secrets are immutable and names are unique, so rotating a value is a delete
+followed by an import under the same name:
+
+```bash
+tk secret delete --name api-token
+echo -n "$NEW_API_TOKEN" | tk secret import api-token --property env=prod
+```
+
+`delete` accepts `--name` or `--id`. A pending deletion (consensus needed)
+exits zero with `status: pending`; wait on the activity before importing the
+replacement, since the name is taken until the deletion completes.
+
+## Environment for a process
+
+`tk secret env` exports every secret that matches a name prefix and static
+properties, and prints one dotenv line per secret. The variable name is the
+part of the secret name after the last `/`.
+
+```bash
+tk secret import hermes/ANTHROPIC_API_KEY --property consensus=unilateral
+tk secret import hermes/GITHUB_TOKEN --property consensus=unilateral
+tk --profile hermes secret env --name-prefix hermes/ --property consensus=unilateral
+# ANTHROPIC_API_KEY=sk-ant-...
+# GITHUB_TOKEN=github_pat_...
+```
+
+Values are written bare when they contain only letters, digits, and
+`_./:+=@,-`, and single-quoted otherwise. A value containing a newline, NUL, or
+single quote is refused. `--message-format json` returns the same values under
+`data.env` plus the selected secrets under `data.exported`.
+
+Each secret is one export activity. If any of them needs approval the command
+prints nothing, exits 1 with code `approval_required`, and lists the pending
+activities under `details.pending`; approve them and run the same command
+again. Hermes Agent can use it as its `secrets.command`:
+
+```yaml
+secrets:
+  command: /usr/local/bin/tk --profile hermes secret env --name-prefix hermes/ --property consensus=unilateral
+```
+
 ## Policy-visible metadata
 
 ```bash

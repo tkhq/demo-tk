@@ -26,6 +26,17 @@ tk user tag update --input-file ./tag-update.json
 tk user tag delete TAG_ID
 ```
 
+Flags cover the single-user case; `--tag-name` must match exactly one tag:
+
+```bash
+tk user tag create --name agents
+tk user create --user-name agent --tag-name agents --public-key 02… --expires-in 7d --anchor-key
+```
+
+Turnkey requires every user to hold one long-lived credential, so a user meant
+to live on expiring keys needs `--anchor-key`: it registers a never-expiring key
+whose private half is generated locally and discarded.
+
 ## Policies
 
 ```bash
@@ -46,6 +57,14 @@ tk policy delete POLICY_ID
 
 # See how policies evaluated an activity.
 tk policy evaluations ACTIVITY_ID
+```
+
+Flags cover the single-policy case:
+
+```bash
+tk policy create --name agents-export --effect allow \
+  --consensus "approvers.any(user, user.tags.contains('TAG_ID'))" \
+  --condition "activity.type == 'ACTIVITY_TYPE_EXPORT_SECRETS'"
 ```
 
 Updates use `policyEffect`, `policyCondition`, `policyConsensus`, and

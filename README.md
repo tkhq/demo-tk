@@ -11,6 +11,13 @@ Install the latest release binary (Linux and macOS, x86_64 and arm64):
 curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/tkhq/tk/main/install.sh | sh
 ```
 
+Every pull request push also publishes a prerelease tagged `pr-<number>-<short sha>`.
+Install one by naming it:
+
+```bash
+curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/tkhq/tk/main/install.sh | TK_VERSION=pr-44-abc1234 sh
+```
+
 ## Guides
 
 Start with [authentication](./docs/authentication.md), then pick a workflow:
@@ -20,6 +27,7 @@ Start with [authentication](./docs/authentication.md), then pick a workflow:
 - [Activities](./docs/activities.md): inspect, approve, reject, and wait
 - [Raw requests](./docs/requests.md): sign and send an exact request body
 - [Secrets](./docs/secrets.md)
+- [Sessions](./docs/sessions.md): expiring keys an agent requests, a provisioner registers, and the agent rotates onto
 - [SSH](./docs/ssh-agent.md): registered keys and the SSH agent
 - [Git signing](./docs/git-signing.md)
 - [GPG signing](./docs/gpg-signing.md)

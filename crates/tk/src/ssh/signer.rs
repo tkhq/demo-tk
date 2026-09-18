@@ -1,19 +1,55 @@
 //! Ed25519 signing through Turnkey's raw-payload activity.
 
+use std::time::Duration;
+
 use anyhow::{Error, Result};
+use tokio::time::sleep;
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 use turnkey_client::generated::immutable::common::v1::{HashFunction, PayloadEncoding};
 use turnkey_client::generated::{GetActivityRequest, SignRawPayloadIntentV2, SignRawPayloadResult};
 use turnkey_client::{ActivityResult, TurnkeyClient, TurnkeyClientError};
 use uuid::Uuid;
 
-use crate::errors::{ActivityError, ActivityErrorKind};
+use crate::errors::{ActivityError, ActivityErrorKind, transient_status};
 use crate::ssh::registry::PrivateKeyId;
+
+const ATTEMPTS: u32 = 5;
+
+pub const BACKOFF: Duration = Duration::from_secs(1);
+
+fn transient(error: &TurnkeyClientError) -> bool {
+    match error {
+        TurnkeyClientError::UnexpectedHttpStatus(status, _) => transient_status(*status),
+        TurnkeyClientError::Http(_) => true,
+        TurnkeyClientError::BuilderMissingApiKey
+        | TurnkeyClientError::ReqwestBuilder(_)
+        | TurnkeyClientError::MissingContentTypeHeader
+        | TurnkeyClientError::HeaderToStrError(_)
+        | TurnkeyClientError::HeaderFromStrError(_)
+        | TurnkeyClientError::UnexpectedMimeType(_)
+        | TurnkeyClientError::Decode(_, _)
+        | TurnkeyClientError::SerdeJsonFailure(_)
+        | TurnkeyClientError::MissingActivity
+        | TurnkeyClientError::MissingResult
+        | TurnkeyClientError::MissingInnerResult
+        | TurnkeyClientError::UnexpectedActivityStatus(_)
+        | TurnkeyClientError::UnexpectedInnerActivityResult(_)
+        | TurnkeyClientError::ActivityFailed(_)
+        | TurnkeyClientError::ActivityRequiresApproval(_)
+        | TurnkeyClientError::ExceededRetries(_)
+        | TurnkeyClientError::RefusedRedirect(_, _)
+        | TurnkeyClientError::StamperError(_)
+        | TurnkeyClientError::UnexpectedSingletonCount(_, _)
+        | TurnkeyClientError::UnexpectedResultCount(_, _, _)
+        | TurnkeyClientError::EnclaveEncrypt(_) => false,
+    }
+}
 
 pub struct TurnkeySigner<'a> {
     client: &'a TurnkeyClient<TurnkeyP256ApiKey>,
     organization_id: Uuid,
     private_key_id: &'a PrivateKeyId,
+    backoff: Duration,
 }
 
 impl<'a> TurnkeySigner<'a> {
@@ -21,34 +57,43 @@ impl<'a> TurnkeySigner<'a> {
         client: &'a TurnkeyClient<TurnkeyP256ApiKey>,
         organization_id: Uuid,
         private_key_id: &'a PrivateKeyId,
+        backoff: Duration,
     ) -> Self {
         Self {
             client,
             organization_id,
             private_key_id,
+            backoff,
         }
     }
 
     pub async fn sign_raw_payload(&self, payload: &[u8]) -> Result<[u8; 64]> {
-        let activity = match self
-            .client
-            .sign_raw_payload(
-                self.organization_id.to_string(),
-                self.client.current_timestamp(),
-                SignRawPayloadIntentV2 {
-                    sign_with: self.private_key_id.to_string(),
-                    payload: hex::encode(payload),
-                    encoding: PayloadEncoding::Hexadecimal,
-                    hash_function: HashFunction::NotApplicable,
-                },
-            )
-            .await
-        {
-            Ok(activity) => activity,
-            Err(TurnkeyClientError::ActivityRequiresApproval(activity_id)) => {
-                return Err(self.approval_required_error(activity_id).await);
+        let mut attempt = 1;
+        let activity = loop {
+            match self
+                .client
+                .sign_raw_payload(
+                    self.organization_id.to_string(),
+                    self.client.current_timestamp(),
+                    SignRawPayloadIntentV2 {
+                        sign_with: self.private_key_id.to_string(),
+                        payload: hex::encode(payload),
+                        encoding: PayloadEncoding::Hexadecimal,
+                        hash_function: HashFunction::NotApplicable,
+                    },
+                )
+                .await
+            {
+                Ok(activity) => break activity,
+                Err(TurnkeyClientError::ActivityRequiresApproval(activity_id)) => {
+                    return Err(self.approval_required_error(activity_id).await);
+                }
+                Err(error) if transient(&error) && attempt < ATTEMPTS => {
+                    sleep(self.backoff * (1 << (attempt - 1))).await;
+                    attempt += 1;
+                }
+                Err(error) => return Err(Error::new(error).context("sign the SSH payload")),
             }
-            Err(error) => return Err(Error::new(error).context("sign the SSH payload")),
         };
         let ActivityResult {
             result,

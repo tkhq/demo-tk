@@ -24,10 +24,7 @@ fn stored_key(path: &Path, record: &Value) -> Value {
 fn api_key_generate_writes_0600_and_prints_only_public_key() {
     let run = Run::new();
     let path = run.home.path().join("agent-key.json");
-    let record = run.ok(run
-        .cli()
-        .args(["api-key", "generate", "--output"])
-        .arg(&path));
+    let record = run.generate_key(&path);
     let stored = stored_key(&path, &record);
     assert_eq!(record["schemaVersion"], 1);
     assert_eq!(record["reason"], "command_result");
@@ -45,10 +42,12 @@ fn api_key_generate_without_output_writes_to_the_state_directory() {
     let run = Run::new();
     let record = run.ok(run.cli().args(["api-key", "generate"]));
     let public_key = record["data"]["publicKey"].as_str().unwrap().to_owned();
-    let path = run
-        .home()
-        .join(".config/turnkey/tk/api-keys")
-        .join(format!("{public_key}.json"));
+    let path = fs::canonicalize(
+        run.home()
+            .join(".config/turnkey/tk/api-keys")
+            .join(format!("{public_key}.json")),
+    )
+    .unwrap();
     let stored = stored_key(&path, &record);
     assert_eq!(stored["public_key"], public_key);
     assert_eq!(record["command"], "api-key.generate");
@@ -390,5 +389,54 @@ fn profile_create_generates_a_credential_that_logs_in_once_registered() {
             "publicKey": public_key,
             "credentialSource": "profile",
         })
+    );
+}
+
+#[test]
+#[ignore]
+fn profile_set_switches_the_credential_file() {
+    let run = Run::new();
+    let admin = run.login_admin();
+    let next_key_file = run.home().join("next-key.json");
+    let next_public = run.generate_key(&next_key_file)["data"]["publicKey"].clone();
+
+    let set = run.ok(run
+        .cli()
+        .args(["profile", "set", &admin.name, "--api-key-file"])
+        .arg(&next_key_file));
+    assert_eq!(set["command"], "profile.set");
+    assert_eq!(
+        set["data"]["profile"]["api_key_file"],
+        fs::canonicalize(&next_key_file).unwrap().to_str().unwrap()
+    );
+    assert_eq!(set["data"]["publicKey"], next_public);
+    assert_eq!(
+        set["data"]["previousApiKeyFile"],
+        fs::canonicalize(&admin.key_file).unwrap().to_str().unwrap()
+    );
+
+    // The new key is not registered, so the profile no longer authenticates.
+    let denied = run.err(run.cli().args(["--profile", &admin.name, "whoami"]));
+    assert_eq!(denied["code"], "unauthorized", "{denied}");
+
+    let restored = run.ok(run
+        .cli()
+        .args(["profile", "set", &admin.name, "--api-key-file"])
+        .arg(&admin.key_file));
+    assert_eq!(
+        restored["data"]["profile"]["api_key_file"],
+        fs::canonicalize(&admin.key_file).unwrap().to_str().unwrap()
+    );
+    run.ok(run.cli().args(["--profile", &admin.name, "whoami"]));
+
+    let missing = run.err(
+        run.cli()
+            .args(["profile", "set", &admin.name, "--api-key-file"])
+            .arg(run.home().join("absent.json")),
+    );
+    assert_eq!(missing["code"], "invalid_input", "{missing}");
+    assert_eq!(
+        run.ok(run.cli().args(["profile", "show", &admin.name]))["data"]["profile"]["api_key_file"],
+        fs::canonicalize(&admin.key_file).unwrap().to_str().unwrap()
     );
 }

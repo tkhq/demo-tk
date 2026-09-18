@@ -12,6 +12,7 @@ mod output;
 mod registry;
 mod resources;
 mod secrets;
+mod sessions;
 mod ssh;
 mod wallets;
 

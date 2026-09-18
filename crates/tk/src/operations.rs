@@ -6,20 +6,20 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Error, Result};
 use clap::{Args, Subcommand};
-use reqwest::{Client, Url};
-use serde::ser::SerializeStruct;
-use serde::{Serialize, Serializer};
-use serde_json::{Value, json};
+use reqwest::Url;
+use serde::{Serialize, Serializer, de::DeserializeOwned, ser::SerializeStruct};
+use serde_json::{Value, error::Category, from_slice, json};
 use tokio::time::{sleep, timeout};
-use turnkey_api_key_stamper::{Stamp, TurnkeyP256ApiKey};
+use turnkey_api_key_stamper::Stamp;
 use turnkey_client::generated::{
     ActivityStatus, GetActivitiesRequest, GetActivityRequest, external::options::v1::Pagination,
 };
 use uuid::Uuid;
 
-use crate::auth::{ApiBaseUrl, ResolvedAuth, transport};
+use crate::auth::ResolvedAuth;
 use crate::errors::{
     ActivityError, ActivityErrorKind, InvalidInput, Malformed, UnexpectedHttpStatus,
+    transient_status,
 };
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -116,6 +116,13 @@ impl OperationOutput {
     pub(crate) fn is_pending(&self) -> bool {
         matches!(self.status(), Status::Pending)
     }
+
+    pub(crate) fn pending_activity_id(&self) -> Option<&str> {
+        if !self.is_pending() {
+            return None;
+        }
+        self.activity.as_ref()?["id"].as_str()
+    }
 }
 
 impl Status {
@@ -206,23 +213,23 @@ fn url(base: &str, path: &str) -> Result<Url> {
         .map_err(|error| Malformed::new("invalid request URL", error).into())
 }
 
-pub(crate) fn client() -> Result<Client> {
-    transport(Client::builder())
-        .build()
-        .context("could not initialize HTTP client")
-}
-
-async fn post(
-    http: &Client,
+async fn post<R: DeserializeOwned>(
+    auth: &ResolvedAuth,
     endpoint: Url,
     body: String,
-    stamper: &TurnkeyP256ApiKey,
     mutation: bool,
-) -> Result<Value> {
-    let stamp = stamper
+) -> Result<R> {
+    let stamp = auth
+        .stamper
         .stamp(body.as_bytes())
         .context("could not stamp request")?;
-    let response = http
+    let name = endpoint
+        .path()
+        .rsplit_once('/')
+        .map_or(endpoint.path(), |(_, end)| end)
+        .to_owned();
+    let response = auth
+        .http()?
         .post(endpoint)
         .header(stamp.name, stamp.value)
         .header("Content-Type", "application/json")
@@ -261,15 +268,26 @@ async fn post(
         }
         .into());
     }
-    response.json().await.map_err(|error| {
-        let kind = if mutation {
-            ActivityErrorKind::SubmissionUnknown
-        } else {
-            ActivityErrorKind::MalformedResponse
-        };
-        ActivityError::new(kind, "API returned an unreadable response")
-            .with_source(error)
-            .into()
+    let kind = if mutation {
+        ActivityErrorKind::SubmissionUnknown
+    } else {
+        ActivityErrorKind::MalformedResponse
+    };
+    let bytes = response.bytes().await.map_err(|error| {
+        ActivityError::new(kind, "API returned an unreadable response").with_source(error)
+    })?;
+    from_slice(&bytes).map_err(|error| match error.classify() {
+        Category::Data => ActivityError::new(
+            ActivityErrorKind::MalformedResponse,
+            format!("{name} response was malformed"),
+        )
+        .with_source(error)
+        .into(),
+        Category::Io | Category::Syntax | Category::Eof => {
+            ActivityError::new(kind, "API returned an unreadable response")
+                .with_source(error)
+                .into()
+        }
     })
 }
 
@@ -277,12 +295,14 @@ fn encode<T: Serialize>(value: &T) -> Result<String> {
     serde_json::to_string(value).context("could not encode request")
 }
 
-fn envelope<T: Serialize>(kind: &str, organization_id: Uuid, parameters: &T) -> Result<Value> {
-    let timestamp_ms = SystemTime::now()
+pub(crate) fn unix_now() -> Result<Duration> {
+    SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .context("system clock precedes Unix epoch")?
-        .as_millis()
-        .to_string();
+        .context("system clock precedes Unix epoch")
+}
+
+fn envelope<T: Serialize>(kind: &str, organization_id: Uuid, parameters: &T) -> Result<Value> {
+    let timestamp_ms = unix_now()?.as_millis().to_string();
     Ok(json!({
         "type": kind,
         "timestampMs": timestamp_ms,
@@ -355,7 +375,7 @@ impl PreparedRequest {
             ));
         }
         let mutation = matches!(kind, RequestKind::Submit);
-        let value = post(&client()?, endpoint, body, &auth.stamper, mutation).await?;
+        let value = post::<Value>(auth, endpoint, body, mutation).await?;
         match kind {
             RequestKind::Query => Ok(OperationOutput::result(command, value)),
             RequestKind::Submit => submission_result(command, value),
@@ -417,13 +437,13 @@ fn with_target(error: Error, target: Value) -> Error {
     }
 }
 
-pub(crate) async fn query_activity(http: &Client, auth: &ResolvedAuth, id: &str) -> Result<Value> {
+pub(crate) async fn query_activity(auth: &ResolvedAuth, id: &str) -> Result<Value> {
     let body = encode(&GetActivityRequest {
         organization_id: auth.org_id.to_string(),
         activity_id: id.into(),
     })?;
     let endpoint = url(auth.api_base_url.as_str(), "/public/v1/query/get_activity")?;
-    let value = post(http, endpoint, body, &auth.stamper, false).await?;
+    let value = post::<Value>(auth, endpoint, body, false).await?;
     let matches = value
         .pointer("/activity/id")
         .and_then(Value::as_str)
@@ -439,32 +459,19 @@ pub(crate) async fn query_activity(http: &Client, auth: &ResolvedAuth, id: &str)
 }
 
 pub async fn run_activity(args: ActivityCommand, auth: &ResolvedAuth) -> Result<OperationOutput> {
-    run_activity_with(&client()?, args, auth).await
-}
-
-async fn run_activity_with(
-    http: &Client,
-    args: ActivityCommand,
-    auth: &ResolvedAuth,
-) -> Result<OperationOutput> {
     match args {
-        ActivityCommand::List { limit, cursor } => list(http, auth, limit, cursor).await,
+        ActivityCommand::List { limit, cursor } => list(auth, limit, cursor).await,
         ActivityCommand::Get { id } => {
-            let value = query_activity(http, auth, &id).await?;
+            let value = query_activity(auth, &id).await?;
             Ok(OperationOutput::result("activity.get", value))
         }
-        ActivityCommand::Wait { id, timeout } => wait(http, auth, &id, timeout).await,
-        ActivityCommand::Approve { id } => vote(http, auth, &id, true).await,
-        ActivityCommand::Reject { id } => vote(http, auth, &id, false).await,
+        ActivityCommand::Wait { id, timeout } => wait(auth, &id, timeout).await,
+        ActivityCommand::Approve { id } => vote(auth, &id, true).await,
+        ActivityCommand::Reject { id } => vote(auth, &id, false).await,
     }
 }
 
-async fn list(
-    http: &Client,
-    auth: &ResolvedAuth,
-    limit: u32,
-    cursor: Option<String>,
-) -> Result<OperationOutput> {
+async fn list(auth: &ResolvedAuth, limit: u32, cursor: Option<String>) -> Result<OperationOutput> {
     let request = GetActivitiesRequest {
         organization_id: auth.org_id.to_string(),
         filter_by_status: vec![],
@@ -479,7 +486,7 @@ async fn list(
         auth.api_base_url.as_str(),
         "/public/v1/query/list_activities",
     )?;
-    let response = post(http, endpoint, encode(&request)?, &auth.stamper, false).await?;
+    let response = post::<Value>(auth, endpoint, encode(&request)?, false).await?;
     let items = response
         .get("activities")
         .and_then(Value::as_array)
@@ -500,17 +507,12 @@ async fn list(
     ))
 }
 
-async fn wait(
-    http: &Client,
-    auth: &ResolvedAuth,
-    id: &str,
-    seconds: u64,
-) -> Result<OperationOutput> {
+async fn wait(auth: &ResolvedAuth, id: &str, seconds: u64) -> Result<OperationOutput> {
     let command = "activity.wait";
     let mut last: Option<Value> = None;
     let result = timeout(Duration::from_secs(seconds), async {
         loop {
-            match query_activity(http, auth, id).await {
+            match query_activity(auth, id).await {
                 Ok(value) => {
                     let output = OperationOutput::result(command, value);
                     if !output.is_pending() {
@@ -545,23 +547,18 @@ fn transient(error: &Error) -> bool {
     error.chain().any(|cause| {
         cause
             .downcast_ref::<UnexpectedHttpStatus>()
-            .is_some_and(|http| http.status >= 500 || http.status == 429)
+            .is_some_and(|http| transient_status(http.status))
             || cause.downcast_ref::<reqwest::Error>().is_some()
     })
 }
 
-async fn vote(
-    http: &Client,
-    auth: &ResolvedAuth,
-    id: &str,
-    approve: bool,
-) -> Result<OperationOutput> {
+async fn vote(auth: &ResolvedAuth, id: &str, approve: bool) -> Result<OperationOutput> {
     let command = if approve {
         "activity.approve"
     } else {
         "activity.reject"
     };
-    let value = query_activity(http, auth, id).await?;
+    let value = query_activity(auth, id).await?;
     let target = json!({"id": id, "status": value.pointer("/activity/status")});
     let submitted = async {
         let fingerprint = value
@@ -591,14 +588,8 @@ async fn vote(
             auth.org_id,
             &json!({ "fingerprint": fingerprint }),
         )?)?;
-        let response = post(
-            http,
-            url(auth.api_base_url.as_str(), path)?,
-            body,
-            &auth.stamper,
-            true,
-        )
-        .await?;
+        let response =
+            post::<Value>(auth, url(auth.api_base_url.as_str(), path)?, body, true).await?;
         let returned = response
             .pointer("/activity/id")
             .and_then(Value::as_str)
@@ -613,7 +604,7 @@ async fn vote(
             response
         } else {
             terminal(OperationOutput::result(command, response), true)?;
-            query_activity(http, auth, id).await?
+            query_activity(auth, id).await?
         };
         let output = OperationOutput::result(command, data);
         if !approve && matches!(output.status(), Status::Rejected) {
@@ -638,21 +629,19 @@ pub async fn submit_activity<T: Serialize>(
         auth.api_base_url.as_str(),
         &format!("/public/v1/submit/{endpoint}"),
     )?;
-    let value = post(&client()?, endpoint, body, &auth.stamper, true).await?;
+    let value = post::<Value>(auth, endpoint, body, true).await?;
     submission_result(command, value)
 }
 
-pub(crate) async fn query<T: Serialize>(
+pub(crate) async fn query<T: Serialize, R: DeserializeOwned>(
     path: &str,
     request: &T,
-    api_base_url: &ApiBaseUrl,
-    stamper: &TurnkeyP256ApiKey,
-) -> Result<Value> {
-    post(
-        &client()?,
-        url(api_base_url.as_str(), path)?,
+    auth: &ResolvedAuth,
+) -> Result<R> {
+    post::<R>(
+        auth,
+        url(auth.api_base_url.as_str(), path)?,
         encode(request)?,
-        stamper,
         false,
     )
     .await

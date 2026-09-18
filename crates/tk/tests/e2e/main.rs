@@ -29,6 +29,7 @@ mod identity;
 mod policies;
 mod request;
 mod secrets;
+mod sessions;
 mod ssh;
 mod ssh_agent;
 mod users;

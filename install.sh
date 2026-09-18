@@ -4,7 +4,9 @@
 #   curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/tkhq/tk/main/install.sh | sh
 #
 # Set TK_INSTALL_DIR to an absolute directory to install somewhere other than
-# $HOME/.local/bin.
+# $HOME/.local/bin. Set TK_VERSION to a release tag (v0.2.0) or a pull request
+# prerelease tag (pr-44-abc1234) to install that build instead of the latest
+# release.
 
 set -eu
 
@@ -56,21 +58,31 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-# The /releases/latest redirect names the newest release without an API token.
-latest_url=$(curl --proto '=https' --tlsv1.2 -LsSf --head \
-    -o /dev/null -w '%{url_effective}' "$repository_url/releases/latest")
-version=${latest_url##*/}
-case "$version" in
-    v[0-9]*[!A-Za-z0-9._-]*)
-        echo "error: GitHub returned an invalid tk release version: $version" >&2
-        exit 1
-        ;;
-    v[0-9]*) ;;
-    *)
-        echo "error: could not determine the latest tk release from $latest_url" >&2
-        exit 1
-        ;;
-esac
+version=${TK_VERSION:-}
+if [ -n "$version" ]; then
+    case "$version" in
+        *[!A-Za-z0-9._-]*)
+            echo "error: TK_VERSION must be a release or prerelease tag such as v0.2.0 or pr-44-abc1234" >&2
+            exit 1
+            ;;
+    esac
+else
+    # The /releases/latest redirect names the newest release without an API token.
+    latest_url=$(curl --proto '=https' --tlsv1.2 -LsSf --head \
+        -o /dev/null -w '%{url_effective}' "$repository_url/releases/latest")
+    version=${latest_url##*/}
+    case "$version" in
+        v[0-9]*[!A-Za-z0-9._-]*)
+            echo "error: GitHub returned an invalid tk release version: $version" >&2
+            exit 1
+            ;;
+        v[0-9]*) ;;
+        *)
+            echo "error: could not determine the latest tk release from $latest_url" >&2
+            exit 1
+            ;;
+    esac
+fi
 
 archive_name="tk-$target-$version.tar.gz"
 checksum_name="$archive_name.sha256"
