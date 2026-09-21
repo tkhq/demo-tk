@@ -3,7 +3,7 @@ use crate::config::E2eConfig;
 use assert_cmd::Command;
 use serde_json::{Value, json};
 use std::cell::RefCell;
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -80,6 +80,13 @@ pub(crate) fn bare_cli(home: &Path) -> Command {
 
 pub(crate) fn result<'v>(record: &'v Value, key: &str) -> &'v Value {
     &record["data"]["activity"]["result"][key]
+}
+
+pub(crate) fn created_user_id(record: &Value) -> String {
+    result(record, "createUsersResult")["userIds"][0]
+        .as_str()
+        .unwrap()
+        .to_string()
 }
 
 pub(crate) fn id_of(record: &Value) -> String {
@@ -226,6 +233,18 @@ impl Run {
     /// Root bundle pointed at an unroutable host for preflight tests.
     pub(crate) fn admin_offline(&self) -> Command {
         self.admin_at(UNROUTABLE)
+    }
+
+    pub(crate) fn generate_key(&self, path: &Path) -> Value {
+        let record = self.ok(self
+            .cli()
+            .args(["api-key", "generate", "--output"])
+            .arg(path));
+        let stored: Value = serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+        self.secrets
+            .borrow_mut()
+            .push(stored["private_key"].as_str().unwrap().to_string());
+        record
     }
 
     pub(crate) fn key(&self) -> TurnkeyP256ApiKey {
@@ -512,11 +531,37 @@ impl Run {
     /// Creates a user with a fresh API key.
     pub(crate) fn create_user(&self, label: &str) -> (String, TurnkeyP256ApiKey) {
         let (created, key) = self.create_user_activity(label);
-        let user_id = result(&created, "createUsersResult")["userIds"][0]
-            .as_str()
-            .unwrap()
-            .to_string();
-        (user_id, key)
+        (created_user_id(&created), key)
+    }
+    pub(crate) fn create_provisioner(&self) -> TurnkeyP256ApiKey {
+        let (provisioner_id, provisioner_key) = self.create_user("provisioner");
+        self.create_policy(json!({
+            "policyName": self.name("provisioners-mint"),
+            "effect": "EFFECT_ALLOW",
+            "consensus": format!("approvers.any(user, user.id == '{provisioner_id}')"),
+            "condition": "activity.type == 'ACTIVITY_TYPE_CREATE_API_KEYS_V2'",
+            "notes": ""
+        }));
+        provisioner_key
+    }
+    pub(crate) fn provision(
+        &self,
+        provisioner: &TurnkeyP256ApiKey,
+        user_id: &str,
+        public_key: &str,
+    ) -> Command {
+        let mut cmd = self.as_user(provisioner);
+        cmd.args([
+            "session",
+            "provision",
+            "--user-id",
+            user_id,
+            "--public-key",
+            public_key,
+            "--expires-in",
+            "2h",
+        ]);
+        cmd
     }
     // The admin key in `tk api-key generate` format.
     fn admin_key_file(&self) -> PathBuf {

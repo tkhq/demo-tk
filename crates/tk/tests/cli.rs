@@ -163,7 +163,7 @@ fn profile_set_requires_a_change_and_agent_keys_repeat() {
         .assert()
         .code(2)
         .stderr(predicate::str::contains(
-            "profile set requires --organization-id or --api-base-url",
+            "profile set requires --organization-id, --api-base-url, or --api-key-file",
         ));
 
     let mut remove = Command::new(env!("CARGO_BIN_EXE_tk"));

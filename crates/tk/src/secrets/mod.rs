@@ -1,9 +1,11 @@
+mod delete;
+mod env;
 mod export;
 mod import;
 mod input;
 
 use anyhow::Result;
-use clap::{Args, Subcommand};
+use clap::{ArgGroup, Args, Subcommand};
 use serde::{Serialize, Serializer};
 use std::fmt::{self, Display, Formatter};
 use std::fs;
@@ -40,6 +42,23 @@ pub enum SecretCommand {
         #[arg(long = "property", value_name = "KEY=VALUE", value_parser = parse_key_value)]
         properties: Vec<KeyValue>,
     },
+    /// Export every matching secret and print dotenv lines for a process's
+    /// startup environment. Names are PREFIX/VAR; VAR is the line's key.
+    #[command(group = ArgGroup::new("selector").required(true).multiple(true))]
+    Env {
+        /// Only secrets carrying this static property (repeatable; all must match).
+        #[arg(long = "property", value_name = "KEY=VALUE", value_parser = parse_key_value, group = "selector")]
+        properties: Vec<KeyValue>,
+        /// Only secrets whose name starts with this prefix, for example hermes/.
+        #[arg(long, group = "selector")]
+        name_prefix: Option<String>,
+    },
+    /// Delete a secret. Secrets are immutable: to rotate one, delete it and
+    /// import the new value under the same name.
+    Delete {
+        #[command(flatten)]
+        secret: SecretSelector,
+    },
     /// Export a secret's value; re-run after approval.
     Export {
         #[command(flatten)]
@@ -53,7 +72,7 @@ pub enum SecretCommand {
     },
 }
 
-/// Exactly one of `--name` or `--id` selects the secret to export.
+/// Exactly one of `--name` or `--id` selects the secret.
 #[derive(Debug, Args)]
 #[group(required = true, multiple = false)]
 pub struct SecretSelector {
@@ -97,6 +116,13 @@ pub enum PreparedSecret {
         out: Option<PathBuf>,
         context: UniqueKeyValues,
     },
+    Env {
+        properties: UniqueKeyValues,
+        name_prefix: Option<String>,
+    },
+    Delete {
+        secret: SecretRef,
+    },
 }
 
 impl SecretCommand {
@@ -117,6 +143,16 @@ impl SecretCommand {
                     properties,
                 }
             }
+            Self::Delete { secret } => PreparedSecret::Delete {
+                secret: secret.into(),
+            },
+            Self::Env {
+                properties,
+                name_prefix,
+            } => PreparedSecret::Env {
+                properties: UniqueKeyValues::parse(properties, "--property")?,
+                name_prefix,
+            },
             Self::Export {
                 secret,
                 out,
@@ -184,6 +220,11 @@ impl PreparedSecret {
                 out,
                 context,
             } => export::run(auth, secret, out, context).await,
+            Self::Env {
+                properties,
+                name_prefix,
+            } => env::run(auth, properties, name_prefix).await,
+            Self::Delete { secret } => delete::run(auth, secret).await.map(Into::into),
         }
     }
 }

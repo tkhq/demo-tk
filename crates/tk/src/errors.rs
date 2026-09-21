@@ -1,6 +1,7 @@
 // This module defines ErrorCode and owns its classification.
 #![allow(clippy::disallowed_types)]
 use crate::auth::SelectedIdentity;
+use crate::sessions::public_key::CompressedPublicKey;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::error::Error;
@@ -45,6 +46,25 @@ pub(crate) fn assert_malformed_response(error: &anyhow::Error, chain: &[&str]) {
     assert_eq!(activity.kind(), ActivityErrorKind::MalformedResponse);
     let rendered: Vec<String> = error.chain().map(ToString::to_string).collect();
     assert_eq!(rendered, chain);
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("{message}")]
+pub struct PendingApprovals {
+    pub message: String,
+    pub pending: Value,
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "credential for profile {profile} expires in {seconds_left}s (at unix ms {expires_at_unix_ms}), inside the {warn_before_seconds}s warning window; request a new session"
+)]
+pub struct SessionExpiring {
+    pub profile: String,
+    pub public_key: CompressedPublicKey,
+    pub expires_at_unix_ms: u64,
+    pub seconds_left: u64,
+    pub warn_before_seconds: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -109,6 +129,18 @@ impl ActivityError {
 }
 
 pub fn error_details(error: &anyhow::Error) -> Option<Value> {
+    if let Some(pending) = error.downcast_ref::<PendingApprovals>() {
+        return Some(json!({"pending": pending.pending}));
+    }
+    if let Some(expiring) = error.downcast_ref::<SessionExpiring>() {
+        return Some(json!({
+            "profile": expiring.profile,
+            "publicKey": expiring.public_key,
+            "expiresAt": expiring.expires_at_unix_ms.to_string(),
+            "secondsLeft": expiring.seconds_left,
+            "warnBeforeSeconds": expiring.warn_before_seconds,
+        }));
+    }
     error
         .downcast_ref::<ActivityError>()
         .and_then(ActivityError::activity)
@@ -143,6 +175,8 @@ pub enum ErrorCode {
     SubmissionUnknown,
     /// `activity wait` timed out while the activity was still pending.
     WaitTimeout,
+    /// A session credential ends within the requested warning window.
+    SessionExpiring,
     /// Fallback for everything else.
     CommandError,
 }
@@ -169,6 +203,12 @@ pub fn classify(error: &anyhow::Error) -> Classification {
         }
         if cause.downcast_ref::<MissingResource>().is_some() {
             return Classification::new(ErrorCode::NotFound, None);
+        }
+        if cause.downcast_ref::<SessionExpiring>().is_some() {
+            return Classification::new(ErrorCode::SessionExpiring, None);
+        }
+        if cause.downcast_ref::<PendingApprovals>().is_some() {
+            return Classification::new(ErrorCode::ApprovalRequired, None);
         }
         if let Some(http) = cause.downcast_ref::<UnexpectedHttpStatus>() {
             return classify_http_status(http.status);
@@ -223,6 +263,10 @@ fn classify_turnkey_client_error(error: &TurnkeyClientError) -> Classification {
             Classification::new(ErrorCode::CommandError, None)
         }
     }
+}
+
+pub(crate) fn transient_status(status: u16) -> bool {
+    status == 429 || status >= 500
 }
 
 fn classify_http_status(status: u16) -> Classification {

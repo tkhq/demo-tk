@@ -24,8 +24,9 @@ tk profile use agent
 tk --profile agent whoami
 export TK_PROFILE=agent
 
-# Change a profile's organization or API endpoint.
+# Change a profile's organization, API endpoint, or credential file.
 tk profile set agent --organization-id OTHER_ORG_UUID
+tk profile set agent --api-key-file ~/.config/turnkey/tk/api-keys/02….json
 
 # Forget a profile. Credential files are kept.
 tk profile delete agent

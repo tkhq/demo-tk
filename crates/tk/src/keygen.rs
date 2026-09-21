@@ -1,6 +1,7 @@
 use crate::{
     auth::{KeyCurve, StoredApiKey, secure_create, state_dir},
     operations::OperationOutput,
+    sessions::public_key::CompressedPublicKey,
 };
 use anyhow::{Context, Result};
 use clap::Args;
@@ -30,14 +31,15 @@ impl GenerateArgs {
 }
 
 pub(crate) struct GeneratedApiKey {
-    pub(crate) public_key: String,
+    pub(crate) public_key: CompressedPublicKey,
     pub(crate) path: PathBuf,
 }
 
 pub(crate) async fn generate(output: Option<PathBuf>) -> Result<GeneratedApiKey> {
     let key = TurnkeyP256ApiKey::generate();
+    let public_key = CompressedPublicKey::from(&key);
     let mut stored = StoredApiKey {
-        public_key: hex::encode(key.compressed_public_key()),
+        public_key: public_key.to_string(),
         private_key: hex::encode(key.private_key()),
         curve: KeyCurve::P256,
     };
@@ -51,16 +53,16 @@ pub(crate) async fn generate(output: Option<PathBuf>) -> Result<GeneratedApiKey>
             fs::create_dir_all(&dir)
                 .await
                 .with_context(|| format!("create {}", dir.display()))?;
+            let dir = fs::canonicalize(&dir)
+                .await
+                .with_context(|| format!("resolve {}", dir.display()))?;
             dir.join(format!("{}.json", stored.public_key))
         }
     };
     secure_create(&path, &encoded)
         .await
         .with_context(|| format!("create {}", path.display()))?;
-    Ok(GeneratedApiKey {
-        public_key: stored.public_key,
-        path,
-    })
+    Ok(GeneratedApiKey { public_key, path })
 }
 
 #[cfg(test)]

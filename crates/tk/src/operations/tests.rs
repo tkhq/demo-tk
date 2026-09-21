@@ -4,7 +4,10 @@ use super::*;
 use crate::errors::{Classification, ErrorCode, classify};
 use clap::Parser;
 use clap::error::ErrorKind;
+use reqwest::Client;
 use std::net::TcpListener;
+use std::sync::OnceLock;
+use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
 #[derive(Debug, Parser)]
 struct RequestCli {
@@ -75,6 +78,24 @@ fn submission_requires_recoverable_activity_identity() {
         activity_error(&error).kind(),
         ActivityErrorKind::SubmissionUnknown
     );
+}
+
+#[tokio::test]
+async fn query_names_the_endpoint_when_the_response_shape_mismatches() {
+    let server = MockServer::start().await;
+    json("query/get_activity", json!({"organizationId": 1}))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let auth = auth(&server, TurnkeyP256ApiKey::generate());
+    let error =
+        query::<Value, GetActivityRequest>("/public/v1/query/get_activity", &json!({}), &auth)
+            .await
+            .unwrap_err();
+    let error = activity_error(&error);
+    assert_eq!(error.kind(), ActivityErrorKind::MalformedResponse);
+    assert_eq!(error.to_string(), "get_activity response was malformed");
+    server.verify().await;
 }
 
 #[test]
@@ -220,15 +241,17 @@ async fn mutation_timeout_is_unknown_and_does_not_leak_body() {
         .expect(1)
         .mount(&server)
         .await;
-    let http = Client::builder()
-        .timeout(Duration::from_millis(10))
-        .build()
-        .unwrap();
-    let error = post(
-        &http,
+    let mut auth = auth(&server, TurnkeyP256ApiKey::generate());
+    auth.http = OnceLock::from(
+        Client::builder()
+            .timeout(Duration::from_millis(10))
+            .build()
+            .unwrap(),
+    );
+    let error = post::<Value>(
+        &auth,
         url(&server.uri(), "/public/v1/submit/test").unwrap(),
         "secret-marker".into(),
-        &TurnkeyP256ApiKey::generate(),
         true,
     )
     .await
@@ -252,11 +275,11 @@ async fn mutation_connection_failure_is_safe_to_retry() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         format!("http://{}", listener.local_addr().unwrap())
     };
-    let error = post(
-        &client().unwrap(),
+    let auth = ResolvedAuth::for_tests(ORG, &base, TurnkeyP256ApiKey::generate());
+    let error = post::<Value>(
+        &auth,
         url(&base, "/public/v1/submit/test").unwrap(),
         "{}".into(),
-        &TurnkeyP256ApiKey::generate(),
         true,
     )
     .await
@@ -276,7 +299,7 @@ async fn mutation_connection_failure_is_safe_to_retry() {
 async fn vote_submission_failures_retain_last_observed_target() {
     for approve in [true, false] {
         for timeout in [true, false] {
-            let (server, auth) = consensus_target(1).await;
+            let (server, mut auth) = consensus_target(1).await;
             let vote_path = if approve {
                 "/public/v1/submit/approve_activity"
             } else {
@@ -292,10 +315,12 @@ async fn vote_submission_failures_retain_last_observed_target() {
                 .expect(1)
                 .mount(&server)
                 .await;
-            let http = Client::builder()
-                .timeout(Duration::from_millis(100))
-                .build()
-                .unwrap();
+            auth.http = OnceLock::from(
+                Client::builder()
+                    .timeout(Duration::from_millis(100))
+                    .build()
+                    .unwrap(),
+            );
             let args = if approve {
                 ActivityCommand::Approve {
                     id: "target".into(),
@@ -305,7 +330,7 @@ async fn vote_submission_failures_retain_last_observed_target() {
                     id: "target".into(),
                 }
             };
-            let error = run_activity_with(&http, args, &auth).await.unwrap_err();
+            let error = run_activity(args, &auth).await.unwrap_err();
             let failure = activity_error(&error);
             assert_eq!(failure.kind(), ActivityErrorKind::SubmissionUnknown);
             assert_eq!(

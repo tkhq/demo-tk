@@ -5,18 +5,22 @@ use std::{
 };
 
 use anyhow::Result;
-use clap::{Args, Subcommand};
+use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 use serde::{Serialize, de::DeserializeOwned};
-use serde_json::{Value, from_slice, to_value};
+use serde_json::{Map, Value, from_slice, to_value};
+use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 use turnkey_client::generated::{
-    immutable::activity::v1 as intent, services::coordinator::public::v1 as query,
+    external::data::v1::ApiKey,
+    immutable::{activity::v1 as intent, common::v1 as common},
+    services::coordinator::public::v1 as query,
 };
 use uuid::Uuid;
 
 use crate::{
     auth::{ResolvedAuth, build_turnkey_client},
-    errors::{InvalidInput, Malformed, MissingResource},
-    operations::{OperationOutput, submit_activity},
+    errors::{ActivityError, ActivityErrorKind, InvalidInput, Malformed, MissingResource},
+    operations::{OperationOutput, query as query_api, submit_activity},
+    sessions::{duration::ExpiresIn, public_key::CompressedPublicKey},
 };
 
 #[derive(Debug, Subcommand)]
@@ -25,8 +29,9 @@ pub enum UserCommand {
     Get {
         id: Uuid,
     },
-    /// Create one or more users from a `CreateUsersIntentV4` parameters object.
-    Create(BodyArgs),
+    /// Create a user from flags, or one or more users from a
+    /// `CreateUsersIntentV4` parameters object.
+    Create(CreateUserArgs),
     /// Update user name, email, phone, or tag membership.
     Update(BodyArgs),
     Delete {
@@ -42,7 +47,8 @@ pub enum UserCommand {
 #[derive(Debug, Subcommand)]
 pub enum TagCommand {
     List,
-    Create(BodyArgs),
+    /// Create a tag by name, or from a `CreateUserTagIntent` parameters object.
+    Create(CreateTagArgs),
     Update(BodyArgs),
     Delete {
         #[arg(required = true, num_args = 1..)]
@@ -56,8 +62,9 @@ pub enum PolicyCommand {
     Get {
         id: Uuid,
     },
-    /// Create a policy from a `CreatePolicyIntentV3` parameters object.
-    Create(BodyArgs),
+    /// Create a policy from flags, or from a `CreatePolicyIntentV3` parameters
+    /// object.
+    Create(CreatePolicyArgs),
     /// Create multiple policies from a parameters object containing policies.
     CreateBatch(BodyArgs),
     /// Update with policyEffect/policyCondition/policyConsensus field names.
@@ -88,14 +95,92 @@ pub enum ApiKeyCommand {
 }
 
 #[derive(Debug, Args)]
-#[group(required = true, multiple = false)]
+#[group(skip)]
+#[command(group(ArgGroup::new("body_source").required(true).multiple(false).args(["input_json", "input_file"])))]
 pub struct BodyArgs {
+    #[command(flatten)]
+    body: BodySource,
+}
+
+#[derive(Debug, Args)]
+#[group(skip)]
+struct BodySource {
     /// Inline JSON parameters (no activity envelope).
     #[arg(long)]
     input_json: Option<String>,
     /// Read JSON parameters from a file, or - for stdin.
     #[arg(long)]
     input_file: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+#[command(group(ArgGroup::new("user_source").required(true).args(["input_json", "input_file", "user_name"])))]
+pub struct CreateUserArgs {
+    #[command(flatten)]
+    body: BodySource,
+    /// Name of the single user to create.
+    #[arg(long)]
+    user_name: Option<String>,
+    /// Email of the user.
+    #[arg(long, requires = "user_name")]
+    email: Option<String>,
+    /// Tag id to attach (repeatable).
+    #[arg(long = "tag", requires = "user_name")]
+    tags: Vec<Uuid>,
+    /// Tag name to attach, resolved against the organization's tags (repeatable).
+    #[arg(long = "tag-name", requires = "user_name")]
+    tag_names: Vec<String>,
+    /// Compressed P256 public key (hex) to register as the user's API key.
+    #[arg(long, requires = "user_name")]
+    public_key: Option<CompressedPublicKey>,
+    /// Lifetime of that API key, for example 7d; omit for a key that never expires.
+    #[arg(long, requires = "public_key")]
+    expires_in: Option<ExpiresIn>,
+    /// Also register a never-expiring anchor key whose private half is
+    /// generated here and discarded. Turnkey requires every user to hold one
+    /// long-lived credential, so this lets a user otherwise live on expiring
+    /// keys alone.
+    #[arg(long, requires = "user_name")]
+    anchor_key: bool,
+}
+
+#[derive(Debug, Args)]
+#[command(group(ArgGroup::new("tag_source").required(true).args(["input_json", "input_file", "name"])))]
+pub struct CreateTagArgs {
+    #[command(flatten)]
+    body: BodySource,
+    /// Name of the new tag, with no members.
+    #[arg(long)]
+    name: Option<String>,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum EffectArg {
+    Allow,
+    Deny,
+}
+
+#[derive(Debug, Args)]
+#[command(group(ArgGroup::new("policy_source").required(true).args(["input_json", "input_file", "name"])))]
+#[command(group(ArgGroup::new("rule").args(["condition", "consensus"]).multiple(true)))]
+pub struct CreatePolicyArgs {
+    #[command(flatten)]
+    body: BodySource,
+    /// Name of the policy; needs --effect and --condition and/or --consensus.
+    #[arg(long, requires_all = ["effect", "rule"])]
+    name: Option<String>,
+    /// Whether matching activities are allowed or denied.
+    #[arg(long, value_enum, requires = "name")]
+    effect: Option<EffectArg>,
+    /// Condition expression, evaluated against the activity.
+    #[arg(long, requires = "name")]
+    condition: Option<String>,
+    /// Consensus expression, evaluated against the approvers.
+    #[arg(long, requires = "name")]
+    consensus: Option<String>,
+    /// Free-text notes stored with the policy.
+    #[arg(long, requires = "name")]
+    notes: Option<String>,
 }
 
 pub enum PreparedResource {
@@ -115,6 +200,10 @@ pub enum Query {
 
 pub enum Mutation {
     CreateUsers(intent::CreateUsersIntentV4),
+    CreateUser {
+        user: intent::UserParamsV4,
+        tag_names: Vec<String>,
+    },
     UpdateUser(intent::UpdateUserIntent),
     DeleteUsers(intent::DeleteUsersIntent),
     CreateTag(intent::CreateUserTagIntent),
@@ -131,6 +220,12 @@ pub enum Mutation {
 
 impl BodyArgs {
     pub(crate) fn parse<T: DeserializeOwned + Serialize>(self) -> Result<T> {
+        self.body.parse()
+    }
+}
+
+impl BodySource {
+    fn parse<T: DeserializeOwned + Serialize>(self) -> Result<T> {
         let bytes = match (self.input_json, self.input_file) {
             (Some(json), _) => json.into_bytes(),
             (None, Some(path)) if path.as_os_str() == "-" => {
@@ -234,12 +329,54 @@ impl UserCommand {
         Ok(match self {
             UserCommand::List => PreparedResource::Query(Query::Users),
             UserCommand::Get { id } => PreparedResource::Query(Query::User(id)),
-            UserCommand::Create(body) => {
+            UserCommand::Create(CreateUserArgs {
+                body,
+                user_name: None,
+                ..
+            }) => {
                 let params: intent::CreateUsersIntentV4 = body.parse()?;
                 if params.users.is_empty() {
                     return Err(InvalidInput("users must contain at least one user".into()).into());
                 }
                 PreparedResource::Mutation(Mutation::CreateUsers(params))
+            }
+            UserCommand::Create(CreateUserArgs {
+                user_name: Some(user_name),
+                email,
+                tags,
+                tag_names,
+                public_key,
+                expires_in,
+                anchor_key,
+                ..
+            }) => {
+                let anchor = anchor_key.then(|| intent::ApiKeyParamsV2 {
+                    api_key_name: format!("{user_name}-anchor"),
+                    public_key: CompressedPublicKey::from(&TurnkeyP256ApiKey::generate())
+                        .to_string(),
+                    curve_type: common::ApiKeyCurve::P256,
+                    expiration_seconds: None,
+                });
+                let api_keys = anchor
+                    .into_iter()
+                    .chain(public_key.map(|public_key| intent::ApiKeyParamsV2 {
+                        api_key_name: format!("{user_name}-key"),
+                        public_key: public_key.to_string(),
+                        curve_type: common::ApiKeyCurve::P256,
+                        expiration_seconds:
+                            expires_in.map(|expires_in| expires_in.seconds().to_string()),
+                    }))
+                    .collect();
+                let user = intent::UserParamsV4 {
+                    user_name,
+                    user_email: email,
+                    user_phone_number: None,
+                    api_keys,
+                    authenticators: vec![],
+                    oauth_providers: vec![],
+                    user_tags: tags.iter().map(ToString::to_string).collect(),
+                };
+                PreparedResource::Mutation(Mutation::CreateUser { user, tag_names })
             }
             UserCommand::Update(body) => {
                 PreparedResource::Mutation(Mutation::UpdateUser(body.parse()?))
@@ -251,7 +388,16 @@ impl UserCommand {
             }
             UserCommand::Tag { command } => match command {
                 TagCommand::List => PreparedResource::Query(Query::Tags),
-                TagCommand::Create(body) => {
+                TagCommand::Create(CreateTagArgs {
+                    name: Some(user_tag_name),
+                    ..
+                }) => {
+                    PreparedResource::Mutation(Mutation::CreateTag(intent::CreateUserTagIntent {
+                        user_tag_name,
+                        user_ids: vec![],
+                    }))
+                }
+                TagCommand::Create(CreateTagArgs { body, name: None }) => {
                     PreparedResource::Mutation(Mutation::CreateTag(body.parse()?))
                 }
                 TagCommand::Update(body) => {
@@ -272,9 +418,34 @@ impl PolicyCommand {
         Ok(match self {
             PolicyCommand::List => PreparedResource::Query(Query::Policies),
             PolicyCommand::Get { id } => PreparedResource::Query(Query::Policy(id)),
-            PolicyCommand::Create(body) => {
-                PreparedResource::Mutation(Mutation::CreatePolicy(body.parse()?))
+            PolicyCommand::Create(CreatePolicyArgs {
+                name: Some(policy_name),
+                effect: Some(effect),
+                condition,
+                consensus,
+                notes,
+                ..
+            }) => {
+                PreparedResource::Mutation(Mutation::CreatePolicy(intent::CreatePolicyIntentV3 {
+                    policy_name,
+                    effect: match effect {
+                        EffectArg::Allow => common::Effect::Allow,
+                        EffectArg::Deny => common::Effect::Deny,
+                    },
+                    condition,
+                    consensus,
+                    notes: notes.unwrap_or_default(),
+                    time: None,
+                }))
             }
+            PolicyCommand::Create(CreatePolicyArgs {
+                body, name: None, ..
+            }) => PreparedResource::Mutation(Mutation::CreatePolicy(body.parse()?)),
+            PolicyCommand::Create(CreatePolicyArgs {
+                name: Some(_),
+                effect: None,
+                ..
+            }) => unreachable!("clap requires --effect with --name"),
             PolicyCommand::CreateBatch(body) => {
                 let params: intent::CreatePoliciesIntent = body.parse()?;
                 if params.policies.is_empty() {
@@ -330,6 +501,35 @@ impl ApiKeyCommand {
     }
 }
 
+pub(crate) fn expires_at_unix_ms(key: &ApiKey) -> Result<Option<u64>> {
+    let Some(lifetime) = key.expiration_seconds else {
+        return Ok(None);
+    };
+    let created = key.created_at.as_ref().ok_or_else(|| {
+        ActivityError::new(
+            ActivityErrorKind::MalformedResponse,
+            "get_api_keys returned an expiring apiKeys[] entry without createdAt",
+        )
+    })?;
+    let created: u64 = created.seconds.parse().map_err(|error| {
+        Malformed::new(
+            format!(
+                "get_api_keys returned a non-numeric apiKeys[].createdAt.seconds: {:?}",
+                created.seconds
+            ),
+            error,
+        )
+    })?;
+    let at_ms = (u128::from(created) + u128::from(lifetime)) * 1000;
+    let at_ms = u64::try_from(at_ms).map_err(|error| {
+        Malformed::new(
+            "get_api_keys returned apiKeys[].createdAt.seconds plus apiKeys[].expirationSeconds beyond the unix millisecond range",
+            error,
+        )
+    })?;
+    Ok(Some(at_ms))
+}
+
 impl PreparedResource {
     pub async fn run(self, auth: ResolvedAuth) -> Result<OperationOutput> {
         match self {
@@ -348,6 +548,21 @@ impl Mutation {
                 "ACTIVITY_TYPE_CREATE_USERS_V4",
                 to_value(p)?,
             ),
+            Self::CreateUser {
+                mut user,
+                tag_names,
+            } => {
+                if !tag_names.is_empty() {
+                    user.user_tags
+                        .extend(resolve_tag_names(&auth, tag_names).await?);
+                }
+                (
+                    "user.create",
+                    "create_users",
+                    "ACTIVITY_TYPE_CREATE_USERS_V4",
+                    to_value(intent::CreateUsersIntentV4 { users: vec![user] })?,
+                )
+            }
             Self::UpdateUser(p) => (
                 "user.update",
                 "update_user",
@@ -425,6 +640,38 @@ impl Mutation {
     }
 }
 
+async fn resolve_tag_names(auth: &ResolvedAuth, names: Vec<String>) -> Result<Vec<String>> {
+    let listed: query::ListUserTagsResponse = query_api(
+        "/public/v1/query/list_user_tags",
+        &query::ListUserTagsRequest {
+            organization_id: auth.org_id.to_string(),
+        },
+        auth,
+    )
+    .await?;
+    names
+        .into_iter()
+        .map(|name| {
+            let matches: Vec<&str> = listed
+                .user_tags
+                .iter()
+                .filter(|tag| tag.tag_name == name)
+                .map(|tag| tag.tag_id.as_str())
+                .collect();
+            match matches.as_slice() {
+                [] => Err(MissingResource::new("user tag", name).into()),
+                [one] => Ok((*one).to_owned()),
+                many => Err(InvalidInput(format!(
+                    "{} tags are named {name}; pass --tag with one of: {}",
+                    many.len(),
+                    many.join(", ")
+                ))
+                .into()),
+            }
+        })
+        .collect()
+}
+
 impl Query {
     async fn run(self, auth: ResolvedAuth) -> Result<OperationOutput> {
         let client = build_turnkey_client(auth.stamper, &auth.api_base_url)?;
@@ -489,17 +736,27 @@ impl Query {
                         .await?,
                 )?,
             ),
-            Self::ApiKeys(user_id) => (
-                "api-key.list",
-                to_value(
-                    client
-                        .get_api_keys(query::GetApiKeysRequest {
-                            organization_id,
-                            user_id: user_id.map(|id| id.to_string()),
-                        })
-                        .await?,
-                )?,
-            ),
+            Self::ApiKeys(user_id) => {
+                let query::GetApiKeysResponse { api_keys } = client
+                    .get_api_keys(query::GetApiKeysRequest {
+                        organization_id,
+                        user_id: user_id.map(|id| id.to_string()),
+                    })
+                    .await?;
+                let keys = api_keys
+                    .into_iter()
+                    .map(|key| {
+                        let expires_at = expires_at_unix_ms(&key)?;
+                        let mut key = to_value(key)?;
+                        key["expiresAt"] = expires_at.map(|ms| ms.to_string()).into();
+                        Ok(key)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                (
+                    "api-key.list",
+                    Value::Object(Map::from_iter([("apiKeys".to_owned(), Value::Array(keys))])),
+                )
+            }
         };
         Ok(OperationOutput::result(command, data))
     }
@@ -510,13 +767,12 @@ impl Query {
 #[allow(clippy::disallowed_types)]
 mod tests {
     use super::*;
-    use crate::errors::{ActivityError, ActivityErrorKind, Classification, ErrorCode, classify};
+    use crate::errors::{Classification, ErrorCode, classify};
     use clap::Parser;
     use serde_json::{from_value, json, to_vec};
     use std::iter::once;
     use tempfile::NamedTempFile;
-    use turnkey_api_key_stamper::TurnkeyP256ApiKey;
-    use turnkey_client::generated::external::activity::v1 as activity;
+    use turnkey_client::generated::external::{activity::v1 as activity, data::v1::Timestamp};
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
@@ -576,6 +832,16 @@ mod tests {
                 "-",
             ],
             vec!["policy", "create"],
+            vec!["policy", "create", "--name", "p", "--condition", "true"],
+            vec!["policy", "create", "--name", "p", "--effect", "allow"],
+            vec![
+                "policy",
+                "create",
+                "--effect",
+                "allow",
+                "--input-json",
+                "{}",
+            ],
             vec!["user", "create", "--input-json", r#"{"users":[]}"#],
             vec![
                 "api-key",
@@ -777,6 +1043,45 @@ mod tests {
                 server.verify().await;
             }
         }
+    }
+
+    #[test]
+    fn listed_key_expiry_distinguishes_absent_from_malformed() {
+        let key = |created_at: Option<&str>, expiration_seconds: Option<u64>| ApiKey {
+            credential: None,
+            api_key_id: ID.to_owned(),
+            api_key_name: "key".to_owned(),
+            created_at: created_at.map(|seconds| Timestamp {
+                seconds: seconds.to_owned(),
+                nanos: "0".to_owned(),
+            }),
+            updated_at: None,
+            expiration_seconds,
+        };
+        assert_eq!(
+            expires_at_unix_ms(&key(Some("1700000000"), None)).unwrap(),
+            None
+        );
+        assert_eq!(
+            expires_at_unix_ms(&key(Some("1700000000"), Some(7200))).unwrap(),
+            Some(1_700_007_200_000)
+        );
+        let error = expires_at_unix_ms(&key(Some("soon"), Some(7200))).unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<Malformed>()
+                .expect("a Malformed error")
+                .to_string(),
+            r#"get_api_keys returned a non-numeric apiKeys[].createdAt.seconds: "soon""#
+        );
+        let error = expires_at_unix_ms(&key(None, Some(7200))).unwrap_err();
+        assert_eq!(
+            error
+                .downcast_ref::<ActivityError>()
+                .expect("an ActivityError")
+                .to_string(),
+            "get_api_keys returned an expiring apiKeys[] entry without createdAt"
+        );
     }
 
     #[tokio::test]
