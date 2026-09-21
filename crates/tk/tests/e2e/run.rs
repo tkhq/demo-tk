@@ -27,7 +27,11 @@ const SCRUBBED: [&str; 10] = [
     "RUST_LOG",
 ];
 const UNROUTABLE: &str = "http://127.0.0.1:9";
-const ATTEMPTS: u32 = 5;
+/// The API's rate limiter soft-blocks an organization for 60 seconds once its
+/// per-minute usage limit trips, and blocked requests are rejected with 429
+/// until the block expires. Cumulative backoff must therefore span more than
+/// 60 seconds: 1+2+4+8+16+32 = 63 seconds ahead of the final attempt.
+const ATTEMPTS: u32 = 7;
 
 fn backoff(attempt: u32) {
     thread::sleep(Duration::from_secs(1u64 << (attempt - 1)));
