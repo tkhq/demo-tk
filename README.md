@@ -4,39 +4,41 @@
     A CLI for machines to use Turnkey for git, ssh, and credential management.
 </h4>
 
-`tk` is focused on general agent authorization, attribution, and credential
-management with Turnkey backed keys.
+`tk` is the CLI for agent authorization on Turnkey: credentials, users and
+tags, policies, secrets, sessions, SSH, and Git signing backed by Turnkey keys.
 
-## Installation
+## Getting started
 
-Install the latest release binary (Linux and macOS, x86_64 and arm64):
+Paste this into your agent:
+
+```
+Install the Turnkey tk CLI with
+`curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/tkhq/tk/main/install.sh | sh`.
+Install the tk skills by downloading https://github.com/tkhq/tk/tree/main/skills
+into your skills directory, read its SKILL.md, and walk me through
+bootstrapping my Turnkey organization at https://app.turnkey.com.
+```
+
+The skills in [skills/](./skills/SKILL.md) cover bootstrapping an
+organization, managing identities, policies, activities, and secrets.
+
+## Manual installation
 
 ```bash
 curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/tkhq/tk/main/install.sh | sh
 ```
 
-Every pull request push also publishes a prerelease tagged `pr-<number>-<short sha>`.
-Install one by naming it:
+## Docs
 
-```bash
-curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/tkhq/tk/main/install.sh | TK_VERSION=pr-44-abc1234 sh
-```
-
-## Guides
-
-Start with [authentication](./docs/authentication.md), then pick a workflow:
-
+- [Authentication](./docs/authentication.md): profiles and the environment bundle
 - [Resources](./docs/resources.md): users, policies, API keys, and wallets
 - [Signing](./docs/signing.md): payloads and serialized transactions
 - [Activities](./docs/activities.md): inspect, approve, reject, and wait
 - [Raw requests](./docs/requests.md): sign and send an exact request body
 - [Secrets](./docs/secrets.md)
-- [Sessions](./docs/sessions.md): expiring keys an agent requests, a provisioner registers, and the agent rotates onto
+- [Sessions](./docs/sessions.md): expiring keys minted by a provisioner
 - [SSH](./docs/ssh-agent.md): registered keys and the SSH agent
 - [Git signing](./docs/git-signing.md)
 - [GPG signing](./docs/gpg-signing.md)
-
-Every command accepts `--message-format json` for one JSON object per line.
-See `tk --help` for the error code taxonomy and exit codes.
 
 For maintainers: [releasing](./docs/releasing.md).

@@ -35,9 +35,10 @@ tk session request --profile-name agent --replace   # drop an unregistered reque
 
 The profile must already exist. The request is remembered under
 `~/.config/turnkey/tk/sessions/pending/<profile>.json` until `activate` uses it.
-`userId` is read with the profile's current credential and is `null` if that
-credential no longer works; pass the user id to the provisioner by other means
-then.
+`userId` is read with the profile's current credential and is `null` only when
+that credential is no longer authorized; pass the user id to the provisioner
+by other means then. Any other lookup failure, such as a rate limit or a
+network error, fails the command before it generates a key, so it can be rerun.
 
 ## Provision
 

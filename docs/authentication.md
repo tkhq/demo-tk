@@ -50,3 +50,8 @@ tk whoami
 
 `--profile` or `TK_PROFILE` wins over the environment bundle, which wins over
 the active profile. Credential secrets are never accepted as arguments.
+
+## Skills
+
+- [bootstrapping-organization](../skills/bootstrapping-organization/SKILL.md): the root profile and tags an organization needs before its first agent.
+- [managing-identities](../skills/managing-identities/SKILL.md): creating users and rotating the credentials profiles hold.

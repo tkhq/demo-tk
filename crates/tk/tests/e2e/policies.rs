@@ -1,4 +1,4 @@
-use crate::run::{Run, id_of, result};
+use crate::run::{AGENT_TAG, Run, id_of, result, tag_consensus};
 use serde_json::json;
 
 #[test]
@@ -237,4 +237,105 @@ fn policy_create_from_flags_stores_effect_condition_consensus_and_notes() {
         "approvers.any(user, user.tags.contains('00000000-0000-4000-8000-000000000001'))"
     );
     assert_eq!(got["data"]["policy"]["notes"], "tk e2e flags");
+}
+
+#[test]
+#[ignore]
+fn managing_policies_crud_and_evaluations() {
+    let run = Run::new();
+    let agent_tag = run.create_tag(AGENT_TAG);
+    let (_, agent) = run.create_tagged_user("agent", AGENT_TAG);
+
+    let name = run.name("agents-create-tags");
+    let consensus = tag_consensus(&agent_tag);
+    let condition = "activity.type == 'ACTIVITY_TYPE_CREATE_USER_TAG'";
+    let policy_id = run.create_policy_from_flags(&name, "allow", &consensus, condition);
+
+    let got = run.ok(run.admin().args(["policy", "get", &policy_id]));
+    assert_eq!(got["command"], "policy.get");
+    assert_eq!(got["data"]["policy"]["policyName"], name);
+    assert_eq!(got["data"]["policy"]["effect"], "EFFECT_ALLOW");
+    assert_eq!(got["data"]["policy"]["condition"], condition);
+    assert_eq!(got["data"]["policy"]["consensus"], consensus);
+    let listed = run.ok(run.admin().args(["policy", "list"]));
+    assert!(
+        listed["data"]["policies"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|policy| policy["policyId"] == policy_id),
+        "{listed}"
+    );
+
+    let allowed = run.submit(
+        run.as_user(&agent)
+            .args(["user", "tag", "create", "--name", &run.name("allowed")]),
+        "user.tag.create",
+    );
+    let allowed_activity = id_of(&allowed);
+    let evaluations = run.ok(run
+        .admin()
+        .args(["policy", "evaluations", &allowed_activity]));
+    assert_eq!(evaluations["command"], "policy.evaluations");
+    let outcomes: Vec<(&str, &str)> = evaluations["data"]["policyEvaluations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|vote| vote["policyEvaluations"].as_array().unwrap())
+        .map(|evaluation| {
+            (
+                evaluation["policyId"].as_str().unwrap(),
+                evaluation["outcome"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert!(
+        outcomes.contains(&(policy_id.as_str(), "OUTCOME_ALLOW")),
+        "{evaluations}"
+    );
+
+    let denied = run.err(run.as_user(&agent).args([
+        "policy",
+        "create",
+        "--name",
+        &run.name("escape"),
+        "--effect",
+        "allow",
+        "--condition",
+        "true",
+    ]));
+    assert_eq!(denied["code"], "unauthorized", "{denied}");
+    assert_eq!(denied["httpStatus"], 403, "{denied}");
+
+    let updated = run.submit(
+        run.admin().args([
+            "policy",
+            "update",
+            "--input-json",
+            &json!({"policyId": policy_id, "policyNotes": "revised"}).to_string(),
+        ]),
+        "policy.update",
+    );
+    assert_eq!(
+        updated["data"]["activity"]["type"],
+        "ACTIVITY_TYPE_UPDATE_POLICY_V2"
+    );
+    let got = run.ok(run.admin().args(["policy", "get", &policy_id]));
+    assert_eq!(got["data"]["policy"]["notes"], "revised");
+    assert_eq!(got["data"]["policy"]["condition"], condition);
+
+    run.submit(
+        run.admin().args(["policy", "delete", &policy_id]),
+        "policy.delete",
+    );
+    let missing = run.err(run.admin().args(["policy", "get", &policy_id]));
+    assert_eq!(missing["code"], "not_found", "{missing}");
+    let denied = run.err(run.as_user(&agent).args([
+        "user",
+        "tag",
+        "create",
+        "--name",
+        &run.name("after-delete"),
+    ]));
+    assert_eq!(denied["code"], "unauthorized", "{denied}");
 }

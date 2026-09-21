@@ -27,10 +27,16 @@ const SCRUBBED: [&str; 10] = [
     "RUST_LOG",
 ];
 const UNROUTABLE: &str = "http://127.0.0.1:9";
+pub(crate) const AGENT_TAG: &str = "agent";
+pub(crate) const HUMAN_TAG: &str = "human-approver";
 const ATTEMPTS: u32 = 5;
+const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(10);
 
 fn backoff(attempt: u32) {
     thread::sleep(Duration::from_secs(1u64 << (attempt - 1)));
+}
+fn rate_limited(record: &Value) -> bool {
+    record["httpStatus"].as_u64() == Some(429)
 }
 fn activity_failed(record: &Value) -> bool {
     record["reason"] == "command_error"
@@ -100,6 +106,18 @@ pub(crate) fn one_api_key(run: &Run, label: &str) -> Value {
         "publicKey": hex::encode(key.compressed_public_key()),
         "curveType": "API_KEY_CURVE_P256",
     }])
+}
+
+pub(crate) fn tag_consensus(tag: &str) -> String {
+    format!("approvers.any(user, user.tags.contains('{tag}'))")
+}
+
+pub(crate) fn allow_once(agent_tag: &str, human_tag: &str) -> String {
+    format!(
+        "{} && {}",
+        tag_consensus(agent_tag),
+        tag_consensus(human_tag)
+    )
 }
 
 pub(crate) fn user_params(name: &str, api_keys: Value) -> String {
@@ -303,7 +321,11 @@ impl Run {
                 return (exit, record, stdout);
             }
             eprintln!("transient failure, attempt {attempt}/{ATTEMPTS}: {stdout}");
-            backoff(attempt);
+            if rate_limited(&record) {
+                thread::sleep(RATE_LIMIT_BACKOFF * (1 << (attempt - 1)));
+            } else {
+                backoff(attempt);
+            }
         }
         self.run(cmd)
     }
@@ -563,9 +585,8 @@ impl Run {
         ]);
         cmd
     }
-    // The admin key in `tk api-key generate` format.
-    fn admin_key_file(&self) -> PathBuf {
-        let path = self.home.path().join("admin-key.json");
+    fn write_key_file(&self, name: &str, public: &str, private: &str) -> PathBuf {
+        let path = self.home.path().join(name);
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -574,8 +595,8 @@ impl Run {
             .unwrap();
         file.write_all(
             json!({
-                "public_key": self.config.public_key,
-                "private_key": self.config.private_key.0,
+                "public_key": public,
+                "private_key": private,
                 "curve": "p256",
             })
             .to_string()
@@ -585,10 +606,113 @@ impl Run {
         path
     }
 
+    pub(crate) fn login_as(&self, name: &str, key: &TurnkeyP256ApiKey) -> PathBuf {
+        let key_file = self.write_key_file(
+            &format!("{name}.json"),
+            &hex::encode(key.compressed_public_key()),
+            &hex::encode(key.private_key()),
+        );
+        self.ok(self
+            .cli()
+            .args([
+                "profile",
+                "create",
+                "--profile-name",
+                name,
+                "--organization-id",
+                self.org(),
+                "--api-key-file",
+            ])
+            .arg(&key_file));
+        self.ok(self.cli().args(["login", "--profile-name", name]));
+        key_file
+    }
+
+    pub(crate) fn create_policy_from_flags(
+        &self,
+        name: &str,
+        effect: &str,
+        consensus: &str,
+        condition: &str,
+    ) -> String {
+        let created = self.submit(
+            self.admin().args([
+                "policy",
+                "create",
+                "--name",
+                name,
+                "--effect",
+                effect,
+                "--consensus",
+                consensus,
+                "--condition",
+                condition,
+            ]),
+            "policy.create",
+        );
+        result(&created, "createPolicyResult")["policyId"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    pub(crate) fn register_api_key(&self, user_id: &str, name: &str, public_key: &str) -> Value {
+        self.submit(
+            self.admin().args([
+                "api-key",
+                "register",
+                "--input-json",
+                &json!({
+                    "userId": user_id,
+                    "apiKeys": [{
+                        "apiKeyName": name,
+                        "publicKey": public_key,
+                        "curveType": "API_KEY_CURVE_P256",
+                    }],
+                })
+                .to_string(),
+            ]),
+            "api-key.register",
+        )
+    }
+
+    pub(crate) fn create_tag(&self, name: &str) -> String {
+        let tagged = self.submit(
+            self.admin().args(["user", "tag", "create", "--name", name]),
+            "user.tag.create",
+        );
+        result(&tagged, "createUserTagResult")["userTagId"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    pub(crate) fn create_tagged_user(&self, label: &str, tag: &str) -> (String, TurnkeyP256ApiKey) {
+        let key = self.key();
+        let created = self.submit(
+            self.admin().args([
+                "user",
+                "create",
+                "--user-name",
+                &self.name(label),
+                "--tag-name",
+                tag,
+                "--public-key",
+                &hex::encode(key.compressed_public_key()),
+            ]),
+            "user.create",
+        );
+        (created_user_id(&created), key)
+    }
+
     /// Saves the admin key as a profile named after this run and logs in.
     pub(crate) fn login_admin(&self) -> AdminLogin {
         let name = self.name("admin");
-        let key_file = self.admin_key_file();
+        let key_file = self.write_key_file(
+            "admin-key.json",
+            &self.config.public_key,
+            &self.config.private_key.0,
+        );
         self.ok(self
             .cli()
             .args([

@@ -28,3 +28,8 @@ To see which policies decided an activity:
 ```bash
 tk policy evaluations ACTIVITY_ID
 ```
+
+## Skills
+
+- [monitoring-activities](../skills/monitoring-activities/SKILL.md): approving, rejecting, waiting, and reconciling an unknown outcome.
+- [managing-policies](../skills/managing-policies/SKILL.md): reading `policy evaluations` for a denial.

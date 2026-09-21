@@ -35,4 +35,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - name: Run end-to-end tests
-        run: cargo test --locked -p tk --test e2e -- --ignored
+        run: cargo test --locked -p tk --test e2e -- --ignored --test-threads 4

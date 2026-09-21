@@ -1,4 +1,4 @@
-use crate::run::{AdminLogin, Run, result};
+use crate::run::{AGENT_TAG, AdminLogin, HUMAN_TAG, Run, result};
 use serde_json::{Value, json};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -344,23 +344,7 @@ fn profile_create_generates_a_credential_that_logs_in_once_registered() {
     );
 
     let (user_id, _) = run.create_user("fresh-login");
-    let registered = run.submit(
-        run.admin().args([
-            "api-key",
-            "register",
-            "--input-json",
-            &json!({
-                "userId": user_id,
-                "apiKeys": [{
-                    "apiKeyName": run.name("fresh-key"),
-                    "publicKey": public_key,
-                    "curveType": "API_KEY_CURVE_P256",
-                }],
-            })
-            .to_string(),
-        ]),
-        "api-key.register",
-    );
+    let registered = run.register_api_key(&user_id, &run.name("fresh-key"), &public_key);
     assert_eq!(
         result(&registered, "createApiKeysResult")["apiKeyIds"]
             .as_array()
@@ -439,4 +423,82 @@ fn profile_set_switches_the_credential_file() {
         run.ok(run.cli().args(["profile", "show", &admin.name]))["data"]["profile"]["api_key_file"],
         fs::canonicalize(&admin.key_file).unwrap().to_str().unwrap()
     );
+}
+
+#[test]
+#[ignore]
+fn bootstrapping_organization_root_tags_and_approval_model() {
+    let run = Run::new();
+    let admin = run.login_admin();
+    let root_user = admin.record["data"]["identity"]["userId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let whoami = run.ok(run.cli().args(["--profile", &admin.name, "whoami"]));
+    assert_eq!(whoami["command"], "auth.whoami");
+    assert_eq!(whoami["data"]["userId"], root_user);
+    assert_eq!(whoami["data"]["organizationId"], run.org());
+
+    let mut tags = Vec::new();
+    for name in [AGENT_TAG, "provisioner", HUMAN_TAG] {
+        let created = run.submit(
+            run.cli().args([
+                "--profile",
+                &admin.name,
+                "user",
+                "tag",
+                "create",
+                "--name",
+                name,
+            ]),
+            "user.tag.create",
+        );
+        let id = result(&created, "createUserTagResult")["userTagId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(Uuid::parse_str(&id).is_ok(), "{created}");
+        tags.push((name, id));
+    }
+    let human_tag = &tags[2].1;
+
+    let updated = run.submit(
+        run.cli().args([
+            "--profile",
+            &admin.name,
+            "user",
+            "update",
+            "--input-json",
+            &json!({"userId": root_user, "userTagIds": [human_tag]}).to_string(),
+        ]),
+        "user.update",
+    );
+    assert_eq!(
+        updated["data"]["activity"]["type"],
+        "ACTIVITY_TYPE_UPDATE_USER"
+    );
+
+    let got = run.ok(run
+        .cli()
+        .args(["--profile", &admin.name, "user", "get", &root_user]));
+    assert_eq!(got["data"]["user"]["userTags"], json!([human_tag]));
+
+    let listed = run.ok(run
+        .cli()
+        .args(["--profile", &admin.name, "user", "tag", "list"]));
+    let listed: Vec<(&str, &str)> = listed["data"]["userTags"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tag| {
+            (
+                tag["tagName"].as_str().unwrap(),
+                tag["tagId"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    for (name, id) in &tags {
+        assert!(listed.contains(&(name, id.as_str())), "{listed:?}");
+    }
 }
