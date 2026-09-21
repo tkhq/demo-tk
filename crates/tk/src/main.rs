@@ -13,6 +13,8 @@ mod registry;
 mod resources;
 mod secrets;
 mod sessions;
+#[cfg(test)]
+mod skills;
 mod ssh;
 mod wallets;
 

@@ -265,6 +265,10 @@ fn classify_turnkey_client_error(error: &TurnkeyClientError) -> Classification {
     }
 }
 
+pub(crate) fn is_unauthorized(error: &anyhow::Error) -> bool {
+    matches!(classify(error).code, ErrorCode::Unauthorized)
+}
+
 pub(crate) fn transient_status(status: u16) -> bool {
     status == 429 || status >= 500
 }

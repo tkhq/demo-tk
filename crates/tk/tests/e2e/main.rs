@@ -30,6 +30,7 @@ mod policies;
 mod request;
 mod secrets;
 mod sessions;
+mod skills;
 mod ssh;
 mod ssh_agent;
 mod users;

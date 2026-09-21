@@ -1,5 +1,5 @@
-use crate::run::{Run, id_of, result};
-use serde_json::json;
+use crate::run::{AGENT_TAG, HUMAN_TAG, Run, allow_once, id_of, result};
+use serde_json::{Value, json};
 
 #[test]
 #[ignore]
@@ -52,4 +52,126 @@ fn activity_list_paginates_and_get_and_wait_inspect_a_completed_activity() {
     for item in next_items {
         assert!(!items.contains(item), "cursor page repeated {}", item["id"]);
     }
+}
+
+#[test]
+#[ignore]
+fn monitoring_activities_approve_reject_wait() {
+    let run = Run::new();
+    let agent_tag = run.create_tag(AGENT_TAG);
+    let human_tag = run.create_tag(HUMAN_TAG);
+    let (agent_id, agent) = run.create_tagged_user("agent", AGENT_TAG);
+    let (human_id, human) = run.create_tagged_user("human", HUMAN_TAG);
+    run.create_policy_from_flags(
+        &run.name("agents-create-tags-with-approval"),
+        "allow",
+        &allow_once(&agent_tag, &human_tag),
+        "activity.type == 'ACTIVITY_TYPE_CREATE_USER_TAG'",
+    );
+
+    let pending = run.ok(run.as_user(&agent).args([
+        "user",
+        "tag",
+        "create",
+        "--name",
+        &run.name("approved"),
+    ]));
+    assert_eq!(pending["command"], "user.tag.create");
+    assert_eq!(pending["status"], "pending");
+    let activity = id_of(&pending);
+    assert_eq!(
+        pending["activity"],
+        json!({"id": activity, "status": "ACTIVITY_STATUS_CONSENSUS_NEEDED"})
+    );
+
+    let listed = run.ok(run
+        .as_user(&human)
+        .args(["activity", "list", "--limit", "50"]));
+    assert_eq!(listed["command"], "activity.list");
+    let item = listed["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == activity)
+        .unwrap_or_else(|| panic!("pending activity missing from list: {listed}"));
+    assert_eq!(item["status"], "ACTIVITY_STATUS_CONSENSUS_NEEDED");
+    assert_eq!(item["type"], "ACTIVITY_TYPE_CREATE_USER_TAG");
+
+    let got = run.ok(run.as_user(&human).args(["activity", "get", &activity]));
+    assert_eq!(got["status"], "pending");
+    assert_eq!(
+        votes(&got),
+        [(agent_id.as_str(), "VOTE_SELECTION_APPROVED")],
+        "{got}"
+    );
+
+    let approved = run.ok(run.as_user(&human).args(["activity", "approve", &activity]));
+    assert_eq!(approved["command"], "activity.approve");
+    assert_eq!(approved["activity"]["id"], activity);
+    let waited =
+        run.ok(run
+            .as_user(&agent)
+            .args(["activity", "wait", &activity, "--timeout", "60"]));
+    assert_eq!(waited["command"], "activity.wait");
+    assert_eq!(waited["status"], "completed");
+    assert!(
+        result(&waited, "createUserTagResult")["userTagId"].is_string(),
+        "{waited}"
+    );
+    let got = run.ok(run.as_user(&agent).args(["activity", "get", &activity]));
+    let voters = votes(&got);
+    assert_eq!(voters.len(), 2, "{got}");
+    assert!(
+        voters.iter().any(|(u, _)| *u == agent_id) && voters.iter().any(|(u, _)| *u == human_id)
+    );
+
+    let pending = run.ok(run.as_user(&agent).args([
+        "user",
+        "tag",
+        "create",
+        "--name",
+        &run.name("rejected"),
+    ]));
+    assert_eq!(pending["status"], "pending");
+    let rejected_activity = id_of(&pending);
+    let rejected = run.ok(run
+        .as_user(&human)
+        .args(["activity", "reject", &rejected_activity]));
+    assert_eq!(rejected["command"], "activity.reject");
+    assert_eq!(rejected["status"], "rejected");
+    let failed = run.err(run.as_user(&agent).args([
+        "activity",
+        "wait",
+        &rejected_activity,
+        "--timeout",
+        "60",
+    ]));
+    assert_eq!(failed["code"], "api_error", "{failed}");
+    assert_eq!(
+        failed["details"]["activity"],
+        json!({"id": rejected_activity, "status": "ACTIVITY_STATUS_REJECTED"})
+    );
+    let got = run.ok(run
+        .as_user(&human)
+        .args(["activity", "get", &rejected_activity]));
+    assert!(
+        votes(&got)
+            .iter()
+            .any(|(_, s)| *s == "VOTE_SELECTION_REJECTED"),
+        "{got}"
+    );
+}
+
+fn votes(record: &Value) -> Vec<(&str, &str)> {
+    record["data"]["activity"]["votes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|vote| {
+            (
+                vote["userId"].as_str().unwrap(),
+                vote["selection"].as_str().unwrap(),
+            )
+        })
+        .collect()
 }

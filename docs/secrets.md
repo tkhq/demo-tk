@@ -47,14 +47,19 @@ properties, and prints one dotenv line per secret. The variable name is the
 part of the secret name after the last `/`.
 
 ```bash
-tk secret import hermes/ANTHROPIC_API_KEY --property consensus=unilateral
-tk secret import hermes/GITHUB_TOKEN --property consensus=unilateral
-tk --profile hermes secret env --name-prefix hermes/ --property consensus=unilateral
-# ANTHROPIC_API_KEY=sk-ant-...
-# GITHUB_TOKEN=github_pat_...
+tk secret import service/API_TOKEN --property consensus=unilateral
+tk secret import service/DB_URL --property consensus=unilateral
 ```
 
-Values are written bare when they contain only letters, digits, and
+The process that needs them runs, at startup:
+
+<!-- shared: secret-env-startup -->
+```bash
+tk --profile agent --message-format json secret env --name-prefix service/ --property consensus=unilateral
+```
+
+In human mode the same command prints `API_TOKEN=...` and `DB_URL=...`, one
+per line. Values are written bare when they contain only letters, digits, and
 `_./:+=@,-`, and single-quoted otherwise. A value containing a newline, NUL, or
 single quote is refused. `--message-format json` returns the same values under
 `data.env` plus the selected secrets under `data.exported`.
@@ -62,11 +67,11 @@ single quote is refused. `--message-format json` returns the same values under
 Each secret is one export activity. If any of them needs approval the command
 prints nothing, exits 1 with code `approval_required`, and lists the pending
 activities under `details.pending`; approve them and run the same command
-again. Hermes Agent can use it as its `secrets.command`:
+again. Hermes Agent, for example, runs it as its `secrets.command`:
 
 ```yaml
 secrets:
-  command: /usr/local/bin/tk --profile hermes secret env --name-prefix hermes/ --property consensus=unilateral
+  command: /usr/local/bin/tk --profile agent secret env --name-prefix service/ --property consensus=unilateral
 ```
 
 ## Policy-visible metadata
@@ -102,3 +107,8 @@ state is swept after 8 hours and the activity expires after 24.
 ```bash
 tk --profile approver activity reject ACTIVITY_ID
 ```
+
+## Skills
+
+- [managing-secrets](../skills/managing-secrets/SKILL.md): import, startup environment, pending exports, and rotation as one procedure.
+- [monitoring-activities](../skills/monitoring-activities/SKILL.md): approving a pending export or deletion.

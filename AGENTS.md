@@ -208,6 +208,28 @@ Default guidance for coding-agent runs in this repository.
   on the first response.
 - The runner retries transient outcomes with exponential backoff: transport
   errors and HTTP 429/5xx at every call, and server-side `FAILED` activities
-  by re-submitting the command. Tests must not add their own sleeps or retry
+  by re-submitting the command. A 429 waits longer than other transient
+  failures because the API blocks the whole organization family for a minute
+  once its shared request bucket empties; CI also caps the suite at four
+  threads for the same reason. Tests must not add their own sleeps or retry
   loops, and must not retry to make an assertion pass; if a test is flaky,
   fix the runner's policy or the test's assumption.
+
+## Skills and docs
+
+- A pull request that adds or changes a command touches, in the same PR: the
+  command, its `--help`, the description in `docs/<area>.md`, any step in
+  `skills/` that invokes it, and the e2e test that executes that step. The
+  structural checks in `crates/tk/tests/skills.rs` and
+  `crates/tk/src/skills/` catch missing links, unparseable examples, unmapped
+  `## Verified by` tests, and diverged shared blocks; they cannot prove prose
+  was updated, so review remains part of the rule.
+- Command behavior, records, and errors live in `docs/<area>.md`. Multi-step
+  operator procedures, policy patterns, the approval matrix, and workflow
+  recovery live in `skills/`. A doc links to the skills that use its commands
+  in a `## Skills` footer; a skill lists the docs it depends on in a
+  `## Reference` section and does not restate flag inventories.
+- Every fenced `sh` block in `skills/` that invokes `tk` carries an
+  `<!-- example: <id> -->` line directly above it; `## Verified by` maps those
+  ids to `module::test` names in the e2e suite. A block that must stay
+  identical across files carries `<!-- shared: <id> -->`.

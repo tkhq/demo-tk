@@ -1,4 +1,4 @@
-use crate::run::Run;
+use crate::run::{AGENT_TAG, HUMAN_TAG, Run, allow_once, tag_consensus};
 use serde_json::json;
 use std::fs::{self, File};
 use std::time::{Duration, SystemTime};
@@ -496,4 +496,138 @@ fn secret_delete_removes_it_from_listing_and_export() {
     assert_ne!(replaced, secret_id);
     let exported = run.export(run.admin().args(["secret", "export", "--name", &name]));
     assert_eq!(exported["data"]["value"], "new-value");
+}
+
+#[test]
+#[ignore]
+fn managing_secrets_env_and_rotation() {
+    let run = Run::new();
+    let agent_tag = run.create_tag(AGENT_TAG);
+    let human_tag = run.create_tag(HUMAN_TAG);
+    let (agent_id, agent) = run.create_tagged_user("agent", AGENT_TAG);
+    let (_, human) = run.create_tagged_user("human", HUMAN_TAG);
+    run.create_policy_from_flags(
+        &run.name("agents-export-unilateral"),
+        "allow",
+        &tag_consensus(&agent_tag),
+        "activity.type == 'ACTIVITY_TYPE_EXPORT_SECRETS' && secret.static_properties['consensus'] == 'unilateral'",
+    );
+    run.create_policy_from_flags(
+        &run.name("agents-export-with-approval"),
+        "allow",
+        &allow_once(&agent_tag, &human_tag),
+        "activity.type == 'ACTIVITY_TYPE_EXPORT_SECRETS' && secret.static_properties['consensus'] == 'approval'",
+    );
+    run.create_policy_from_flags(
+        &run.name("agents-no-credentials"),
+        "deny",
+        &tag_consensus(&agent_tag),
+        "activity.resource == 'CREDENTIAL'",
+    );
+
+    let prefix = run.name("service");
+    let import = |var: &str, level: &str, value: &str| {
+        let file = run.home().join(format!("{var}.txt"));
+        fs::write(&file, value).unwrap();
+        let imported = run.submit(
+            run.admin()
+                .args([
+                    "secret",
+                    "import",
+                    &format!("{prefix}/{var}"),
+                    "--property",
+                    &format!("consensus={level}"),
+                    "--from-file",
+                ])
+                .arg(&file),
+            "secret.import",
+        );
+        assert_eq!(imported["data"]["name"], format!("{prefix}/{var}"));
+        imported["data"]["secretId"].as_str().unwrap().to_string()
+    };
+    let token_id = import("API_TOKEN", "unilateral", "tok-1");
+    import("DB_URL", "unilateral", "postgres://u:p@h/db");
+    let deploy_id = import("DEPLOY_KEY", "approval", "deploy-1");
+
+    let listed = run.ok(run
+        .as_user(&agent)
+        .args(["secret", "list", "--limit", "100"]));
+    let entry = listed["data"]["secrets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["secretId"] == deploy_id)
+        .unwrap_or_else(|| panic!("{listed}"));
+    assert_eq!(
+        entry["staticProperties"],
+        json!([{"key": "consensus", "value": "approval"}])
+    );
+    assert!(entry.get("value").is_none());
+
+    let env_args = ["secret", "env", "--name-prefix", &format!("{prefix}/")];
+    let unilateral = run.ok(run
+        .as_user(&agent)
+        .args(env_args)
+        .args(["--property", "consensus=unilateral"]));
+    assert_eq!(unilateral["command"], "secret.env");
+    assert_eq!(
+        unilateral["data"]["env"],
+        json!({"API_TOKEN": "tok-1", "DB_URL": "postgres://u:p@h/db"})
+    );
+    assert_eq!(unilateral["data"]["pending"], json!([]));
+
+    let gated = run.err(run.as_user(&agent).args(env_args));
+    assert_eq!(gated["code"], "approval_required", "{gated}");
+    let pending = gated["details"]["pending"].as_array().unwrap();
+    assert_eq!(pending.len(), 1, "{gated}");
+    assert_eq!(pending[0]["name"], format!("{prefix}/DEPLOY_KEY"));
+    assert_eq!(pending[0]["secretId"], deploy_id);
+    assert_eq!(pending[0]["var"], "DEPLOY_KEY");
+    let activity = pending[0]["activityId"].as_str().unwrap().to_string();
+    assert!(gated.get("data").is_none(), "{gated}");
+
+    run.ok(run.as_user(&human).args(["activity", "approve", &activity]));
+    run.wait(&activity);
+    let complete = run.ok(run.as_user(&agent).args(env_args));
+    assert_eq!(
+        complete["data"]["env"],
+        json!({
+            "API_TOKEN": "tok-1",
+            "DB_URL": "postgres://u:p@h/db",
+            "DEPLOY_KEY": "deploy-1",
+        })
+    );
+
+    let escape = run.err(
+        run.as_user(&agent).args([
+            "api-key",
+            "register",
+            "--input-json",
+            &json!({
+                "userId": agent_id,
+                "apiKeys": [{
+                    "apiKeyName": "escape",
+                    "publicKey": hex::encode(run.key().compressed_public_key()),
+                    "curveType": "API_KEY_CURVE_P256",
+                }],
+            })
+            .to_string(),
+        ]),
+    );
+    assert_eq!(escape["code"], "unauthorized", "{escape}");
+    assert_eq!(escape["httpStatus"], 403, "{escape}");
+
+    let deleted = run.submit(
+        run.admin()
+            .args(["secret", "delete", "--name", &format!("{prefix}/API_TOKEN")]),
+        "secret.delete",
+    );
+    assert_eq!(deleted["data"]["secretId"], token_id);
+    let rotated_id = import("API_TOKEN", "unilateral", "tok-2");
+    assert_ne!(rotated_id, token_id);
+    let rotated = run.ok(run
+        .as_user(&agent)
+        .args(env_args)
+        .args(["--property", "consensus=unilateral"]));
+    assert_eq!(rotated["data"]["env"]["API_TOKEN"], "tok-2");
 }

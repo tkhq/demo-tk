@@ -46,9 +46,9 @@ tk policy create --input-file - <<'EOF'
 {
   "policyName": "agents-sign-only",
   "effect": "EFFECT_ALLOW",
-  "condition": "activity.type == 'ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2'",
+  "condition": "activity.type == 'ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2' && wallet.id == 'WALLET_ID'",
   "consensus": "approvers.any(user, user.tags.contains('TAG_ID'))",
-  "notes": "agents may sign"
+  "notes": "agents may sign with one wallet"
 }
 EOF
 tk policy create-batch --input-file ./policies.json
@@ -103,3 +103,9 @@ tk wallet account create --input-file ./accounts.json
 
 A command that needs approval exits zero with status `pending` and an
 activity ID; see [activities](./activities.md).
+
+## Skills
+
+- [bootstrapping-organization](../skills/bootstrapping-organization/SKILL.md): the three tags and the tagged approver.
+- [managing-identities](../skills/managing-identities/SKILL.md): users, tags, key rotation, and revocation as one procedure.
+- [managing-policies](../skills/managing-policies/SKILL.md): writing, testing, and debugging policies.

@@ -11,7 +11,7 @@ use crate::auth::{
     Profile, SecureCreateError, build_turnkey_client, read_key, remove_generated_key,
     saved_profile, state_dir, whoami,
 };
-use crate::errors::InvalidInput;
+use crate::errors::{InvalidInput, is_unauthorized};
 use crate::keygen::{GeneratedApiKey, generate};
 use crate::operations::OperationOutput;
 
@@ -19,6 +19,7 @@ const COMMAND: &str = "session.request";
 
 pub(super) async fn run(name: String, replace: bool) -> Result<OperationOutput> {
     let profile = saved_profile(&name).await?;
+    let user_id = current_user_id(&profile).await?;
     let state = state_dir()?;
 
     if let Some(pending) = PendingSession::load(&state, &name).await? {
@@ -53,7 +54,6 @@ pub(super) async fn run(name: String, replace: bool) -> Result<OperationOutput> 
         });
     }
 
-    let user_id = current_user_id(&profile).await;
     let organization_id = profile.organization_id;
     let PendingSession {
         version: _,
@@ -77,22 +77,19 @@ pub(super) async fn run(name: String, replace: bool) -> Result<OperationOutput> 
     ))
 }
 
-async fn current_user_id(profile: &Profile) -> Option<String> {
+async fn current_user_id(profile: &Profile) -> Result<Option<String>> {
     let Profile {
         organization_id,
         api_base_url,
         api_key_file,
     } = profile;
-    let identity = async {
-        let client = build_turnkey_client(read_key(api_key_file).await?, api_base_url)?;
-        whoami(&client, *organization_id).await
-    }
-    .await;
-    match identity {
-        Ok(GetWhoamiResponse { user_id, .. }) => Some(user_id),
-        Err(error) => {
+    let client = build_turnkey_client(read_key(api_key_file).await?, api_base_url)?;
+    match whoami(&client, *organization_id).await {
+        Ok(GetWhoamiResponse { user_id, .. }) => Ok(Some(user_id)),
+        Err(error) if is_unauthorized(&error) => {
             debug!(%error, "current credential did not identify the user");
-            None
+            Ok(None)
         }
+        Err(error) => Err(error.context("identify the profile's current user")),
     }
 }

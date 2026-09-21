@@ -65,15 +65,7 @@ fn user_lifecycle_from_input_json_and_stdin() {
 fn user_create_from_flags_resolves_tag_names_and_registers_anchor_and_expiring_keys() {
     let run = Run::new();
     let tag_name = run.name("agent");
-    let tagged = run.submit(
-        run.admin()
-            .args(["user", "tag", "create", "--name", &tag_name]),
-        "user.tag.create",
-    );
-    let tag_id = result(&tagged, "createUserTagResult")["userTagId"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let tag_id = run.create_tag(&tag_name);
 
     let key = run.key();
     let public_key = hex::encode(key.compressed_public_key());
