@@ -44,6 +44,33 @@ export TK_PROFILE=agent
 export TK_GPG_PROGRAM=/path/to/gpg
 ```
 
+## GPG agent
+
+Run the GPG agent in a broker container that holds the Turnkey credential.
+Mount its socket into the credential-free agent container:
+
+```bash
+tk gpg agent serve --key FINGERPRINT \
+  --socket /run/tk-gpg-agent/agent.sock --socket-mode 660
+```
+
+In the agent container:
+
+```bash
+export TK_GPG_AGENT_SOCK=/run/tk-gpg-agent/agent.sock
+```
+
+The broker serves one registered key. Socket access grants signing authority,
+so protect the socket and its directory. A missing or unavailable agent is a
+hard failure, with no local signing fallback.
+
+Verification remains local GnuPG work:
+
+```bash
+gpg --verify release.tar.gz.asc release.tar.gz
+```
+
 ## Skills
 
+- [deploying-signing-broker](../skills/deploying-signing-broker/SKILL.md): isolate the signing credential and session provisioner in separate containers.
 - [signing-git-commits](../skills/signing-git-commits/SKILL.md): creating, registering, and using the key for commits as a non-root agent.

@@ -37,6 +37,7 @@ pub enum Outcome {
     GpgKeysListed(gpg::KeysListed),
     GpgPublicKeyExported(gpg::PublicKeyExported),
     GpgSignatureCreated(gpg::SignatureCreated),
+    GpgAgentExited(MachineOnly),
 }
 
 impl Display for Outcome {
@@ -67,6 +68,7 @@ impl Display for Outcome {
             Outcome::GpgKeysListed(msg) => msg.fmt(f),
             Outcome::GpgPublicKeyExported(msg) => msg.fmt(f),
             Outcome::GpgSignatureCreated(msg) => msg.fmt(f),
+            Outcome::GpgAgentExited(msg) => msg.fmt(f),
         }
     }
 }

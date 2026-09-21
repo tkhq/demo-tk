@@ -13,12 +13,12 @@ use std::process::{Command, ExitCode};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use turnkey_auth::openpgp::entity::{armor_signature, detached_signature};
+use turnkey_auth::openpgp::entity::armored_detached_signature;
 
 use crate::auth::{self, AuthOptions};
 use crate::errors::{InvalidInput, Malformed, render_error_chain};
 use crate::gpg::registry::{KeyName, SelectError};
-use crate::gpg::{selection_error, signer::TurnkeySigner, unix_now};
+use crate::gpg::{agent, selection_error, signer::TurnkeySigner, unix_now};
 
 /// gpg's own general error code, so a caller that reads the code sees a gpg
 /// failure rather than a shell "command not found".
@@ -141,7 +141,7 @@ pub async fn run(invocation: Invocation) -> ExitCode {
     };
     let signed = async {
         let status = StatusWriter::parse(status_fd)?;
-        sign(status, key.map(KeyName::from)).await
+        sign(status, key).await
     }
     .await;
     match signed {
@@ -153,35 +153,46 @@ pub async fn run(invocation: Invocation) -> ExitCode {
     }
 }
 
-async fn sign(status: StatusWriter, key: Option<KeyName>) -> Result<()> {
-    let options = ShimOptions::from_environment()?;
-    let (entry, client) = auth::open_gpg_key(&options.auth, key)
-        .await?
-        .map_err(git_selection_error)?;
-
-    let mut payload = Vec::new();
-    io::stdin()
-        .read_to_end(&mut payload)
-        .context("read the payload to sign from stdin")?;
-
-    let now = unix_now()?;
+async fn sign(status: StatusWriter, key: Option<String>) -> Result<()> {
+    let signature = match env::var_os(agent::SOCKET_ENV).filter(|v| !v.is_empty()) {
+        Some(socket) => {
+            let mut payload = Vec::new();
+            io::stdin()
+                .take((agent::MAX_PAYLOAD_LEN + 1) as u64)
+                .read_to_end(&mut payload)
+                .context("read the payload to sign from stdin")?;
+            agent::sign(Path::new(&socket), key.as_deref(), &payload).await?
+        }
+        None => {
+            let mut payload = Vec::new();
+            io::stdin()
+                .read_to_end(&mut payload)
+                .context("read the payload to sign from stdin")?;
+            let options = ShimOptions::from_environment()?;
+            let (entry, client) = auth::open_gpg_key(&options.auth, key.map(KeyName::from))
+                .await?
+                .map_err(git_selection_error)?;
+            let now = unix_now()?;
+            armored_detached_signature(
+                entry.key.signing,
+                &payload,
+                &TurnkeySigner::new(&client, entry.organization_id),
+                now,
+            )
+            .await?
+        }
+    };
     // This line also supplies the newline git's search for
     // "\n[GNUPG:] SIG_CREATED " needs, so it must stay in front.
     status.line("[GNUPG:] BEGIN_SIGNING")?;
-    let packet = detached_signature(
-        entry.key.signing,
-        &payload,
-        &TurnkeySigner::new(&client, entry.organization_id),
-        now,
-    )
-    .await?;
     let mut stdout = io::stdout();
-    write!(stdout, "{}", armor_signature(&packet)).context("write the signature to stdout")?;
+    write!(stdout, "{signature}").context("write the signature to stdout")?;
     stdout.flush().context("write the signature to stdout")?;
     // The fields are gpg's: a document signature, ECDSA, SHA-256, no class.
     status.line(&format!(
-        "[GNUPG:] SIG_CREATED D 19 8 00 {now} {}",
-        entry.fingerprint()
+        "[GNUPG:] SIG_CREATED D 19 8 00 {} {}",
+        signature.created(),
+        signature.fingerprint()
     ))
 }
 

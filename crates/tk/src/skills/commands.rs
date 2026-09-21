@@ -253,6 +253,9 @@ modes that bypass this parser are described in the area docs.
 "#,
     );
     section(&mut out, &command, &["tk"]);
+    while out.ends_with("\n\n") {
+        out.pop();
+    }
     out
 }
 

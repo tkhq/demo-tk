@@ -1001,6 +1001,7 @@ Subcommands:
 
 - [`tk gpg keys`](#tk-gpg-keys): Manage PGP keys held as wallet accounts
 - [`tk gpg sign`](#tk-gpg-sign): Write an armored detached signature for a file. With no file, tk signs stdin
+- [`tk gpg agent`](#tk-gpg-agent): Serve registered `OpenPGP` keys over a Unix socket
 
 #### `tk gpg keys`
 
@@ -1093,6 +1094,32 @@ tk gpg sign [OPTIONS] [FILE]
 | `--key <KEY>` |  | Fingerprint or long key ID of a registered key |
 | `<FILE>` |  | File to sign. With no file, tk reads stdin |
 | `--output <OUTPUT>` |  | Write the armored signature here instead of stdout |
+
+#### `tk gpg agent`
+
+Serve registered `OpenPGP` keys over a Unix socket
+
+```
+tk gpg agent [OPTIONS] <COMMAND>
+```
+
+Subcommands:
+
+- [`tk gpg agent serve`](#tk-gpg-agent-serve): Run the agent in the foreground
+
+##### `tk gpg agent serve`
+
+Run the agent in the foreground
+
+```
+tk gpg agent serve [OPTIONS] --key <KEY>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--key <KEY>` | required | Serve this registered key and no other key |
+| `--socket <path>` |  | Unix socket path to bind for `OpenPGP` signing requests |
+| `--socket-mode <SOCKET_MODE>` | default `600` | Octal permissions for the socket. Access to it grants signing authority |
 
 ### `tk login`
 

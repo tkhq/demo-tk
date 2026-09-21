@@ -12,9 +12,7 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 use tokio::fs;
-use turnkey_auth::openpgp::entity::{
-    UserId, armor_signature, detached_signature, export_public_key,
-};
+use turnkey_auth::openpgp::entity::{UserId, armored_detached_signature, export_public_key};
 use uuid::Uuid;
 
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
@@ -27,6 +25,7 @@ use crate::outcome::Outcome;
 use registry::{GpgKeyEntry, KeyName, Scope, SelectError, SigningKeyName};
 use signer::TurnkeySigner;
 
+pub mod agent;
 mod keys;
 pub mod registry;
 pub mod shim;
@@ -41,6 +40,8 @@ pub enum GpgCommand {
     },
     /// Write an armored detached signature for a file. With no file, tk signs stdin.
     Sign(SignArgs),
+    /// Serve registered `OpenPGP` keys over a Unix socket.
+    Agent(agent::Args),
 }
 
 #[derive(Debug, Subcommand)]
@@ -302,6 +303,7 @@ async fn open_wallet(
 
 pub async fn run(command: GpgCommand, options: &AuthOptions) -> Result<Outcome> {
     match command {
+        GpgCommand::Agent(args) => agent::run(args, options).await,
         GpgCommand::Keys { command } => run_keys(command, options).await,
         GpgCommand::Sign(SignArgs {
             key: KeyArgs { key },
@@ -323,8 +325,9 @@ pub async fn run(command: GpgCommand, options: &AuthOptions) -> Result<Outcome> 
             let (entry, client) = select_registered(options, key).await?;
             let signer = TurnkeySigner::new(&client, entry.organization_id);
             let now = unix_now()?;
-            let packet = detached_signature(entry.key.signing, &data, &signer, now).await?;
-            let armored = armor_signature(&packet);
+            let signature =
+                armored_detached_signature(entry.key.signing, &data, &signer, now).await?;
+            let armored = signature.as_str().to_owned();
             if let Some(path) = &output {
                 fs::write(path, &armored)
                     .await

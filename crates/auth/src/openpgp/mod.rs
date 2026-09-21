@@ -37,4 +37,7 @@ pub enum OpenPgpError {
     /// The user ID held a byte that would corrupt the packet or a listing.
     #[error("OpenPGP user ID must not contain a NUL, a carriage return, or a line feed")]
     UserIdControlByte,
+    /// The signature armor was malformed or its checksum did not match.
+    #[error("invalid armored OpenPGP signature")]
+    InvalidSignatureArmor,
 }

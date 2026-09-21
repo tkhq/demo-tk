@@ -53,6 +53,16 @@ impl Display for SigningKeyName {
     }
 }
 
+impl SigningKeyName {
+    pub(in crate::gpg) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(in crate::gpg) fn matches_fingerprint(&self, fingerprint: &Fingerprint) -> bool {
+        fingerprint.ends_with(&self.0)
+    }
+}
+
 #[derive(Debug)]
 pub enum KeyName {
     Suffix(SigningKeyName),
@@ -62,7 +72,7 @@ pub enum KeyName {
 impl KeyName {
     fn matches(&self, key: &OpenPgpKey) -> bool {
         match self {
-            Self::Suffix(name) => key.signing.fingerprint().ends_with(&name.0),
+            Self::Suffix(name) => name.matches_fingerprint(&key.signing.fingerprint()),
             Self::UserId(user_id) => key.user_id.as_str() == user_id,
         }
     }

@@ -5,9 +5,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs;
-use std::io::Error;
+use std::io::{Error, Read, Write};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
+use std::thread;
 
 use assert_cmd::Command;
 use serde_json::{Value, json};
@@ -18,11 +20,12 @@ use wiremock::{
     matchers::{method, path},
 };
 
-const SCRUBBED: [&str; 9] = [
+const SCRUBBED: [&str; 10] = [
     "HOME",
     "TK_PROFILE",
     "TK_NON_INTERACTIVE",
     "TK_GPG_PROGRAM",
+    "TK_GPG_AGENT_SOCK",
     "TURNKEY_ORGANIZATION_ID",
     "TURNKEY_API_PUBLIC_KEY",
     "TURNKEY_API_PRIVATE_KEY",
@@ -63,6 +66,13 @@ const POINT: &str = concat!(
     "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
 );
 const FINGERPRINT: &str = "13FFC7DF20CD6ABFCAED58992D007ACDCD30CCA6";
+const OTHER_FINGERPRINT: &str = "FEDCBA9876543210FEDCBA9876543210FEDCBA98";
+const BROKER_SIGNATURE: &str = r#"-----BEGIN PGP SIGNATURE-----
+
+wjcEABMIAB0FgmVT8QEWIQQT/8ffIM1qv8rtWJktAHrNzTDMpgAKCRAtAHrNzTDMphISAAEBAAIC
+=0Ren
+-----END PGP SIGNATURE-----
+"#;
 
 /// The page size `tk gpg` asks the account listing for. A page this long is
 /// what makes the client ask for another one.
@@ -134,6 +144,164 @@ fn assert_shim_failure(build: impl FnOnce(&TempDir) -> (Command, String)) {
         String::from_utf8(output.stderr).expect("the shim reports the failure"),
         expected
     );
+}
+
+fn broker_response(fingerprint: &str, created: u32, signature: &str) -> Vec<u8> {
+    let mut response = b"TKGP\x01\x00".to_vec();
+    response.extend_from_slice(&created.to_be_bytes());
+    response.extend_from_slice(&(signature.len() as u32).to_be_bytes());
+    response.extend_from_slice(fingerprint.as_bytes());
+    response.extend_from_slice(signature.as_bytes());
+    response
+}
+
+fn fake_agent() -> (TempDir, PathBuf, UnixListener) {
+    let home = tempdir().expect("temp home should be creatable");
+    let socket = home.path().join("agent.sock");
+    let listener = UnixListener::bind(&socket).expect("the fake agent should bind");
+    (home, socket, listener)
+}
+
+fn fake_agent_server(listener: UnixListener, response: Vec<u8>) -> thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("the shim should connect");
+        let mut request = Vec::new();
+        stream
+            .read_to_end(&mut request)
+            .expect("the request should be readable");
+        stream
+            .write_all(&response)
+            .expect("the response should be writable");
+        request
+    })
+}
+
+#[test]
+fn the_git_shim_signs_through_the_agent_without_local_credentials() {
+    let (home, socket, listener) = fake_agent();
+    let payload = br#"tree 0123456789abcdef
+"#;
+    let response = broker_response(FINGERPRINT, 1_700_000_001, BROKER_SIGNATURE);
+    let server = fake_agent_server(listener, response);
+
+    let output = tk(&home)
+        .env("TK_GPG_AGENT_SOCK", &socket)
+        .args(["--status-fd=2", "-bsau", FINGERPRINT])
+        .write_stdin(payload)
+        .output()
+        .expect("tk should run");
+
+    let request = server.join().expect("the fake agent should finish");
+    let mut expected = b"TKGP\x01\x01".to_vec();
+    expected.extend_from_slice(&(FINGERPRINT.len() as u16).to_be_bytes());
+    expected.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    expected.extend_from_slice(FINGERPRINT.as_bytes());
+    expected.extend_from_slice(payload);
+    assert_eq!(request, expected);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, BROKER_SIGNATURE.as_bytes());
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("status output should be UTF-8"),
+        format!(
+            r#"[GNUPG:] BEGIN_SIGNING
+[GNUPG:] SIG_CREATED D 19 8 00 1700000001 {FINGERPRINT}
+"#
+        )
+    );
+    assert!(!home.path().join(".config/turnkey/tk.config.toml").exists());
+}
+
+#[test]
+fn an_agent_signature_for_a_different_key_never_reaches_git_output() {
+    let (home, socket, listener) = fake_agent();
+    let response = broker_response(OTHER_FINGERPRINT, 1_700_000_001, BROKER_SIGNATURE);
+    let server = fake_agent_server(listener, response);
+
+    let output = tk(&home)
+        .env("TK_GPG_AGENT_SOCK", &socket)
+        .args(["--status-fd=2", "-bsau", FINGERPRINT])
+        .output()
+        .expect("tk should run");
+
+    let request = server.join().expect("the fake agent should finish");
+    assert!(request.ends_with(FINGERPRINT.as_bytes()));
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(output.stdout, b"", "the signature stream must stay clean");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("OpenPGP agent signature metadata does not match its response frame"),
+        "{stderr:?}"
+    );
+    assert!(!stderr.contains("SIG_CREATED"), "{stderr:?}");
+}
+
+#[test]
+fn an_unavailable_agent_never_falls_back_to_local_credentials() {
+    let home = tempdir().expect("temp home should be creatable");
+    let socket = home.path().join("missing-agent.sock");
+    let output = tk(&home)
+        .env("TK_GPG_AGENT_SOCK", &socket)
+        .args(SIGN_ARGS)
+        .write_stdin("payload")
+        .output()
+        .expect("tk should run");
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(output.stdout, b"");
+    let stderr = String::from_utf8(output.stderr).expect("the shim reports the failure");
+    assert!(
+        stderr.contains(&format!(
+            "connect to OpenPGP agent socket {}",
+            socket.display()
+        )),
+        "{stderr:?}"
+    );
+    assert!(
+        !stderr.contains("registry holds no OpenPGP keys"),
+        "{stderr:?}"
+    );
+    assert!(!stderr.contains("SIG_CREATED"), "{stderr:?}");
+}
+
+#[test]
+fn oversized_agent_input_is_rejected_without_signature_output() {
+    let home = tempdir().expect("temp home should be creatable");
+    let socket = home.path().join("missing-agent.sock");
+    let output = tk(&home)
+        .env("TK_GPG_AGENT_SOCK", socket)
+        .args(SIGN_ARGS)
+        .write_stdin(vec![b'x'; 1024 * 1024 + 1])
+        .output()
+        .expect("tk should run");
+
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(output.stdout, b"", "the signature stream must stay clean");
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("the shim reports the failure"),
+        r#"error: payload exceeds the OpenPGP agent limit of 1048576 bytes
+"#
+    );
+}
+
+#[test]
+fn a_truncated_agent_response_never_reaches_git_output() {
+    let (home, socket, listener) = fake_agent();
+    let truncated_response = b"TKGP\x01\x00".to_vec();
+    let server = fake_agent_server(listener, truncated_response);
+
+    let output = tk(&home)
+        .env("TK_GPG_AGENT_SOCK", &socket)
+        .args(SIGN_ARGS)
+        .write_stdin("payload")
+        .output()
+        .expect("tk should run");
+
+    let request = server.join().expect("the fake agent should finish");
+    assert!(!request.is_empty());
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert_eq!(output.stdout, b"");
+    let stderr = String::from_utf8(output.stderr).expect("the shim reports the failure");
+    assert!(!stderr.contains("SIG_CREATED"), "{stderr:?}");
 }
 
 #[test]
