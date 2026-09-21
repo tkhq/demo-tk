@@ -1,4 +1,8 @@
-# `tk`
+<img width="1500" height="500" alt="tk" src="assets/banner.png" />
+
+<h4 align="center">
+    A CLI for machines to use Turnkey for git, ssh, and credential management.
+</h4>
 
 `tk` is focused on general agent authorization, attribution, and credential
 management with Turnkey backed keys.
