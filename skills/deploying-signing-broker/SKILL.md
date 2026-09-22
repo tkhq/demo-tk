@@ -1,11 +1,11 @@
 ---
 name: deploying-signing-broker
-description: Deploy a credential-free application beside a single-key tk GPG signing broker and a separate session provisioner container. Use when containerizing OpenPGP Git signing so the application receives only a constrained Unix socket and public key, or when rotating the broker's expiring Turnkey credential; not for creating the signing key or choosing policies.
+description: Deploy a credential-free application beside a single-key tk GPG signing broker and a separate session provisioner, each in its own isolation boundary. Use when isolating OpenPGP Git signing so the application receives only a constrained Unix socket and public key, or when rotating the broker's expiring Turnkey credential; not for creating the signing key or choosing policies.
 ---
 
 # Deploying a signing broker
 
-Result: three containers with separate authority. The application requests
+Result: three isolation boundaries with separate authority. The application requests
 signatures from one OpenPGP key through a Unix socket; the broker alone holds
 that key's profile; the provisioner renews the broker's key but cannot sign.
 
@@ -18,8 +18,9 @@ that key's profile; the provisioner renews the broker's key but cannot sign.
 
 ## Rules
 
-- Three services, three process trees: application, GPG broker, provisioner.
-  Never mount one principal's `HOME` into another service; publish no ports.
+- Three principals, each in its own boundary (a container, VM, sandbox, or OS
+  user) with its own process tree: application, GPG broker, provisioner.
+  Never share one principal's `HOME` with another; publish no ports.
 - The broker is its own principal: tag `BROKER_TAG`, profile `broker`, one
   signing ALLOW scoped to `WALLET_ID`, one credential DENY, no export policy.
 - The application never receives the broker's profile, registry, or signing
@@ -29,10 +30,8 @@ that key's profile; the provisioner renews the broker's key but cannot sign.
   authority, so share it only with the application's supplemental group.
 - The provisioner gets neither the broker runtime nor broker `HOME`, only the
   expected broker user id, generated public API key, and bounded lifetime.
-- Drop capabilities, use a read-only root filesystem, and keep writable
-  state in explicit bind mounts.
-- Socket loss and broker failure fail closed. Do not fall back to an
-  application credential or a second signing path.
+- Drop capabilities, use a read-only root filesystem, and keep writable state in explicit bind mounts.
+- Socket loss and broker failure fail closed: no fallback to an application credential or a second signing path.
 
 ## Instructions
 
@@ -73,10 +72,11 @@ below), and the session lifetime.
    a world-readable `/opt/tk-gpg-public` for the armored public key. Persist
    the broker user id outside the application.
 
-3. **Define the services.** Adapt this Compose skeleton; pin the image by digest
-   in production. The application image must contain `tk`, Git, and GnuPG for client
-   framing and local verification. The `provisioner` service is the broker image as
-   uid `10001` with `TK_PROFILE: provisioner`, only
+3. **Define the boundaries.** Example: this Compose layout realizes the three
+   boundaries; a VM or sandbox per principal substitutes as long as the runtime
+   directory is the only shared mount. Pin the image by digest in production; the
+   application image needs `tk`, Git, and GnuPG. The `provisioner` service is the
+   broker image as uid `10001` with `TK_PROFILE: provisioner`, only
    `/opt/tk-provisioner:/home/provisioner` mounted, and `command: [sleep, infinity]`.
    Do not add `depends_on` as a readiness claim; gate application startup on the
    socket being a Unix socket with the expected owner, group, and mode.
@@ -185,8 +185,8 @@ and removes its socket on shutdown.
 
 - The application gets `permission denied`: its supplemental gid does not
   match the runtime and socket group, or the directory lacks group execute.
-- Signing reports the agent is unavailable: the path is not a socket in both
-  containers, or the broker left the foreground.
+- Signing reports the agent is unavailable: the path is not a socket on both
+  sides, or the broker left the foreground.
 - `gpg keys export` or signing fails `unauthorized`: the broker user lacks
   `BROKER_TAG`, or the ALLOW names another wallet. Do not export as root.
 - Signing fails only after rotation: stale API client in the broker. Restart it.

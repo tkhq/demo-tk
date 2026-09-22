@@ -23,9 +23,9 @@ workflow fixes where each one runs and what state it keeps.
 ## Rules
 
 - One OS user and one `HOME` per principal. The agent's profile and the
-  provisioner's profile never share a credential directory, a container, or
-  a process tree. Host root can still read both; a container boundary is
-  not a secrecy boundary against the host.
+  provisioner's profile never share a credential directory, a boundary (a
+  container, VM, sandbox, or OS user), or a process tree. Host root can still
+  read both; no such boundary is a secrecy boundary against the host.
 - The renewal loop is the single writer of the agent's profile. Its
   agent-side half (status, request, activate) runs as the agent's OS user
   on a timer outside the agent's own control loop; its provisioner-side half
@@ -41,7 +41,7 @@ workflow fixes where each one runs and what state it keeps.
   mode-restricted to that OS user, and restart the daemon after every rotation.
 - The OpenPGP socket is signing authority too. The broker alone holds the
   signing profile, serves one fingerprint, and restarts after its own
-  rotation; the agent container gets the socket and the public key, never
+  rotation; the agent's boundary gets the socket and the public key, never
   the broker's profile or registry, and the agent's own profile has no
   signing policy on that wallet.
 - Alert on expiry from the loop, not from the agent: an expired agent cannot.
@@ -126,7 +126,7 @@ the secrets are imported ([managing-secrets](../managing-secrets/SKILL.md)).
 5. **Sign commits through the broker.** Run `gpg agent serve` as `broker` per
    [deploying-signing-broker](../deploying-signing-broker/SKILL.md): one
    `--key`, a `--socket-mode 660` socket in a runtime directory the agent
-   container mounts read-only, `TK_GPG_AGENT_SOCK` and the public key on the
+   side mounts read-only, `TK_GPG_AGENT_SOCK` and the public key on the
    agent side, and none of the broker's profile, registry, or credential
    there. A missing socket fails signing closed.
 
@@ -142,7 +142,7 @@ the secrets are imported ([managing-secrets](../managing-secrets/SKILL.md)).
    directory is `0700` to the agent's user and the broker socket `0660` to
    its group; the timer fires; a forced expiry (`--expires-in` shorter than
    the tick) renews through the loop; the alert fires when the loop is
-   stopped; `git commit -S` in the agent container verifies with the broker
+   stopped; `git commit -S` on the agent side verifies with the broker
    up and fails with it stopped; the process environment holds the secrets
    and no file does.
 

@@ -48,11 +48,11 @@ export TK_GPG_PROGRAM=/path/to/gpg
 ## GPG agent
 
 ```bash
-# Serve one registered key from the container that holds the Turnkey credential.
+# Serve one registered key from the side that holds the Turnkey credential.
 tk gpg agent serve --key FINGERPRINT \
   --socket /run/tk-gpg-agent/agent.sock --socket-mode 660
 
-# In the credential-free container, point tk at the mounted socket.
+# On the credential-free side, point tk at the mounted socket.
 export TK_GPG_AGENT_SOCK=/run/tk-gpg-agent/agent.sock
 
 # Verify locally with GnuPG.

@@ -197,4 +197,4 @@ the GPG path, `ssh-keygen` for the SSH path, and `git` must be installed.
 - [provisioning-agent-identity](../provisioning-agent-identity/SKILL.md):
   the tagged agent user and profile that runs git.
 - [deploying-signing-broker](../deploying-signing-broker/SKILL.md): serving
-  this key over a socket to a container that holds no credential.
+  this key over a socket to a boundary that holds no credential.

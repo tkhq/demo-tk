@@ -69,7 +69,7 @@ git commit -S --allow-empty -m test
 git verify-commit HEAD
 ```
 
-To sign from a container that holds no Turnkey credential, set
+To sign from a process that holds no Turnkey credential, set
 `TK_GPG_AGENT_SOCK` as in [GPG agent](./gpg-signing.md#gpg-agent); Git needs
 no other change.
 
