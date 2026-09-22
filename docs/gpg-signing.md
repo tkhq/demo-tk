@@ -59,10 +59,6 @@ export TK_GPG_AGENT_SOCK=/run/tk-gpg-agent/agent.sock
 gpg --verify release.tar.gz.asc release.tar.gz
 ```
 
-With `TK_GPG_AGENT_SOCK` set, a missing or unavailable agent fails
-signing with no local fallback; verification never reaches the agent, because
-GnuPG checks the signature against the imported public key.
-
 ## Skills
 
 - [deploying-signing-broker](../skills/deploying-signing-broker/SKILL.md): isolate the signing credential and session provisioner in separate containers.
