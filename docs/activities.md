@@ -33,3 +33,4 @@ tk policy evaluations ACTIVITY_ID
 
 - [monitoring-activities](../skills/monitoring-activities/SKILL.md): approving, rejecting, waiting, and reconciling an unknown outcome.
 - [managing-policies](../skills/managing-policies/SKILL.md): reading `policy evaluations` for a denial.
+- [inspecting-agents](../skills/inspecting-agents/SKILL.md): paging pending activities, votes, and mint attribution with jq.

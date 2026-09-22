@@ -86,6 +86,7 @@ A provisioner may do one thing: register expiring keys on an explicit set of
 agent users. The target set is the one place an id list is unavoidable,
 because the target's tags are not policy-visible.
 
+<!-- shared: provisioners-mint-agent-keys -->
 <!-- example: policy-patterns.provisioners-mint-agent-keys -->
 ```sh
 tk --profile admin --message-format json policy create --name provisioners-mint-agent-keys --effect allow \
@@ -104,6 +105,7 @@ tk --profile admin --message-format json policy create --name provisioners-nothi
   --condition "activity.type != 'ACTIVITY_TYPE_CREATE_API_KEYS_V2'"
 ```
 
+<!-- shared: provisioners-no-self-keys -->
 <!-- example: policy-patterns.provisioners-no-self-keys -->
 ```sh
 tk --profile admin --message-format json policy create --name provisioners-no-self-keys --effect deny \

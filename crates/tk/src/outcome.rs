@@ -20,6 +20,7 @@ impl Display for MachineOnly {
 #[cfg_attr(test, derive(strum::EnumIter))]
 pub enum Outcome {
     PublicKeyPrinted(ssh::PublicKeyPrinted),
+    SshKeyCreated(ssh::RegisteredKey),
     SshKeyRegistered(ssh::RegisteredKey),
     SshKeyRemoved(ssh::RegisteredKey),
     SshKeysRegistered(ssh::RegisteredKeys),
@@ -42,6 +43,7 @@ impl Display for Outcome {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             Outcome::PublicKeyPrinted(msg) => msg.fmt(f),
+            Outcome::SshKeyCreated(msg) => write!(f, "created and registered {msg}"),
             Outcome::SshKeyRegistered(msg) => msg.fmt(f),
             Outcome::SshKeyRemoved(msg) => {
                 write!(f, "removed SSH key {} from the registry", msg.fingerprint)?;

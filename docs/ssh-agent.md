@@ -7,7 +7,11 @@ Follow [authentication](./authentication.md) first.
 ## Keys
 
 ```bash
-# Register a Turnkey private key locally.
+# Create an Ed25519 private key in Turnkey and register it locally. Names are
+# unique; rerunning with an existing name registers that key.
+tk ssh keys create --name agent-ssh
+
+# Or register an existing Turnkey private key.
 tk ssh keys add --private-key-id PRIVATE_KEY_ID
 tk ssh keys list
 
@@ -51,3 +55,8 @@ tk ssh agent start
 
 To sign Git commits with a registered key, see
 [git signing](./git-signing.md).
+
+## Skills
+
+- [sidecar-patterns](../skills/sidecar-patterns/SKILL.md): where each command runs in a deployment and the renewal state machine around them.
+- [using-ssh](../skills/using-ssh/SKILL.md): creating and registering the key, serving it as a non-root agent, and restarting after rotation.

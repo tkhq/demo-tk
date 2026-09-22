@@ -1,16 +1,78 @@
-//! Turnkey private-key lookup used when an SSH key is registered.
+//! Turnkey private-key creation and lookup used when an SSH key is registered.
 
 use anyhow::{Context, Result};
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 use turnkey_auth::ssh::Ed25519PublicKey;
-use turnkey_client::TurnkeyClient;
 use turnkey_client::generated::external::data::v1::PrivateKey;
+use turnkey_client::generated::immutable::activity::v1::{
+    CreatePrivateKeysIntentV2, CreatePrivateKeysResultV2, PrivateKeyParams, PrivateKeyResult,
+};
 use turnkey_client::generated::immutable::common::v1::Curve;
-use turnkey_client::generated::{GetPrivateKeyRequest, GetPrivateKeyResponse};
+use turnkey_client::generated::{
+    GetPrivateKeyRequest, GetPrivateKeyResponse, GetPrivateKeysRequest, GetPrivateKeysResponse,
+};
+use turnkey_client::{ActivityResult, TurnkeyClient};
 use uuid::Uuid;
 
 use crate::errors::{ActivityError, ActivityErrorKind, InvalidInput, MissingResource};
 use crate::ssh::registry::PrivateKeyId;
+
+pub async fn create_private_key(
+    client: &TurnkeyClient<TurnkeyP256ApiKey>,
+    organization_id: Uuid,
+    name: String,
+) -> Result<PrivateKeyId> {
+    let GetPrivateKeysResponse { private_keys } = client
+        .get_private_keys(GetPrivateKeysRequest {
+            organization_id: organization_id.to_string(),
+        })
+        .await
+        .map_err(anyhow::Error::new)
+        .with_context(|| format!("list private keys before creating {name}"))?;
+    if let Some(existing) = private_keys
+        .into_iter()
+        .find(|key| key.private_key_name == name)
+    {
+        return Ok(PrivateKeyId::from(existing.private_key_id));
+    }
+    let ActivityResult {
+        result: CreatePrivateKeysResultV2 { private_keys },
+        activity_id,
+        status: _,
+        app_proofs: _,
+    } = client
+        .create_private_keys(
+            organization_id.to_string(),
+            client.current_timestamp(),
+            CreatePrivateKeysIntentV2 {
+                private_keys: vec![PrivateKeyParams {
+                    private_key_name: name.clone(),
+                    curve: Curve::Ed25519,
+                    private_key_tags: Vec::new(),
+                    address_formats: Vec::new(),
+                }],
+            },
+        )
+        .await
+        .map_err(anyhow::Error::new)
+        .with_context(|| format!("create private key {name}"))?;
+    match private_keys.as_slice() {
+        [
+            PrivateKeyResult {
+                private_key_id,
+                addresses: _,
+            },
+        ] => Ok(PrivateKeyId::from(private_key_id.clone())),
+        other => Err(ActivityError::new(
+            ActivityErrorKind::MalformedResponse,
+            format!(
+                "create_private_keys activity {activity_id} returned {} private keys",
+                other.len()
+            ),
+        )
+        .into()),
+    }
+}
 
 pub async fn get_private_key(
     client: &TurnkeyClient<TurnkeyP256ApiKey>,

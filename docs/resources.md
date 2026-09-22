@@ -109,3 +109,6 @@ activity ID; see [activities](./activities.md).
 - [bootstrapping-organization](../skills/bootstrapping-organization/SKILL.md): the three tags and the tagged approver.
 - [managing-identities](../skills/managing-identities/SKILL.md): users, tags, key rotation, and revocation as one procedure.
 - [managing-policies](../skills/managing-policies/SKILL.md): writing, testing, and debugging policies.
+- [provisioning-agent-identity](../skills/provisioning-agent-identity/SKILL.md): the long-lived agent user and the export policies that fence it.
+- [inspecting-agents](../skills/inspecting-agents/SKILL.md): answering who carries a tag and which keys each user holds.
+- [provisioning-session-agent](../skills/provisioning-session-agent/SKILL.md): the agent, provisioner, and containment policies for expiring keys.

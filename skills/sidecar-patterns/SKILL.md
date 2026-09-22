@@ -1,0 +1,189 @@
+---
+name: sidecar-patterns
+description: Run tk beside an unattended agent so the agent process holds only what it needs: separate credential stores, a renewal loop outside the agent, secrets injected at startup, an SSH socket per OS user, and an operator alert that does not depend on the agent's own credential. Use when deploying an agent that uses tk on a VM or in a container, or when a deployment keeps losing its session key; not for choosing policies or approval models.
+---
+
+# Sidecar patterns
+
+Result: a deployment where the agent process reads its secrets once at
+startup, a separate renewal loop keeps its expiring credential fresh, SSH
+signing goes through a socket, and an operator hears about an expired
+credential from something other than the agent. Every `tk` step below is a
+command another workflow already documents; this workflow fixes where each
+one runs and what state it keeps.
+
+## Reference
+
+- [sessions](../../docs/sessions.md): the four `session` commands and their records.
+- [secrets](../../docs/secrets.md): `secret env` and pending exports.
+- [ssh-agent](../../docs/ssh-agent.md): the agent socket and its lifecycle.
+
+## Rules
+
+- One OS user and one `HOME` per principal. The agent's profile and the
+  provisioner's profile never share a credential directory, a container, or
+  a process tree. Host root can still read both; a container boundary is
+  not a secrecy boundary against the host.
+- The renewal loop is the single writer of the agent's profile. Its
+  agent-side half (status, request, activate) runs as the agent's OS user
+  on a timer outside the agent's own control loop; its provisioner-side half
+  (provision) runs as the provisioner. Both hold a lock while they run,
+  update their state file atomically, and persist the agent's user id so
+  renewal works after the current key has expired.
+- Secrets go from `tk secret env` into the authorized process's environment.
+  No file the agent can read holds a plaintext value; no transcript does.
+- The public-key handoff from agent to provisioner is not secret but must
+  be authenticated: the provisioner binds the request to the expected
+  organization, agent user id, and lifetime before it mints anything.
+- The SSH socket is signing authority. Bind it under the agent's `HOME`,
+  mode-restricted to that OS user, and restart the daemon after every
+  credential rotation.
+- Alert on expiry from the loop, not from the agent. An agent whose key has
+  expired cannot report that it has.
+- A deployment that stages no provider secrets by hand still holds Turnkey
+  credential files. Treat the host as secret-bearing.
+
+## Instructions
+
+Inputs: the agent profile (`agent`) and its persisted user id
+(`AGENT_USER_ID`), the provisioner profile (`provisioner`) on the sidecar,
+the scope prefix (`service/`), the chosen approval cell, and the key
+lifetime and renewal lead time. Prerequisites: the agent and provisioner
+exist with their policies
+([provisioning-session-agent](../provisioning-session-agent/SKILL.md)), and
+the secrets are imported ([managing-secrets](../managing-secrets/SKILL.md)).
+
+1. **Lay out the principals.** Decide, and record, which OS user, `HOME`,
+   and profile each of these runs as: the agent process, the renewal loop
+   (its agent half as `agent`, its provisioner half as `provisioner`), and
+   the SSH daemon (as `agent`). Install `tk` either
+   inside the image or as a read-only host mount of the binary; check with
+   `tk --version` from each principal's shell before going further. A
+   missing binary at a bind-mount path becomes an empty directory, so check
+   the file type, not just the path.
+
+2. **Start the agent with its environment.** The agent's entrypoint runs,
+   before the agent code starts:
+
+   <!-- shared: secret-env-startup -->
+   <!-- example: sidecar.startup-env -->
+   ```sh
+   tk --profile agent --message-format json secret env --name-prefix service/ --property consensus=unilateral
+   ```
+
+   Source `data.env` into the process and start it. Exit `1` with
+   `approval_required` means an approval-gated secret is in the selection;
+   keep those out of startup paths and fetch them on demand instead.
+
+3. **Run the renewal loop.** On a timer shorter than the lifetime minus the
+   lead time. The first, second, and fourth commands run as the agent's OS
+   user with the agent's `HOME`; the third runs on the sidecar as the
+   provisioner, reading the public key and user id from the handoff:
+
+   <!-- example: sidecar.renew -->
+   ```sh
+   tk --message-format json session status --profile-name agent --warn-before 1h
+   tk --message-format json session request --profile-name agent
+   tk --profile provisioner --message-format json session provision --user-id AGENT_USER_ID --public-key PUBLIC_KEY --expires-in 4h
+   tk --message-format json session activate --profile-name agent
+   ```
+
+   The tick is a state machine, not a script that runs all four lines:
+
+   | Observed | Do |
+   |---|---|
+   | `session status` exits `0` | nothing; the key is healthy |
+   | exits `1` with `session_expiring` and no pending request | `session request`; save `data.publicKey`; if `data.userId` is `null` use the persisted `AGENT_USER_ID` |
+   | a pending request exists | `session provision`; `pending` means a human must approve; `alreadyRegistered: true` or `completed` means proceed |
+   | provision completed | `session activate`, then `whoami` as `agent`; restart the SSH daemon (step 4) and any process holding an old client |
+   | activate fails `unauthorized` | the key is not registered yet; leave the request in place and try next tick |
+   | the mint activity was rejected | `session request --replace`, alert (step 5), start over next tick |
+
+   Persist the state and the request's public key in one file written
+   atomically; take a lock for the whole tick so two timers cannot both
+   request. Deleting an old key file locally revokes nothing; the anchor key
+   stays.
+
+4. **Serve SSH from a socket.** As the agent principal, under the agent's
+   `HOME`:
+
+   <!-- example: sidecar.ssh-agent -->
+   ```sh
+   tk --profile agent --message-format json ssh agent start --socket /run/agent/ssh.sock --pid-file /run/agent/ssh.pid
+   ```
+
+   Export `SSH_AUTH_SOCK=/run/agent/ssh.sock` in the agent's environment.
+   The daemon caches its API client, so the renewal loop stops and restarts
+   it after step 3 activates a new key. See [using-ssh](../using-ssh/SKILL.md)
+   for registration and Git configuration.
+
+5. **Alert independently.** The loop, not the agent, raises an alert when
+   `session status` reports `session_expiring` twice in a row, when a mint
+   stays `pending` past the lead time, or when a mint is rejected. Include
+   `details.publicKey`, `details.expiresAt`, and the activity id. The
+   alert path uses no Turnkey credential.
+
+6. **Gate the deployment.** Before the agent is left unattended, check by
+   hand: separate OS users and `HOME`s; the agent's `HOME` holds only its
+   own profile; the sidecar's holds only the provisioner's; the socket is
+   mode `0600` to the agent's user; the timer fires; a forced expiry
+   (`--expires-in` shorter than the tick) renews through the loop; the
+   alert fires when the loop is stopped; the process environment holds the
+   secrets and no file does. This gate is manual; record the results in the
+   handoff.
+
+7. **Hand off.** Report the principals table, the timer interval and lead
+   time, the state file and lock paths, the socket path, the alert channel,
+   and the gate results. Stop.
+
+## Runtime examples
+
+These are examples of step placement, not requirements. A `systemd` timer,
+for example, runs step 3 as the sidecar's unit with `User=provisioner`. A
+Docker Compose deployment, for example, gives the agent and the sidecar
+separate services with separate volumes for their `HOME`s and a shared
+volume only for the public handoff. An LLM runtime hook, for example, runs
+step 2 as its secrets command.
+
+## Verified by
+
+| Examples | Test |
+|---|---|
+| sidecar.startup-env | secrets::managing_secrets_env_and_rotation |
+| sidecar.renew | sessions::session_loop_rotates_an_agent_profile_and_reports_status |
+| sidecar.renew | sessions::provisioning_session_agent_recovers_after_expiry |
+| sidecar.renew | sessions::provisioning_session_agent_human_mint_unilateral_export |
+| sidecar.ssh-agent | ssh_agent::using_ssh_register_serve_sign |
+
+Step 6 is a manual deployment gate; the suite does not prove OS isolation,
+timers, mounts, or alert delivery.
+
+## Troubleshooting
+
+- `session request` reports `data.userId: null`: the agent's key has already
+  expired. Provision with the persisted `AGENT_USER_ID`; activation still
+  verifies with the new key.
+- `session request` fails `invalid_input` naming a pending request: a
+  previous tick requested and did not finish. Provision that request; use
+  `--replace` only after its activity was rejected.
+- `whoami` succeeds from the shell but the agent process gets
+  `unauthorized`: the process runs with a different `HOME` or `TK_PROFILE`.
+  Pin both in its environment.
+- The SSH daemon signs until rotation, then every request fails
+  `unauthorized`: the daemon still holds the old client. Stop and start it.
+- `secret env` exits `1` with `approval_required` at boot: an
+  approval-gated secret matched the prefix. Add `--property consensus=unilateral`
+  or move that secret to an on-demand export.
+- Two ticks both requested keys: no lock. Add one; the second request should
+  have failed `invalid_input` on the pending request, so check the loop is
+  not passing `--replace` unconditionally.
+
+## Related Skills
+
+- [provisioning-session-agent](../provisioning-session-agent/SKILL.md): the
+  policies and the first provisioning this loop renews.
+- [managing-secrets](../managing-secrets/SKILL.md): importing the values
+  step 2 reads.
+- [using-ssh](../using-ssh/SKILL.md): registering the key the socket serves.
+- [monitoring-activities](../monitoring-activities/SKILL.md): approving a
+  pending mint the loop reports.

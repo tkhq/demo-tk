@@ -9,6 +9,7 @@ Follow [authentication](./authentication.md) first.
 
 Register the key as in [SSH](./ssh-agent.md#keys), then point Git at `tk`:
 
+<!-- shared: git-ssh-signing-config -->
 ```bash
 SSH_PUBLIC_KEY=$(tk ssh public-key)
 git config --global gpg.format ssh
@@ -55,6 +56,7 @@ git config user.signingkey \
 Create and import the key as in [GPG signing](./gpg-signing.md), which leaves
 its fingerprint in `$FINGERPRINT`.
 
+<!-- shared: git-gpg-signing-config -->
 ```bash
 # Point git at tk as the GPG program.
 git config --global gpg.format openpgp
@@ -66,3 +68,7 @@ git config --global commit.gpgsign true
 git commit -S --allow-empty -m test
 git verify-commit HEAD
 ```
+
+## Skills
+
+- [signing-git-commits](../skills/signing-git-commits/SKILL.md): the GPG-first procedure, scoped policies, and the HOME wrapper.

@@ -43,3 +43,7 @@ export TK_PROFILE=agent
 # Name the GnuPG binary used for verification if gpg isn't on PATH.
 export TK_GPG_PROGRAM=/path/to/gpg
 ```
+
+## Skills
+
+- [signing-git-commits](../skills/signing-git-commits/SKILL.md): creating, registering, and using the key for commits as a non-root agent.

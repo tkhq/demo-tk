@@ -5,6 +5,8 @@ use std::fmt::{self, Display, Formatter};
 use anyhow::Result;
 use clap::{Args, Subcommand};
 use serde::Serialize;
+use turnkey_api_key_stamper::TurnkeyP256ApiKey;
+use turnkey_client::TurnkeyClient;
 use uuid::Uuid;
 
 use crate::auth::{self, AuthOptions, build_turnkey_client};
@@ -36,12 +38,21 @@ pub enum SshCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum KeysCommand {
+    /// Create an Ed25519 private key in Turnkey, or reuse the one with that name, and register it.
+    Create(CreateArgs),
     /// Fetch and register an Ed25519 private key.
     Add(AddArgs),
     /// List all registered SSH keys without contacting Turnkey.
     List,
     /// Forget a registered key without changing the Turnkey private key.
     Remove(RemoveArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct CreateArgs {
+    /// Name of the new private key.
+    #[arg(long)]
+    name: String,
 }
 
 #[derive(Debug, Args)]
@@ -170,6 +181,23 @@ fn selection_error(error: SelectError, unnamed_remedy: &str) -> anyhow::Error {
     }
 }
 
+async fn register(
+    client: &TurnkeyClient<TurnkeyP256ApiKey>,
+    organization_id: Uuid,
+    private_key_id: PrivateKeyId,
+) -> Result<RegisteredKey> {
+    let public_key = keys::get_private_key(client, organization_id, &private_key_id).await?;
+    let entry = SshKeyEntry {
+        organization_id,
+        private_key_id,
+        public_key,
+    };
+    let mut record = RegisteredKey::from(entry.clone());
+    auth::register_ssh_key(entry).await?;
+    record.agent_running = agent::is_default_running().await;
+    Ok(record)
+}
+
 pub async fn run(command: SshCommand, options: &AuthOptions) -> Result<Outcome> {
     match command {
         SshCommand::Keys {
@@ -182,20 +210,20 @@ pub async fn run(command: SshCommand, options: &AuthOptions) -> Result<Outcome> 
                 .collect(),
         })),
         SshCommand::Keys {
+            command: KeysCommand::Create(CreateArgs { name }),
+        } => {
+            let resolved = auth::resolve(options).await?;
+            let client = build_turnkey_client(resolved.stamper, &resolved.api_base_url)?;
+            let private_key_id = keys::create_private_key(&client, resolved.org_id, name).await?;
+            let record = register(&client, resolved.org_id, private_key_id).await?;
+            Ok(Outcome::SshKeyCreated(record))
+        }
+        SshCommand::Keys {
             command: KeysCommand::Add(AddArgs { private_key_id }),
         } => {
             let resolved = auth::resolve(options).await?;
             let client = build_turnkey_client(resolved.stamper, &resolved.api_base_url)?;
-            let public_key =
-                keys::get_private_key(&client, resolved.org_id, &private_key_id).await?;
-            let entry = SshKeyEntry {
-                organization_id: resolved.org_id,
-                private_key_id,
-                public_key,
-            };
-            let mut record = RegisteredKey::from(entry.clone());
-            auth::register_ssh_key(entry).await?;
-            record.agent_running = agent::is_default_running().await;
+            let record = register(&client, resolved.org_id, private_key_id).await?;
             Ok(Outcome::SshKeyRegistered(record))
         }
         SshCommand::Keys {

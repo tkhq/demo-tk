@@ -1,0 +1,1253 @@
+# Command reference
+
+Generated from the command definitions by `cargo test -p tk`. Do not edit by
+hand: change the command, then regenerate with
+
+```
+TK_UPDATE_COMMANDS_MD=1 cargo test -p tk commands_reference
+```
+
+This lists what the parser accepts. Validation that happens after parsing,
+such as identity resolution or JSON shape checks, and the Git and GPG shim
+modes that bypass this parser are described in the area docs.
+
+## `tk`
+
+CLI for Turnkey backed auth workflows
+
+```
+CLI for Turnkey backed auth workflows.
+
+Interactive behavior:
+    By default, commands may prompt when stdin is a TTY. Use --non-interactive
+    or set TK_NON_INTERACTIVE=true to disable prompts and fail fast instead.
+
+Output format:
+    --message-format human (default) prints human-readable text. Use
+    --message-format json to emit machine-readable output instead: one JSON
+    object per line (newline-delimited JSON), each with a "reason" field
+    identifying the message, including errors. JSON mode implies
+    --non-interactive, so commands never prompt and fail fast on missing input.
+
+    Errors emit reason "command_error" (or "missing_required_input") plus a
+    "code" classifying the failure, an optional numeric "httpStatus", optional
+    "details" for recovery (such as the last observed activity identity), and
+    a "message" carrying the full error chain. The "code" taxonomy is:
+        missing_required_input  a required value was absent (non-interactive)
+        usage_error             bad flags/args (argument parsing failed)
+        invalid_input           semantic validation failed in the command
+        unauthorized            HTTP 401/403
+        not_found               HTTP 404, or a resource that resolved to empty
+        api_error               other non-success HTTP status, or a failed,
+                                rejected, or unexpected activity
+        approval_required       the activity needs more approvals
+        network_error           connect/timeout/DNS: request never reached the
+                                server
+        network_uncertain       transport failure where delivery cannot be
+                                ruled out; reconcile before retrying a mutation
+        submission_unknown      a mutation was sent but its outcome could not
+                                be observed; inspect before resubmitting
+        wait_timeout            activity wait ran out of time; resume with the
+                                same ID
+        session_expiring        the profile's credential ends within the
+                                --warn-before window; request a new session
+        command_error           fallback for everything else
+    Exit codes: 0 success, 1 runtime error, 2 usage error.
+```
+
+```
+tk [OPTIONS] <COMMAND>
+```
+
+Subcommands:
+
+- [`tk activity`](#tk-activity): Inspect, approve, reject, and wait for activities
+- [`tk ssh`](#tk-ssh): SSH related commands
+- [`tk request`](#tk-request): Send an arbitrary signed API request
+- [`tk user`](#tk-user): Manage users and user tags
+- [`tk policy`](#tk-policy): Manage policies and inspect evaluations
+- [`tk api-key`](#tk-api-key): Manage registered API credentials
+- [`tk wallet`](#tk-wallet): Manage wallets and accounts
+- [`tk sign`](#tk-sign): Sign payloads and serialized transactions
+- [`tk secret`](#tk-secret): List, import, and export Secrets
+- [`tk session`](#tk-session): Short-lived credentials for agent profiles
+- [`tk gpg`](#tk-gpg): Create PGP keys as wallet accounts, register them, export them, and sign with them
+- [`tk login`](#tk-login): Verify a saved profile with Turnkey and select it
+- [`tk whoami`](#tk-whoami): Verify the selected identity remotely
+- [`tk auth`](#tk-auth): Manage API authentication
+- [`tk profile`](#tk-profile): Manage named API identities
+
+### Global options
+
+Every command accepts these.
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--profile <PROFILE>` | env `TK_PROFILE` | Named profile to use from the identity registry. An explicit profile always wins over ambient TURNKEY_* environment credentials |
+| `--organization-id <ORGANIZATION_ID>` |  | Override the organization the command operates on |
+| `--api-base-url <API_BASE_URL>` |  | Override the API base URL |
+| `--non-interactive` | env `TK_NON_INTERACTIVE` | Disable interactive prompts and fail fast when required values are missing |
+| `--message-format <MESSAGE_FORMAT>` | default `human`; one of `human`, `json` | Format user-facing output |
+| `--color <COLOR>` | default `auto`; one of `auto`, `always`, `never` | Control ANSI color in user-facing output |
+
+```
+API identity (login, whoami, request, activity, user, policy, api-key, wallet,
+sign, gpg, ssh):
+  Resolved from exactly one source: the TURNKEY_ORGANIZATION_ID,
+  TURNKEY_API_PUBLIC_KEY, TURNKEY_API_PRIVATE_KEY environment bundle; else the
+  profile named by --profile or TK_PROFILE (an explicit profile always wins);
+  else the registry's active profile.
+  The profile registry lives at ~/.config/turnkey/tk.config.toml.
+  TURNKEY_API_BASE_URL overrides the API endpoint.
+
+SSH agent:
+  tk ssh agent start
+  export SSH_AUTH_SOCK=~/.config/turnkey/ssh-agent.sock
+```
+
+### `tk activity`
+
+Inspect, approve, reject, and wait for activities
+
+```
+tk activity [OPTIONS] <COMMAND>
+```
+
+Subcommands:
+
+- [`tk activity list`](#tk-activity-list): List activities, one page at a time
+- [`tk activity get`](#tk-activity-get): Fetch one activity by ID
+- [`tk activity approve`](#tk-activity-approve): Approve a pending activity by ID
+- [`tk activity reject`](#tk-activity-reject): Reject a pending activity by ID
+- [`tk activity wait`](#tk-activity-wait): Poll one activity until it reaches a terminal status
+
+#### `tk activity list`
+
+List activities, one page at a time
+
+```
+tk activity list [OPTIONS]
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--limit <LIMIT>` | default `50` |  |
+| `--cursor <CURSOR>` |  | API after cursor (activity ID); pagination is explicitly caller-driven |
+
+#### `tk activity get`
+
+Fetch one activity by ID
+
+```
+tk activity get [OPTIONS] <ID>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `<ID>` | required |  |
+
+#### `tk activity approve`
+
+Approve a pending activity by ID
+
+```
+tk activity approve [OPTIONS] <ID>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `<ID>` | required |  |
+
+#### `tk activity reject`
+
+Reject a pending activity by ID
+
+```
+tk activity reject [OPTIONS] <ID>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `<ID>` | required |  |
+
+#### `tk activity wait`
+
+Poll one activity until it reaches a terminal status
+
+```
+tk activity wait [OPTIONS] <ID>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `<ID>` | required |  |
+| `--timeout <TIMEOUT>` | default `60` |  |
+
+### `tk ssh`
+
+SSH related commands
+
+```
+tk ssh [OPTIONS] <COMMAND>
+```
+
+Subcommands:
+
+- [`tk ssh keys`](#tk-ssh-keys): Manage registered Ed25519 private keys
+- [`tk ssh public-key`](#tk-ssh-public-key): Print a registered SSH public key
+- [`tk ssh git-sign`](#tk-ssh-git-sign): Sign a payload using the Git SSH signer interface
+- [`tk ssh agent`](#tk-ssh-agent): Manage a background SSH agent over a Unix socket
+
+#### `tk ssh keys`
+
+Manage registered Ed25519 private keys
+
+```
+tk ssh keys [OPTIONS] <COMMAND>
+```
+
+Subcommands:
+
+- [`tk ssh keys create`](#tk-ssh-keys-create): Create an Ed25519 private key in Turnkey, or reuse the one with that name, and register it
+- [`tk ssh keys add`](#tk-ssh-keys-add): Fetch and register an Ed25519 private key
+- [`tk ssh keys list`](#tk-ssh-keys-list): List all registered SSH keys without contacting Turnkey
+- [`tk ssh keys remove`](#tk-ssh-keys-remove): Forget a registered key without changing the Turnkey private key
+
+##### `tk ssh keys create`
+
+Create an Ed25519 private key in Turnkey, or reuse the one with that name, and register it
+
+```
+tk ssh keys create [OPTIONS] --name <NAME>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--name <NAME>` | required | Name of the new private key |
+
+##### `tk ssh keys add`
+
+Fetch and register an Ed25519 private key
+
+```
+tk ssh keys add [OPTIONS] --private-key-id <PRIVATE_KEY_ID>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--private-key-id <PRIVATE_KEY_ID>` | required | Turnkey private key to register |
+
+##### `tk ssh keys list`
+
+List all registered SSH keys without contacting Turnkey
+
+```
+tk ssh keys list [OPTIONS]
+```
+
+##### `tk ssh keys remove`
+
+Forget a registered key without changing the Turnkey private key
+
+```
+tk ssh keys remove [OPTIONS] <KEY>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `<KEY>` | required | Fingerprint, public key line, or Turnkey private key ID |
+
+#### `tk ssh public-key`
+
+Print a registered SSH public key
+
+```
+tk ssh public-key [OPTIONS]
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--key <KEY>` |  | Fingerprint, public key line, or Turnkey private key ID |
+
+#### `tk ssh git-sign`
+
+Sign a payload using the Git SSH signer interface
+
+```
+tk ssh git-sign [OPTIONS] [SSH_KEYGEN_ARGS]...
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `<SSH_KEYGEN_ARGS>...` |  |  |
+
+#### `tk ssh agent`
+
+Manage a background SSH agent over a Unix socket
+
+```
+tk ssh agent [OPTIONS] <COMMAND>
+```
+
+Subcommands:
+
+- [`tk ssh agent start`](#tk-ssh-agent-start): Start the SSH agent in the background
+- [`tk ssh agent stop`](#tk-ssh-agent-stop): Stop the background SSH agent
+- [`tk ssh agent status`](#tk-ssh-agent-status): Report the background SSH agent state
+
+##### `tk ssh agent start`
+
+Start the SSH agent in the background
+
+```
+tk ssh agent start [OPTIONS]
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--key <key> (repeatable)` |  | Serve only this registered key. May be repeated |
+| `--socket <path>` |  | Unix socket path to bind for SSH agent connections |
+| `--pid-file <path>` |  | PID file path for tracking the background SSH agent |
+
+##### `tk ssh agent stop`
+
+Stop the background SSH agent
+
+```
+tk ssh agent stop [OPTIONS]
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--socket <path>` |  | Unix socket path bound for SSH agent connections |
+| `--pid-file <path>` |  | PID file path for tracking the background SSH agent |
+
+##### `tk ssh agent status`
+
+Report the background SSH agent state
+
+```
+tk ssh agent status [OPTIONS]
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--socket <path>` |  | Unix socket path bound for SSH agent connections |
+| `--pid-file <path>` |  | PID file path for tracking the background SSH agent |
+
+### `tk request`
+
+Send an arbitrary signed API request
+
+```
+tk request [OPTIONS] --path <PATH>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--path <PATH>` | required |  |
+| `--body <BODY>` |  |  |
+| `--body-file <BODY_FILE>` |  | Read exact UTF-8 request bytes from a file, or - for stdin |
+| `--stamp-only` |  | Produce a stamp without submitting the request |
+
+Constraints:
+
+- `--body-file` conflicts with `--body`
+- `--body` conflicts with `--body-file`
+
+### `tk user`
+
+Manage users and user tags
+
+```
+tk user [OPTIONS] <COMMAND>
+```
+
+Subcommands:
+
+- [`tk user list`](#tk-user-list)
+- [`tk user get`](#tk-user-get)
+- [`tk user create`](#tk-user-create): Create a user from flags, or one or more users from a `CreateUsersIntentV4` parameters object
+- [`tk user update`](#tk-user-update): Update user name, email, phone, or tag membership
+- [`tk user delete`](#tk-user-delete)
+- [`tk user tag`](#tk-user-tag)
+
+#### `tk user list`
+
+```
+tk user list [OPTIONS]
+```
+
+#### `tk user get`
+
+```
+tk user get [OPTIONS] <ID>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `<ID>` | required |  |
+
+#### `tk user create`
+
+Create a user from flags, or one or more users from a `CreateUsersIntentV4` parameters object
+
+```
+tk user create [OPTIONS] <--input-json <INPUT_JSON>|--input-file <INPUT_FILE>|--user-name <USER_NAME>>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--input-json <INPUT_JSON>` |  | Inline JSON parameters (no activity envelope) |
+| `--input-file <INPUT_FILE>` |  | Read JSON parameters from a file, or - for stdin |
+| `--user-name <USER_NAME>` |  | Name of the single user to create |
+| `--email <EMAIL>` |  | Email of the user |
+| `--tag <TAGS> (repeatable)` |  | Tag id to attach (repeatable) |
+| `--tag-name <TAG_NAMES> (repeatable)` |  | Tag name to attach, resolved against the organization's tags (repeatable) |
+| `--public-key <PUBLIC_KEY>` |  | Compressed P256 public key (hex) to register as the user's API key |
+| `--expires-in <EXPIRES_IN>` |  | Lifetime of that API key, for example 7d; omit for a key that never expires |
+| `--anchor-key` |  | Also register a never-expiring anchor key whose private half is generated here and discarded. Turnkey requires every user to hold one long-lived credential, so this lets a user otherwise live on expiring keys alone |
+
+Constraints:
+
+- exactly one of `--input-json`, `--input-file`, `--user-name`
+
+#### `tk user update`
+
+Update user name, email, phone, or tag membership
+
+```
+tk user update [OPTIONS] <--input-json <INPUT_JSON>|--input-file <INPUT_FILE>>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--input-json <INPUT_JSON>` |  | Inline JSON parameters (no activity envelope) |
+| `--input-file <INPUT_FILE>` |  | Read JSON parameters from a file, or - for stdin |
+
+Constraints:
+
+- exactly one of `--input-json`, `--input-file`
+
+#### `tk user delete`
+
+```
+tk user delete [OPTIONS] <IDS>...
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `<IDS>...` | required |  |
+
+#### `tk user tag`
+
+```
+tk user tag [OPTIONS] <COMMAND>
+```
+
+Subcommands:
+
+- [`tk user tag list`](#tk-user-tag-list)
+- [`tk user tag create`](#tk-user-tag-create): Create a tag by name, or from a `CreateUserTagIntent` parameters object
+- [`tk user tag update`](#tk-user-tag-update)
+- [`tk user tag delete`](#tk-user-tag-delete)
+
+##### `tk user tag list`
+
+```
+tk user tag list [OPTIONS]
+```
+
+##### `tk user tag create`
+
+Create a tag by name, or from a `CreateUserTagIntent` parameters object
+
+```
+tk user tag create [OPTIONS] <--input-json <INPUT_JSON>|--input-file <INPUT_FILE>|--name <NAME>>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--input-json <INPUT_JSON>` |  | Inline JSON parameters (no activity envelope) |
+| `--input-file <INPUT_FILE>` |  | Read JSON parameters from a file, or - for stdin |
+| `--name <NAME>` |  | Name of the new tag, with no members |
+
+Constraints:
+
+- exactly one of `--input-json`, `--input-file`, `--name`
+
+##### `tk user tag update`
+
+```
+tk user tag update [OPTIONS] <--input-json <INPUT_JSON>|--input-file <INPUT_FILE>>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--input-json <INPUT_JSON>` |  | Inline JSON parameters (no activity envelope) |
+| `--input-file <INPUT_FILE>` |  | Read JSON parameters from a file, or - for stdin |
+
+Constraints:
+
+- exactly one of `--input-json`, `--input-file`
+
+##### `tk user tag delete`
+
+```
+tk user tag delete [OPTIONS] <IDS>...
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `<IDS>...` | required |  |
+
+### `tk policy`
+
+Manage policies and inspect evaluations
+
+```
+tk policy [OPTIONS] <COMMAND>
+```
+
+Subcommands:
+
+- [`tk policy list`](#tk-policy-list)
+- [`tk policy get`](#tk-policy-get)
+- [`tk policy create`](#tk-policy-create): Create a policy from flags, or from a `CreatePolicyIntentV3` parameters object
+- [`tk policy create-batch`](#tk-policy-create-batch): Create multiple policies from a parameters object containing policies
+- [`tk policy update`](#tk-policy-update): Update with policyEffect/policyCondition/policyConsensus field names
+- [`tk policy delete`](#tk-policy-delete)
+- [`tk policy evaluations`](#tk-policy-evaluations)
+
+#### `tk policy list`
+
+```
+tk policy list [OPTIONS]
+```
+
+#### `tk policy get`
+
+```
+tk policy get [OPTIONS] <ID>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `<ID>` | required |  |
+
+#### `tk policy create`
+
+Create a policy from flags, or from a `CreatePolicyIntentV3` parameters object
+
+```
+tk policy create [OPTIONS] <--input-json <INPUT_JSON>|--input-file <INPUT_FILE>|--name <NAME>>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--input-json <INPUT_JSON>` |  | Inline JSON parameters (no activity envelope) |
+| `--input-file <INPUT_FILE>` |  | Read JSON parameters from a file, or - for stdin |
+| `--name <NAME>` |  | Name of the policy; needs --effect and --condition and/or --consensus |
+| `--effect <EFFECT>` | one of `allow`, `deny` | Whether matching activities are allowed or denied |
+| `--condition <CONDITION>` |  | Condition expression, evaluated against the activity |
+| `--consensus <CONSENSUS>` |  | Consensus expression, evaluated against the approvers |
+| `--notes <NOTES>` |  | Free-text notes stored with the policy |
+
+Constraints:
+
+- exactly one of `--input-json`, `--input-file`, `--name`
+
+#### `tk policy create-batch`
+
+Create multiple policies from a parameters object containing policies
+
+```
+tk policy create-batch [OPTIONS] <--input-json <INPUT_JSON>|--input-file <INPUT_FILE>>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--input-json <INPUT_JSON>` |  | Inline JSON parameters (no activity envelope) |
+| `--input-file <INPUT_FILE>` |  | Read JSON parameters from a file, or - for stdin |
+
+Constraints:
+
+- exactly one of `--input-json`, `--input-file`
+
+#### `tk policy update`
+
+Update with policyEffect/policyCondition/policyConsensus field names
+
+```
+tk policy update [OPTIONS] <--input-json <INPUT_JSON>|--input-file <INPUT_FILE>>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--input-json <INPUT_JSON>` |  | Inline JSON parameters (no activity envelope) |
+| `--input-file <INPUT_FILE>` |  | Read JSON parameters from a file, or - for stdin |
+
+Constraints:
+
+- exactly one of `--input-json`, `--input-file`
+
+#### `tk policy delete`
+
+```
+tk policy delete [OPTIONS] <IDS>...
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `<IDS>...` | required |  |
+
+#### `tk policy evaluations`
+
+```
+tk policy evaluations [OPTIONS] <ACTIVITY_ID>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `<ACTIVITY_ID>` | required |  |
+
+### `tk api-key`
+
+Manage registered API credentials
+
+```
+tk api-key [OPTIONS] <COMMAND>
+```
+
+Subcommands:
+
+- [`tk api-key generate`](#tk-api-key-generate): Generate a protected local credential file without registration
+- [`tk api-key list`](#tk-api-key-list)
+- [`tk api-key register`](#tk-api-key-register): Register public keys using `CreateApiKeysIntentV2` parameters
+- [`tk api-key delete`](#tk-api-key-delete)
+
+#### `tk api-key generate`
+
+Generate a protected local credential file without registration
+
+```
+tk api-key generate [OPTIONS]
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--output <OUTPUT>` |  | New credential JSON path; defaults to a file named by the public key under ~/.config/turnkey/tk/api-keys/. Existing files are never overwritten |
+
+#### `tk api-key list`
+
+```
+tk api-key list [OPTIONS]
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--user-id <USER_ID>` |  |  |
+
+#### `tk api-key register`
+
+Register public keys using `CreateApiKeysIntentV2` parameters
+
+```
+tk api-key register [OPTIONS] <--input-json <INPUT_JSON>|--input-file <INPUT_FILE>>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--input-json <INPUT_JSON>` |  | Inline JSON parameters (no activity envelope) |
+| `--input-file <INPUT_FILE>` |  | Read JSON parameters from a file, or - for stdin |
+
+Constraints:
+
+- exactly one of `--input-json`, `--input-file`
+
+#### `tk api-key delete`
+
+```
+tk api-key delete [OPTIONS] --user-id <USER_ID> <IDS>...
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--user-id <USER_ID>` | required |  |
+| `<IDS>...` | required |  |
+
+### `tk wallet`
+
+Manage wallets and accounts
+
+```
+tk wallet [OPTIONS] <COMMAND>
+```
+
+Subcommands:
+
+- [`tk wallet list`](#tk-wallet-list)
+- [`tk wallet get`](#tk-wallet-get)
+- [`tk wallet create`](#tk-wallet-create)
+- [`tk wallet update`](#tk-wallet-update)
+- [`tk wallet account`](#tk-wallet-account)
+
+#### `tk wallet list`
+
+```
+tk wallet list [OPTIONS]
+```
+
+#### `tk wallet get`
+
+```
+tk wallet get [OPTIONS] <ID>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `<ID>` | required |  |
+
+#### `tk wallet create`
+
+```
+tk wallet create [OPTIONS] <--input-json <INPUT_JSON>|--input-file <INPUT_FILE>>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--input-json <INPUT_JSON>` |  | Inline JSON parameters (no activity envelope) |
+| `--input-file <INPUT_FILE>` |  | Read JSON parameters from a file, or - for stdin |
+
+Constraints:
+
+- exactly one of `--input-json`, `--input-file`
+
+#### `tk wallet update`
+
+```
+tk wallet update [OPTIONS] <--input-json <INPUT_JSON>|--input-file <INPUT_FILE>>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--input-json <INPUT_JSON>` |  | Inline JSON parameters (no activity envelope) |
+| `--input-file <INPUT_FILE>` |  | Read JSON parameters from a file, or - for stdin |
+
+Constraints:
+
+- exactly one of `--input-json`, `--input-file`
+
+#### `tk wallet account`
+
+```
+tk wallet account [OPTIONS] <COMMAND>
+```
+
+Subcommands:
+
+- [`tk wallet account list`](#tk-wallet-account-list): List accounts in one wallet, one page at a time
+- [`tk wallet account create`](#tk-wallet-account-create)
+
+##### `tk wallet account list`
+
+List accounts in one wallet, one page at a time
+
+```
+tk wallet account list [OPTIONS] --wallet-id <WALLET_ID>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--wallet-id <WALLET_ID>` | required |  |
+| `--limit <LIMIT>` | default `50` |  |
+| `--cursor <CURSOR>` |  | API after cursor (wallet account ID); pagination is explicitly caller-driven |
+
+##### `tk wallet account create`
+
+```
+tk wallet account create [OPTIONS] <--input-json <INPUT_JSON>|--input-file <INPUT_FILE>>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--input-json <INPUT_JSON>` |  | Inline JSON parameters (no activity envelope) |
+| `--input-file <INPUT_FILE>` |  | Read JSON parameters from a file, or - for stdin |
+
+Constraints:
+
+- exactly one of `--input-json`, `--input-file`
+
+### `tk sign`
+
+Sign payloads and serialized transactions
+
+```
+tk sign [OPTIONS] <COMMAND>
+```
+
+Subcommands:
+
+- [`tk sign payload`](#tk-sign-payload): Sign a payload with explicit encoding and hash function in JSON input
+- [`tk sign transaction`](#tk-sign-transaction): Sign an already serialized transaction; does not broadcast
+
+#### `tk sign payload`
+
+Sign a payload with explicit encoding and hash function in JSON input
+
+```
+tk sign payload [OPTIONS] <--input-json <INPUT_JSON>|--input-file <INPUT_FILE>>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--input-json <INPUT_JSON>` |  | Inline JSON parameters (no activity envelope) |
+| `--input-file <INPUT_FILE>` |  | Read JSON parameters from a file, or - for stdin |
+
+Constraints:
+
+- exactly one of `--input-json`, `--input-file`
+
+#### `tk sign transaction`
+
+Sign an already serialized transaction; does not broadcast
+
+```
+tk sign transaction [OPTIONS] <--input-json <INPUT_JSON>|--input-file <INPUT_FILE>>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--input-json <INPUT_JSON>` |  | Inline JSON parameters (no activity envelope) |
+| `--input-file <INPUT_FILE>` |  | Read JSON parameters from a file, or - for stdin |
+
+Constraints:
+
+- exactly one of `--input-json`, `--input-file`
+
+### `tk secret`
+
+List, import, and export Secrets
+
+```
+tk secret [OPTIONS] <COMMAND>
+```
+
+Subcommands:
+
+- [`tk secret list`](#tk-secret-list): List secret metadata; values are never returned
+- [`tk secret import`](#tk-secret-import): Encrypt and import a new named secret
+- [`tk secret env`](#tk-secret-env): Export every matching secret and print dotenv lines for a process's startup environment. Names are PREFIX/VAR; VAR is the line's key
+- [`tk secret delete`](#tk-secret-delete): Delete a secret. Secrets are immutable: to rotate one, delete it and import the new value under the same name
+- [`tk secret export`](#tk-secret-export): Export a secret's value; re-run after approval
+
+#### `tk secret list`
+
+List secret metadata; values are never returned
+
+```
+tk secret list [OPTIONS]
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--limit <LIMIT>` | default `50` | Page size |
+| `--cursor <CURSOR>` |  | Secret ID to continue after |
+
+#### `tk secret import`
+
+Encrypt and import a new named secret
+
+```
+tk secret import [OPTIONS] <NAME>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `<NAME>` | required | Name of the new secret |
+| `--from-file <FROM_FILE>` |  | File holding the secret value |
+| `--property <KEY=VALUE> (repeatable)` |  | Policy-visible property bound to the secret |
+
+#### `tk secret env`
+
+Export every matching secret and print dotenv lines for a process's startup environment. Names are PREFIX/VAR; VAR is the line's key
+
+```
+tk secret env [OPTIONS] <--property <KEY=VALUE>|--name-prefix <NAME_PREFIX>>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--property <KEY=VALUE> (repeatable)` |  | Only secrets carrying this static property (repeatable; all must match) |
+| `--name-prefix <NAME_PREFIX>` |  | Only secrets whose name starts with this prefix, for example hermes/ |
+
+Constraints:
+
+- at least one of `--property`, `--name-prefix`
+
+#### `tk secret delete`
+
+Delete a secret. Secrets are immutable: to rotate one, delete it and import the new value under the same name
+
+```
+tk secret delete [OPTIONS] <--name <NAME>|--id <ID>>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--name <NAME>` |  | Name of the secret |
+| `--id <ID>` |  | ID of the secret |
+
+Constraints:
+
+- exactly one of `--name`, `--id`
+
+#### `tk secret export`
+
+Export a secret's value; re-run after approval
+
+```
+tk secret export [OPTIONS] <--name <NAME>|--id <ID>>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--name <NAME>` |  | Name of the secret |
+| `--id <ID>` |  | ID of the secret |
+| `--out <OUT>` |  | Write the value to this new file (0600) instead of stdout |
+| `--context <KEY=VALUE> (repeatable)` |  | Policy-visible context for this export request only |
+
+Constraints:
+
+- exactly one of `--name`, `--id`
+
+### `tk session`
+
+Short-lived credentials for agent profiles
+
+```
+tk session [OPTIONS] <COMMAND>
+```
+
+Subcommands:
+
+- [`tk session request`](#tk-session-request): Generate a new credential for a saved profile and print its public key for a provisioner to register. The private key stays on this machine
+- [`tk session provision`](#tk-session-provision): Register a public key on a user as an expiring API key. Run with the provisioner's identity; re-run after approval
+- [`tk session activate`](#tk-session-activate): Switch a saved profile to its pending credential once it is registered
+- [`tk session status`](#tk-session-status): Report when a saved profile's credential expires; exits with `session_expiring` when less than `--warn-before` remains
+
+#### `tk session request`
+
+Generate a new credential for a saved profile and print its public key for a provisioner to register. The private key stays on this machine
+
+```
+tk session request [OPTIONS] --profile-name <NAME>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--profile-name <NAME>` | required | Saved profile that will use the new credential |
+| `--replace` |  | Discard an unregistered pending request and start over |
+
+#### `tk session provision`
+
+Register a public key on a user as an expiring API key. Run with the provisioner's identity; re-run after approval
+
+```
+tk session provision [OPTIONS] --user-id <USER_ID> --public-key <PUBLIC_KEY>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--user-id <USER_ID>` | required | User who will own the new expiring API key |
+| `--public-key <PUBLIC_KEY>` | required | Compressed P256 public key (hex) printed by tk session request |
+| `--expires-in <EXPIRES_IN>` | default `7d` | Lifetime of the key, for example 7d, 48h, 30m |
+| `--label <LABEL>` |  | API key label; defaults to session-EXPIRES_IN-UNIX_SECONDS, for example session-7d-1789000000 |
+
+#### `tk session activate`
+
+Switch a saved profile to its pending credential once it is registered
+
+```
+tk session activate [OPTIONS] --profile-name <NAME>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--profile-name <NAME>` | required | Saved profile with a pending session request |
+
+#### `tk session status`
+
+Report when a saved profile's credential expires; exits with `session_expiring` when less than `--warn-before` remains
+
+```
+tk session status [OPTIONS] --profile-name <NAME>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--profile-name <NAME>` | required | Saved profile to inspect |
+| `--warn-before <WARN_BEFORE>` | default `48h` | Fail with `session_expiring` when less than this remains |
+
+### `tk gpg`
+
+Create PGP keys as wallet accounts, register them, export them, and sign with them
+
+```
+tk gpg [OPTIONS] <COMMAND>
+```
+
+Subcommands:
+
+- [`tk gpg keys`](#tk-gpg-keys): Manage PGP keys held as wallet accounts
+- [`tk gpg sign`](#tk-gpg-sign): Write an armored detached signature for a file. With no file, tk signs stdin
+
+#### `tk gpg keys`
+
+Manage PGP keys held as wallet accounts
+
+```
+tk gpg keys [OPTIONS] <COMMAND>
+```
+
+Subcommands:
+
+- [`tk gpg keys create`](#tk-gpg-keys-create): Create a signing account for a user ID and register the key
+- [`tk gpg keys add`](#tk-gpg-keys-add): Register an existing key from a wallet so git and tk gpg sign can use it
+- [`tk gpg keys remove`](#tk-gpg-keys-remove): Forget a registered key. The wallet accounts are kept
+- [`tk gpg keys list`](#tk-gpg-keys-list): List the registered keys, or the PGP keys in one wallet
+- [`tk gpg keys export`](#tk-gpg-keys-export): Print the armored public key block of a registered key. Signs the self certification with the key, so a policy that requires approval blocks it
+
+##### `tk gpg keys create`
+
+Create a signing account for a user ID and register the key
+
+```
+tk gpg keys create [OPTIONS] --wallet-id <WALLET_ID> --user-id <USER_ID>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--wallet-id <WALLET_ID>` | required | Wallet to create the accounts in |
+| `--user-id <USER_ID>` | required | The PGP user ID, for example "Ada Lovelace <ada@example.com>" |
+
+##### `tk gpg keys add`
+
+Register an existing key from a wallet so git and tk gpg sign can use it
+
+```
+tk gpg keys add [OPTIONS] --wallet-id <WALLET_ID>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--wallet-id <WALLET_ID>` | required | Wallet holding the key |
+| `--key <KEY>` |  | Fingerprint or long key ID of the key. Needed when the wallet holds more than one |
+
+##### `tk gpg keys remove`
+
+Forget a registered key. The wallet accounts are kept
+
+```
+tk gpg keys remove [OPTIONS] <KEY>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `<KEY>` | required | Fingerprint or long key ID of the registered key |
+
+##### `tk gpg keys list`
+
+List the registered keys, or the PGP keys in one wallet
+
+```
+tk gpg keys list [OPTIONS]
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--wallet-id <WALLET_ID>` |  | List the PGP keys in this wallet instead of the registered keys |
+
+##### `tk gpg keys export`
+
+Print the armored public key block of a registered key. Signs the self certification with the key, so a policy that requires approval blocks it
+
+```
+tk gpg keys export [OPTIONS]
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--key <KEY>` |  | Fingerprint or long key ID of a registered key |
+
+#### `tk gpg sign`
+
+Write an armored detached signature for a file. With no file, tk signs stdin
+
+```
+tk gpg sign [OPTIONS] [FILE]
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--key <KEY>` |  | Fingerprint or long key ID of a registered key |
+| `<FILE>` |  | File to sign. With no file, tk reads stdin |
+| `--output <OUTPUT>` |  | Write the armored signature here instead of stdout |
+
+### `tk login`
+
+Verify a saved profile with Turnkey and select it
+
+```
+tk login [OPTIONS]
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--profile-name <NAME>` | default `default` | Saved profile to verify and select |
+
+### `tk whoami`
+
+Verify the selected identity remotely
+
+```
+tk whoami [OPTIONS]
+```
+
+### `tk auth`
+
+Manage API authentication
+
+```
+tk auth [OPTIONS] <COMMAND>
+```
+
+Subcommands:
+
+- [`tk auth login`](#tk-auth-login): Verify a saved profile with Turnkey and select it
+- [`tk auth status`](#tk-auth-status): Inspect local credential readiness without contacting the server
+- [`tk auth whoami`](#tk-auth-whoami): Verify the selected identity with Turnkey
+- [`tk auth logout`](#tk-auth-logout): Clear the saved profile selection; keep credentials and remote access intact
+
+#### `tk auth login`
+
+Verify a saved profile with Turnkey and select it
+
+```
+tk auth login [OPTIONS]
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--profile-name <NAME>` | default `default` | Saved profile to verify and select |
+
+#### `tk auth status`
+
+Inspect local credential readiness without contacting the server
+
+```
+tk auth status [OPTIONS]
+```
+
+#### `tk auth whoami`
+
+Verify the selected identity with Turnkey
+
+```
+tk auth whoami [OPTIONS]
+```
+
+#### `tk auth logout`
+
+Clear the saved profile selection; keep credentials and remote access intact
+
+```
+tk auth logout [OPTIONS]
+```
+
+### `tk profile`
+
+Manage named API identities
+
+```
+tk profile [OPTIONS] <COMMAND>
+```
+
+Subcommands:
+
+- [`tk profile create`](#tk-profile-create): Save a new profile without contacting Turnkey, generating a credential when none is given
+- [`tk profile list`](#tk-profile-list): List saved profiles and the active selection
+- [`tk profile show`](#tk-profile-show): Show one saved profile
+- [`tk profile use`](#tk-profile-use): Select a saved profile after checking its credential file
+- [`tk profile delete`](#tk-profile-delete): Remove a profile entry; credential files are kept
+- [`tk profile set`](#tk-profile-set): Update the organization, API endpoint, or credential file of a saved profile
+
+#### `tk profile create`
+
+Save a new profile without contacting Turnkey, generating a credential when none is given
+
+```
+tk profile create [OPTIONS]
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--profile-name <NAME>` | default `default` | Name for the new profile |
+| `--api-key-file <API_KEY_FILE>` |  | Existing P256 credential JSON file (public key, private key, curve). Without it, a fresh credential is written under ~/.config/turnkey/tk/api-keys/ |
+
+#### `tk profile list`
+
+List saved profiles and the active selection
+
+```
+tk profile list [OPTIONS]
+```
+
+#### `tk profile show`
+
+Show one saved profile
+
+```
+tk profile show [OPTIONS] <NAME>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `<NAME>` | required |  |
+
+#### `tk profile use`
+
+Select a saved profile after checking its credential file
+
+```
+tk profile use [OPTIONS] <NAME>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `<NAME>` | required |  |
+
+#### `tk profile delete`
+
+Remove a profile entry; credential files are kept
+
+```
+tk profile delete [OPTIONS] <NAME>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `<NAME>` | required |  |
+
+#### `tk profile set`
+
+Update the organization, API endpoint, or credential file of a saved profile
+
+```
+tk profile set [OPTIONS] <NAME>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `<NAME>` | required | Saved profile to update |
+| `--api-key-file <API_KEY_FILE>` |  | Existing P256 credential JSON file to use from now on; it is read before the registry changes |

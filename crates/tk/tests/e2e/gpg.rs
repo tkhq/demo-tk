@@ -1,6 +1,7 @@
 use std::env;
 use std::fs;
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{self, Stdio};
 use std::str;
@@ -9,7 +10,7 @@ use assert_cmd::Command;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::run::{AdminLogin, Run, result};
+use crate::run::{AGENT_TAG, AdminLogin, Run, result, tag_consensus};
 
 const USER_ID: &str = "tk e2e <tk-e2e@example.com>";
 const SECOND_USER_ID: &str = "tk e2e second <tk-e2e-2@example.com>";
@@ -432,5 +433,187 @@ fn gpg_shim_signs_and_git_verifies() {
         )),
         "{}",
         run.redact(&refused.stderr)
+    );
+}
+
+fn create_empty_wallet(run: &Run, label: &str) -> String {
+    let created = run.submit(
+        run.admin().args([
+            "wallet",
+            "create",
+            "--input-json",
+            &json!({"walletName": run.name(label), "accounts": []}).to_string(),
+        ]),
+        "wallet.create",
+    );
+    result(&created, "createWalletResult")["walletId"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+#[ignore]
+fn signing_git_commits_gpg_with_scoped_policy() {
+    let gpg = locate("gpg").expect("gpg must be on PATH: the signing-git-commits gate needs GnuPG");
+    let git = locate("git").expect("git must be on PATH: the signing-git-commits gate needs git");
+    let run = Run::new();
+    let agent_tag = run.create_tag(AGENT_TAG);
+    let (_, agent) = run.create_tagged_user("agent", AGENT_TAG);
+    let wallet = create_empty_wallet(&run, "gpg");
+    let other_wallet = create_empty_wallet(&run, "gpg-outside-scope");
+    run.create_policy_from_flags(
+        &run.name("agents-sign-gpg"),
+        "allow",
+        &tag_consensus(&agent_tag),
+        &format!("activity.type == 'ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2' && wallet.id == '{wallet}'"),
+    );
+
+    let created = create_key(&run, &wallet, USER_ID);
+    let fingerprint = created["fingerprint"].as_str().unwrap().to_string();
+    let other = create_key(&run, &other_wallet, SECOND_USER_ID);
+    let other_fingerprint = other["fingerprint"].as_str().unwrap().to_string();
+
+    let added = run.ok(run.as_user(&agent).args([
+        "gpg",
+        "keys",
+        "add",
+        "--wallet-id",
+        &wallet,
+        "--key",
+        &fingerprint,
+    ]));
+    assert_eq!(
+        added,
+        json!({
+            "reason": "gpg_key_registered",
+            "organizationId": run.org(),
+            "walletId": wallet,
+            "keyIndex": created["keyIndex"],
+            "fingerprint": fingerprint,
+            "userId": USER_ID,
+            "created": created["created"],
+        })
+    );
+    let exported =
+        run.ok(run
+            .as_user(&agent)
+            .args(["gpg", "keys", "export", "--key", &fingerprint]));
+    assert_eq!(exported["fingerprint"], fingerprint, "{exported}");
+    let gnupghome = import_into_gpg(&run, &gpg, exported["armored"].as_str().unwrap());
+
+    let outside = run.ok(run.as_user(&agent).args([
+        "gpg",
+        "keys",
+        "add",
+        "--wallet-id",
+        &other_wallet,
+        "--key",
+        &other_fingerprint,
+    ]));
+    assert_eq!(outside["reason"], "gpg_key_registered", "{outside}");
+    let denied =
+        run.err(
+            run.as_user(&agent)
+                .args(["gpg", "keys", "export", "--key", &other_fingerprint]),
+        );
+    assert_eq!(denied["code"], "unauthorized", "{denied}");
+    assert_eq!(denied["httpStatus"], 403, "{denied}");
+    let payload = run.home.path().join("payload.txt");
+    fs::write(&payload, b"outside the policy scope\n").unwrap();
+    let denied_sign = run.err(
+        run.as_user(&agent)
+            .args(["gpg", "sign", "--key", &other_fingerprint])
+            .arg(&payload),
+    );
+    assert_eq!(denied_sign["code"], "unauthorized", "{denied_sign}");
+    assert_eq!(denied_sign["httpStatus"], 403, "{denied_sign}");
+
+    let agent_env = |cmd: &mut process::Command, home: &Path| {
+        for (name, value) in run.as_user(&agent).get_envs() {
+            match value {
+                Some(value) => cmd.env(name, value),
+                None => cmd.env_remove(name),
+            };
+        }
+        cmd.env("HOME", home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("XDG_CONFIG_HOME")
+            .env("TURNKEY_API_BASE_URL", &run.config.api_base_url)
+            .env("GNUPGHOME", &gnupghome);
+    };
+    let git = |repo: &Path, home: &Path, program: &Path, args: &[&str]| {
+        let mut cmd = process::Command::new(&git);
+        agent_env(&mut cmd, home);
+        cmd.current_dir(repo)
+            .args([
+                "-c",
+                "user.name=tk e2e",
+                "-c",
+                "user.email=tk-e2e@example.com",
+            ])
+            .args(["-c", "gpg.format=openpgp"])
+            .arg("-c")
+            .arg(format!("gpg.program={}", program.display()))
+            .arg("-c")
+            .arg(format!("user.signingkey={fingerprint}"))
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let git_ok = |repo: &Path, home: &Path, program: &Path, args: &[&str]| {
+        let output = git(repo, home, program, args);
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            run.redact(&output.stderr)
+        );
+    };
+    let commit = [
+        "commit",
+        "-S",
+        "--quiet",
+        "--allow-empty",
+        "-m",
+        "signed by tk",
+    ];
+    let tk = Path::new(env!("CARGO_BIN_EXE_tk"));
+
+    let repo = run.home.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    git_ok(&repo, run.home.path(), tk, &["init", "--quiet"]);
+    git_ok(&repo, run.home.path(), tk, &commit);
+    git_ok(&repo, run.home.path(), tk, &["verify-commit", "HEAD"]);
+
+    let other_home = run.home.path().join("other-home");
+    fs::create_dir(&other_home).unwrap();
+    let other_repo = other_home.join("repo");
+    fs::create_dir(&other_repo).unwrap();
+    git_ok(&other_repo, &other_home, tk, &["init", "--quiet"]);
+    let unregistered = git(&other_repo, &other_home, tk, &commit);
+    assert!(
+        !unregistered.status.success(),
+        "git signed from a HOME with no registry"
+    );
+    let wrapper = run.home.path().join("tk-wrapper.sh");
+    fs::write(
+        &wrapper,
+        format!(
+            r#"#!/bin/sh
+export HOME='{}'
+exec '{}' "$@"
+"#,
+            run.home.path().display(),
+            tk.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    git_ok(&other_repo, &other_home, &wrapper, &commit);
+    git_ok(
+        &other_repo,
+        &other_home,
+        &wrapper,
+        &["verify-commit", "HEAD"],
     );
 }
