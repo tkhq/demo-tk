@@ -12,8 +12,7 @@ Default guidance for coding-agent runs in this repository.
 
 ## Coding style
 
-- Lints live in `[workspace.lints]` in the root `Cargo.toml`, and every crate
-  opts in with `[lints] workspace = true`. Add a lint there, not as a
+- Lints live in `[lints]` in the root `Cargo.toml`. Add a lint there, not as a
   crate-level `#![deny(...)]`. An `#![allow(...)]` belongs only in the one file
   that needs the exception, with a comment saying why.
 - Prefer raw string literals (`r#"..."#`) over escaped quotation marks (`\"`) or
@@ -172,11 +171,10 @@ Default guidance for coding-agent runs in this repository.
 ## Tests and verification
 
 - Prefer end-to-end tests over unit tests. Cover a behavior in the real-binary
-  `tk/tests/e2e/` suite first; add a unit or mock-server test only for a
-  failure mode the live API cannot produce on demand (transport timeouts,
-  malformed responses, rejected or failed activities) or for local parsing
-  that needs no server. Delete a unit test once an e2e test covers the same
-  behavior.
+  `tests/e2e/` suite first; add a unit or mock-server test only for a failure
+  mode the live API cannot produce on demand (transport timeouts, malformed
+  responses, rejected or failed activities) or for local parsing that needs no
+  server. Delete a unit test once an e2e test covers the same behavior.
 - Prefer complete structural equality when the complete value or serialized
   shape is the contract. Use focused field or predicate assertions when a test
   deliberately covers only one property and unrelated fields are outside its
@@ -194,11 +192,11 @@ Default guidance for coding-agent runs in this repository.
 ## End-to-end tests
 
 - When adding a new `tk` command or feature, or changing the JSON record shape
-  of an existing one, add or update the matching test in the `tk/tests/e2e/`
+  of an existing one, add or update the matching test in the `tests/e2e/`
   module (one file per command area; the runner lives in `run.rs`) so the
   real-binary suite keeps covering it. Keep every file under 1000 lines. Run
-  it with `cargo test -p tk --test e2e -- --ignored`; the suite runs in
-  parallel and must stay correct that way.
+  it with `cargo test --test e2e -- --ignored`; the suite runs in parallel and
+  must stay correct that way.
 - Every e2e test starts with `Run::new()`, which creates a sub-organization
   named with the run marker, rooted by the admin key from `.env.test`, and
   deletes it, with everything inside, when the `Run` drops. Run every command
@@ -226,10 +224,10 @@ Default guidance for coding-agent runs in this repository.
 - A pull request that adds or changes a command touches, in the same PR: the
   command, its `--help`, the description in `docs/<area>.md`, any step in
   `skills/` that invokes it, and the e2e test that executes that step. The
-  structural checks in `crates/tk/tests/skills.rs` and
-  `crates/tk/src/skills/` catch missing links, unparseable examples, unmapped
-  `## Verified by` tests, and diverged shared blocks; they cannot prove prose
-  was updated, so review remains part of the rule.
+  structural checks in `tests/skills.rs` and `src/skills/` catch missing
+  links, unparseable examples, unmapped `## Verified by` tests, and diverged
+  shared blocks; they cannot prove prose was updated, so review remains part
+  of the rule.
 - Command behavior, records, and errors live in `docs/<area>.md`. Multi-step
   operator procedures, policy patterns, the approval matrix, and workflow
   recovery live in `skills/`. A doc links to the skills that use its commands
@@ -277,7 +275,7 @@ Default guidance for coding-agent runs in this repository.
   `- [name](../skills/name/SKILL.md): what that skill does with this doc's commands.`
   Two docs never carry the same footer sentence.
 - `docs/commands.md` is generated; never edit it by hand. Change the command
-  and regenerate with `TK_UPDATE_COMMANDS_MD=1 cargo test -p tk commands_reference`.
+  and regenerate with `TK_UPDATE_COMMANDS_MD=1 cargo test commands_reference`.
 
 ## Help text
 

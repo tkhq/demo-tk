@@ -59,7 +59,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           rustup target add "$TARGET"
-          cargo build --locked --release --package tk --bin tk --target "$TARGET"
+          cargo build --locked --release --bin tk --target "$TARGET"
       - name: Package archive and checksum
         shell: bash
         env:

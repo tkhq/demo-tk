@@ -2302,40 +2302,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
-name = "tk"
-version = "0.4.0"
-dependencies = [
- "anstyle",
- "anyhow",
- "assert_cmd",
- "clap",
- "hex",
- "libc",
- "predicates",
- "rand_core 0.6.4",
- "reqwest",
- "rpassword",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "socket2",
- "strum",
- "tempfile",
- "thiserror",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "turnkey_api_key_stamper",
- "turnkey_auth",
- "turnkey_client",
- "turnkey_enclave_encrypt",
- "uuid",
- "wiremock",
- "zeroize",
-]
-
-[[package]]
 name = "tokio"
 version = "1.53.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2536,8 +2502,9 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 
 [[package]]
 name = "turnkey_api_key_stamper"
-version = "0.15.0"
-source = "git+https://github.com/tkhq/rust-sdk.git?rev=ccbf6b4baa6db7797c15a6e101dc0c9f34515ede#ccbf6b4baa6db7797c15a6e101dc0c9f34515ede"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a19161c1a3a53621b52afc0b73fbcde592d3c7852cc094b49b6b87e9c7235d3b"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -2550,24 +2517,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "turnkey_auth"
-version = "0.4.0"
-dependencies = [
- "anyhow",
- "base64 0.23.1",
- "hex",
- "sha1",
- "sha2 0.11.0",
- "tempfile",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "turnkey_client"
-version = "0.15.0"
-source = "git+https://github.com/tkhq/rust-sdk.git?rev=ccbf6b4baa6db7797c15a6e101dc0c9f34515ede#ccbf6b4baa6db7797c15a6e101dc0c9f34515ede"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5ac978b6ea74d22a610463302edfd082eac5b0812fcc753e7c71685116347291"
 dependencies = [
  "chrono",
  "hex",
@@ -2586,8 +2539,9 @@ dependencies = [
 
 [[package]]
 name = "turnkey_enclave_encrypt"
-version = "0.15.0"
-source = "git+https://github.com/tkhq/rust-sdk.git?rev=ccbf6b4baa6db7797c15a6e101dc0c9f34515ede#ccbf6b4baa6db7797c15a6e101dc0c9f34515ede"
+version = "0.16.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d8d699c7cbe677b4f7a055dafb12d2aec9746bdcd10e4dcd8e020b1c1d33a7cb"
 dependencies = [
  "bs58",
  "hex",
@@ -2598,6 +2552,41 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror",
+ "zeroize",
+]
+
+[[package]]
+name = "turnkey_tk"
+version = "0.4.0"
+dependencies = [
+ "anstyle",
+ "anyhow",
+ "assert_cmd",
+ "base64 0.23.1",
+ "clap",
+ "hex",
+ "libc",
+ "predicates",
+ "rand_core 0.6.4",
+ "reqwest",
+ "rpassword",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2 0.11.0",
+ "socket2",
+ "strum",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "turnkey_api_key_stamper",
+ "turnkey_client",
+ "turnkey_enclave_encrypt",
+ "uuid",
+ "wiremock",
  "zeroize",
 ]
 

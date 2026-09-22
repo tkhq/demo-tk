@@ -19,12 +19,6 @@ read the installed turnkey-tk/SKILL.md, and walk me through bootstrapping my
 Turnkey organization at https://app.turnkey.com.
 ```
 
-The skills in [skills/](./skills/SKILL.md) cover bootstrapping an
-organization, managing identities, policies, activities, and secrets,
-provisioning long-lived and session agents, SSH, Git signing, inspecting
-agents, and deploying tk beside an agent. The binary carries the same package,
-so `tk skills install --into DIR` writes it as `DIR/turnkey-tk`.
-
 ## Manual installation
 
 ```bash
@@ -38,7 +32,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/tkhq/tk/
 - [Signing](./docs/signing.md): payloads and serialized transactions
 - [Activities](./docs/activities.md): inspect, approve, reject, and wait
 - [Raw requests](./docs/requests.md): sign and send an exact request body
-- [Secrets](./docs/secrets.md)
+- [Secrets](./docs/secrets.md): credential and secret management
 - [Sessions](./docs/sessions.md): expiring keys minted by a provisioner
 - [SSH](./docs/ssh-agent.md): registered keys and the SSH agent
 - [Git signing](./docs/git-signing.md)

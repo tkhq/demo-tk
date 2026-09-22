@@ -5,8 +5,11 @@ on:
     branches: [main]
   pull_request:
     paths:
-      - crates/tk/**
-      - crates/auth/**
+      - src/**
+      - tests/**
+      - build.rs
+      - skills/**
+      - docs/**
       - Cargo.toml
       - Cargo.lock
       - rust-toolchain.toml
@@ -35,4 +38,4 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.95.0
       - uses: Swatinem/rust-cache@v2
       - name: Run end-to-end tests
-        run: cargo test --locked -p tk --test e2e -- --ignored --test-threads 4
+        run: cargo test --locked --test e2e -- --ignored --test-threads 4
