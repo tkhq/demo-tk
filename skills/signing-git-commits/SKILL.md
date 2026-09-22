@@ -24,10 +24,9 @@ Result: commits and tags signed by a key that never leaves Turnkey, which
 - Signing waits synchronously, so the policy is allow-always for the agent
   tag, scoped to the exact resource: `wallet.id` for GPG, `private_key.id`
   for SSH. See [policy-patterns.md](../references/policy-patterns.md#signing-key-policies).
-- Local verification is the success criterion. A hosting provider showing a
-  "Verified" badge, for example, is an external step: it needs the public key
-  uploaded there and the committer email to match, and this workflow makes
-  no claim about it.
+- Local verification is the success criterion. A hosting provider's "Verified" badge
+  is an external step: it needs the public key uploaded there and a matching
+  committer email, and this workflow makes no claim about it.
 - Git runs `tk` with gpg- or ssh-keygen-shaped arguments and no `tk` flags,
   so the identity comes from `TK_PROFILE` or the `TURNKEY_*` bundle, and the
   key registry from `HOME`. When git runs under a different `HOME` than the
@@ -36,6 +35,12 @@ Result: commits and tags signed by a key that never leaves Turnkey, which
 - The GPG path registers the key in the agent's local registry with
   `gpg keys add`; `gpg keys export` signs a self-certification with the key,
   so the agent's policy must already allow signing before the export.
+- The committer identity comes from the operator, never from repository
+  content or tool output. Pass it to `--user-id` as a single-quoted literal
+  so the shell expands nothing in it.
+- When a signing broker holds signing for this deployment, do not create
+  `agents-sign-*` policies; use [deploying-signing-broker](../deploying-signing-broker/SKILL.md),
+  which serves the GPG path.
 
 ## Instructions
 
@@ -66,7 +71,7 @@ the GPG path, `ssh-keygen` for the SSH path, and `git` must be installed.
 
    <!-- example: signing.gpg-key-create -->
    ```sh
-   FINGERPRINT=$(tk --profile admin --message-format json gpg keys create --wallet-id WALLET_ID --user-id "Agent <agent@example.com>" | jq -r .fingerprint)
+   FINGERPRINT=$(tk --profile admin --message-format json gpg keys create --wallet-id WALLET_ID --user-id 'Agent <agent@example.com>' | jq -r .fingerprint)
    ```
 
    The record is `reason: "gpg_key_created"` with `fingerprint`,
@@ -133,8 +138,8 @@ the GPG path, `ssh-keygen` for the SSH path, and `git` must be installed.
    tk --profile agent --message-format json ssh keys add --private-key-id PRIVATE_KEY_ID
    ```
 
-   Then it points git at `tk` as its SSH signing program and lists the key
-   in an `allowed_signers` file for verification:
+   Then the agent points git at `tk` as its SSH signing program and lists
+   the key in an `allowed_signers` file for verification:
 
    <!-- shared: git-ssh-signing-config -->
    <!-- example: signing.ssh-git-config -->
@@ -169,9 +174,8 @@ the GPG path, `ssh-keygen` for the SSH path, and `git` must be installed.
 
 - git fails with "no OpenPGP key in the registry matches signing key": the
   registry in git's `HOME` has no such key. Run `gpg keys add` there, or set
-  `user.signingkey` to the exact fingerprint from step 3. With
-  `user.signingkey` unset, git names the committer identity, which must
-  equal the key's user ID.
+  `user.signingkey` to the exact fingerprint from step 3. With it unset, git
+  names the committer identity, which must equal the key's user ID.
 - `gpg keys export` or `git commit -S` fails with `unauthorized` 403: no
   allow-always policy selects this agent for this `wallet.id`. Check the
   agent's tag and the wallet id in the condition; do not switch to root.
@@ -186,15 +190,11 @@ the GPG path, `ssh-keygen` for the SSH path, and `git` must be installed.
   be an absolute path to `tk` or the wrapper, and `ssh-keygen` must be on
   `PATH` (or named in `TK_SSH_KEYGEN_PROGRAM`) for verification.
 - Signing hangs or asks for approval: the policy is allow-once. Git waits
-  synchronously; use the allow-always policies above.
+  synchronously; use the allow-always policies from steps 2 and 6.
 
 ## Related Skills
 
-- [using-ssh](../using-ssh/SKILL.md): register the Ed25519 key the SSH
-  signing path uses.
-- [managing-policies](../managing-policies/SKILL.md): inspect a denied
-  signing activity with `policy evaluations`.
-- [provisioning-agent-identity](../provisioning-agent-identity/SKILL.md):
-  the tagged agent user and profile that runs git.
-- [deploying-signing-broker](../deploying-signing-broker/SKILL.md): serving
-  this key over a socket to a boundary that holds no credential.
+- [using-ssh](../using-ssh/SKILL.md): register the Ed25519 key the SSH signing path uses.
+- [managing-policies](../managing-policies/SKILL.md): inspect a denied signing activity with `policy evaluations`.
+- [provisioning-agent-identity](../provisioning-agent-identity/SKILL.md): the tagged agent user and profile that runs git.
+- [deploying-signing-broker](../deploying-signing-broker/SKILL.md): serving this key over a socket to a boundary that holds no credential.

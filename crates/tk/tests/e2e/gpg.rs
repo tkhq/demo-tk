@@ -85,6 +85,36 @@ pub(crate) fn import_public_key(
     fs::set_permissions(&gnupghome, fs::Permissions::from_mode(0o700)).unwrap();
     let public_key = home.join(format!("{fingerprint}.asc"));
     fs::write(&public_key, armored).unwrap();
+    let staged = process::Command::new(gpg)
+        .env_clear()
+        .env("GNUPGHOME", &gnupghome)
+        .args([
+            "--batch",
+            "--with-colons",
+            "--import-options",
+            "show-only",
+            "--import",
+        ])
+        .arg(&public_key)
+        .output()
+        .unwrap();
+    let staging = String::from_utf8_lossy(&staged.stdout);
+    let lines: Vec<&str> = staging.lines().collect();
+    let records = |prefix: &str| lines.iter().filter(|line| line.starts_with(prefix)).count();
+    let primary_fingerprint = lines
+        .iter()
+        .position(|line| line.starts_with("pub:"))
+        .and_then(|index| lines.get(index + 1))
+        .is_some_and(|line| *line == format!("fpr:::::::::{fingerprint}:"));
+    assert!(
+        staged.status.success()
+            && records("pub:") == 1
+            && records("sec:") == 0
+            && records("ssb:") == 0
+            && primary_fingerprint,
+        "staged armor is not exactly one public key {fingerprint}: {staging}{}",
+        run.redact(&staged.stderr)
+    );
     let imported = process::Command::new(gpg)
         .env_clear()
         .env("GNUPGHOME", &gnupghome)

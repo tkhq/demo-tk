@@ -33,6 +33,18 @@ request selects and the references that workflow names.
 | "what is pending", "which agents have keys", "when does this key expire", "who approved", "audit the agents" | [inspecting-agents](inspecting-agents/SKILL.md) |
 | "deploy the agent", "run tk in a container", "renewal loop", "sidecar", "where does the key live" | [sidecar-patterns](sidecar-patterns/SKILL.md) |
 
+Preflight for the SSH and commit-signing rows: when a signing broker principal
+already exists (a `broker` tag, or a running `tk gpg agent serve`), commit
+signing routes through
+[deploying-signing-broker](deploying-signing-broker/SKILL.md), which is GPG
+only. SSH through a broker runs [using-ssh](using-ssh/SKILL.md) as the broker
+principal: its signing policy names `BROKER_TAG` in place of `AGENT_TAG`,
+`tk ssh agent start --key SSH_FINGERPRINT` runs under the broker's `HOME`, and
+the application receives only the socket. Run as the agent itself,
+[using-ssh](using-ssh/SKILL.md) and
+[signing-git-commits](signing-git-commits/SKILL.md) grant the agent signing
+authority and are for deployments that intend that.
+
 Identity provisioning here means a Turnkey user and its credentials; wallets,
 chain signing, and broadcasting belong to the wallet package, not this one.
 
