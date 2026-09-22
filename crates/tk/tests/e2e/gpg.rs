@@ -1,6 +1,7 @@
 use std::env;
 use std::fs;
 use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{self, Stdio};
 use std::str;
@@ -9,7 +10,7 @@ use assert_cmd::Command;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::run::{AdminLogin, Run, result};
+use crate::run::{AdminLogin, Run, result, signed_commit};
 
 const USER_ID: &str = "tk e2e <tk-e2e@example.com>";
 const SECOND_USER_ID: &str = "tk e2e second <tk-e2e-2@example.com>";
@@ -24,16 +25,19 @@ fn locate(binary: &str) -> Option<PathBuf> {
 
 /// Creating a key also registers it in the run's registry.
 fn create_key_with(run: &Run, cli: &mut Command, wallet: &str, user_id: &str) -> Value {
-    let created = run.ok(cli.args([
-        "gpg",
-        "keys",
-        "create",
-        "--wallet-id",
-        wallet,
-        "--user-id",
-        user_id,
-    ]));
-    assert_eq!(created["reason"], "gpg_key_created");
+    let created = run.ok_created_or_reregistered(
+        cli.args([
+            "gpg",
+            "keys",
+            "create",
+            "--wallet-id",
+            wallet,
+            "--user-id",
+            user_id,
+        ]),
+        "gpg_key_created",
+        "gpg_key_registered",
+    );
     assert_eq!(created["organizationId"], run.org());
     assert_eq!(created["walletId"], wallet);
     assert_eq!(created["userId"], user_id);
@@ -48,8 +52,14 @@ fn create_key_with(run: &Run, cli: &mut Command, wallet: &str, user_id: &str) ->
     created
 }
 
-fn create_key(run: &Run, wallet: &str, user_id: &str) -> Value {
+pub(crate) fn create_key(run: &Run, wallet: &str, user_id: &str) -> Value {
     create_key_with(run, &mut run.admin(), wallet, user_id)
+}
+
+pub(crate) fn add_key(run: &Run, cli: &mut Command, wallet: &str, key: &str) -> Value {
+    let added = run.ok(cli.args(["gpg", "keys", "add", "--wallet-id", wallet, "--key", key]));
+    assert_eq!(added["reason"], "gpg_key_registered", "{added}");
+    added
 }
 
 fn registered(run: &Run, wallet: &str, created: &Value, account_id: &str) -> Value {
@@ -63,39 +73,55 @@ fn registered(run: &Run, wallet: &str, created: &Value, account_id: &str) -> Val
     })
 }
 
-fn import_into_gpg(run: &Run, gpg: &Path, armored: &str) -> PathBuf {
-    let gnupghome = run.home.path().join("gnupg");
+pub(crate) fn import_public_key(
+    run: &Run,
+    gpg: &Path,
+    home: &Path,
+    fingerprint: &str,
+    armored: &str,
+) -> PathBuf {
+    let gnupghome = home.join("gnupg");
     fs::create_dir(&gnupghome).unwrap();
-    let key_file = run.home.path().join("key.asc");
-    fs::write(&key_file, armored).unwrap();
+    fs::set_permissions(&gnupghome, fs::Permissions::from_mode(0o700)).unwrap();
+    let public_key = home.join(format!("{fingerprint}.asc"));
+    fs::write(&public_key, armored).unwrap();
     let imported = process::Command::new(gpg)
+        .env_clear()
         .env("GNUPGHOME", &gnupghome)
         .args(["--batch", "--import"])
-        .arg(&key_file)
-        .status()
+        .arg(&public_key)
+        .output()
         .unwrap();
-    assert!(imported.success());
+    assert!(
+        imported.status.success(),
+        "GnuPG import failed: {}",
+        run.redact(&imported.stderr)
+    );
+    let listed = process::Command::new(gpg)
+        .env_clear()
+        .env("GNUPGHOME", &gnupghome)
+        .args(["--batch", "--with-colons", "--list-keys", fingerprint])
+        .output()
+        .unwrap();
+    let listing = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        listed.status.success()
+            && listing
+                .lines()
+                .any(|line| line == format!("fpr:::::::::{fingerprint}:")),
+        "imported key does not list fingerprint {fingerprint}: {listing}{}",
+        run.redact(&listed.stderr)
+    );
     gnupghome
 }
 
-/// The wallet starts with an Ethereum account at `OpenPGP` key index 0, which
-/// `tk gpg` must skip as a key but still count as occupied.
-fn create_wallet(run: &Run) -> String {
+fn create_wallet(run: &Run, label: &str, accounts: Value) -> String {
     let created = run.submit(
         run.admin().args([
             "wallet",
             "create",
             "--input-json",
-            &json!({
-                "walletName": run.name("gpg-wallet"),
-                "accounts": [{
-                    "curve": "CURVE_SECP256K1",
-                    "pathFormat": "PATH_FORMAT_BIP32",
-                    "path": "m/5261136'/0'/0'/0'",
-                    "addressFormat": "ADDRESS_FORMAT_ETHEREUM",
-                }],
-            })
-            .to_string(),
+            &json!({"walletName": run.name(label), "accounts": accounts}).to_string(),
         ]),
         "wallet.create",
     );
@@ -103,6 +129,33 @@ fn create_wallet(run: &Run) -> String {
         .as_str()
         .unwrap()
         .to_string()
+}
+
+pub(crate) fn create_occupied_wallet(run: &Run) -> String {
+    create_wallet(
+        run,
+        "gpg-wallet",
+        json!([{
+            "curve": "CURVE_SECP256K1",
+            "pathFormat": "PATH_FORMAT_BIP32",
+            "path": "m/5261136'/0'/0'/0'",
+            "addressFormat": "ADDRESS_FORMAT_ETHEREUM",
+        }]),
+    )
+}
+
+pub(crate) fn openpgp_config(
+    program: &Path,
+    signing_key: Option<&str>,
+    command: &mut process::Command,
+) {
+    command
+        .args(["-c", "gpg.format=openpgp"])
+        .arg("-c")
+        .arg(format!("gpg.program={}", program.display()));
+    if let Some(key) = signing_key {
+        command.arg("-c").arg(format!("user.signingkey={key}"));
+    }
 }
 
 fn wallet_accounts(run: &Run, wallet: &str) -> Vec<Value> {
@@ -118,7 +171,7 @@ fn wallet_accounts(run: &Run, wallet: &str) -> Vec<Value> {
 #[ignore]
 fn gpg_keys_create_list_export_sign_remove_and_add() {
     let run = Run::new();
-    let wallet = create_wallet(&run);
+    let wallet = create_occupied_wallet(&run);
 
     let created = create_key(&run, &wallet, USER_ID);
     assert_eq!(
@@ -222,15 +275,7 @@ fn gpg_keys_create_list_export_sign_remove_and_add() {
     assert_eq!(unnamed["fingerprint"], fingerprint);
     assert_eq!(wallet_accounts(&run, &wallet).len(), 3);
 
-    let added = run.ok(run.admin().args([
-        "gpg",
-        "keys",
-        "add",
-        "--wallet-id",
-        &wallet,
-        "--key",
-        &second_fingerprint,
-    ]));
+    let added = add_key(&run, &mut run.admin(), &wallet, &second_fingerprint);
     assert_eq!(
         added,
         json!({
@@ -253,7 +298,7 @@ fn gpg_keys_create_list_export_sign_remove_and_add() {
         eprintln!("skipping GnuPG verification: gpg is not on PATH");
         return;
     };
-    let gnupghome = import_into_gpg(&run, &gpg, armored);
+    let gnupghome = import_public_key(&run, &gpg, run.home.path(), &fingerprint, armored);
     let signature_file = run.home.path().join("payload.txt.asc");
     fs::write(&signature_file, signature).unwrap();
     let verified = process::Command::new(&gpg)
@@ -270,7 +315,7 @@ fn gpg_keys_create_list_export_sign_remove_and_add() {
 #[ignore]
 fn gpg_key_organization_selects_the_profile() {
     let run = Run::new();
-    let wallet = create_wallet(&run);
+    let wallet = create_occupied_wallet(&run);
     let AdminLogin { record: login, .. } = run.login_admin();
     assert_eq!(login["command"], "auth.login");
 
@@ -304,29 +349,21 @@ fn gpg_shim_signs_and_git_verifies() {
         return;
     };
     let run = Run::new();
-    let wallet = create_wallet(&run);
+    let wallet = create_occupied_wallet(&run);
     let created = create_key(&run, &wallet, USER_ID);
     let fingerprint = created["fingerprint"].as_str().unwrap().to_string();
     let exported = run.ok(run.admin().args(["gpg", "keys", "export"]));
-    let gnupghome = import_into_gpg(&run, &gpg, exported["armored"].as_str().unwrap());
+    let gnupghome = import_public_key(
+        &run,
+        &gpg,
+        run.home.path(),
+        &fingerprint,
+        exported["armored"].as_str().unwrap(),
+    );
 
     let shim_env = |cmd: &mut process::Command| {
-        // Mirror the runner's environment exactly: its removals matter too,
-        // since a host RUST_LOG or TK_PROFILE would reach the shim otherwise.
-        for (name, value) in run.admin().get_envs() {
-            match value {
-                Some(value) => cmd.env(name, value),
-                None => cmd.env_remove(name),
-            };
-        }
-        // Git reads /etc/gitconfig and $XDG_CONFIG_HOME/git/config as well,
-        // so settings such as commit.gpgsign on the host would reach this
-        // test. Both are cut off here.
-        cmd.env("HOME", run.home.path())
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env_remove("XDG_CONFIG_HOME")
-            .env("TURNKEY_API_BASE_URL", &run.config.api_base_url)
-            .env("GNUPGHOME", &gnupghome);
+        run.inherit_environment(run.admin(), cmd);
+        cmd.env("GNUPGHOME", &gnupghome);
     };
 
     let mut shim = process::Command::new(env!("CARGO_BIN_EXE_tk"));
@@ -361,66 +398,32 @@ fn gpg_shim_signs_and_git_verifies() {
 
     let repo = run.home.path().join("repo");
     fs::create_dir(&repo).unwrap();
-    let git = |config: &[&str], args: &[&str]| {
-        let mut cmd = process::Command::new(&git);
-        shim_env(&mut cmd);
-        cmd.current_dir(&repo)
-            .args([
-                "-c",
-                "user.name=tk e2e",
-                "-c",
-                "user.email=tk-e2e@example.com",
-            ])
-            .args(["-c", "gpg.format=openpgp"])
-            .arg("-c")
-            .arg(format!("gpg.program={}", env!("CARGO_BIN_EXE_tk")));
-        for setting in config {
-            cmd.arg("-c").arg(setting);
-        }
-        cmd.args(args).output().unwrap()
+    let tk = Path::new(env!("CARGO_BIN_EXE_tk"));
+    let openpgp = |signing_key: Option<&str>, cmd: &mut process::Command| {
+        shim_env(cmd);
+        openpgp_config(tk, signing_key, cmd);
     };
-    let git_ok = |config: &[&str], args: &[&str]| {
-        let output = git(config, args);
-        assert!(
-            output.status.success(),
-            "git {args:?} failed: {}",
-            run.redact(&output.stderr)
-        );
-    };
-    let signingkey = format!("user.signingkey={fingerprint}");
-    git_ok(&[], &["init", "--quiet"]);
-    git_ok(
-        &[&signingkey],
-        &[
-            "commit",
-            "-S",
-            "--quiet",
-            "--allow-empty",
-            "-m",
-            "signed by tk",
-        ],
+    let unnamed = |cmd: &mut process::Command| openpgp(None, cmd);
+    run.git_ok(&git, &repo, unnamed, &["init", "--quiet"]);
+    run.git_ok(
+        &git,
+        &repo,
+        |cmd| openpgp(Some(&fingerprint), cmd),
+        &signed_commit("signed by tk"),
     );
-    git_ok(&[], &["verify-commit", "HEAD"]);
+    run.git_ok(&git, &repo, unnamed, &["verify-commit", "HEAD"]);
 
     // With user.signingkey unset, git names the committer ident, which is
     // the key's user ID, so the same key signs.
-    git_ok(
-        &[],
-        &[
-            "commit",
-            "-S",
-            "--quiet",
-            "--allow-empty",
-            "-m",
-            "signed by user id",
-        ],
-    );
-    git_ok(&[], &["verify-commit", "HEAD"]);
+    run.git_ok(&git, &repo, unnamed, &signed_commit("signed by user id"));
+    run.git_ok(&git, &repo, unnamed, &["verify-commit", "HEAD"]);
 
     let other = "FEDCBA9876543210FEDCBA9876543210FEDCBA98";
-    let refused = git(
-        &[&format!("user.signingkey={other}")],
-        &["commit", "-S", "--quiet", "--allow-empty", "-m", "refused"],
+    let refused = Run::git(
+        &git,
+        &repo,
+        |cmd| openpgp(Some(other), cmd),
+        &signed_commit("refused"),
     );
     assert!(
         !refused.status.success(),
@@ -433,4 +436,138 @@ fn gpg_shim_signs_and_git_verifies() {
         "{}",
         run.redact(&refused.stderr)
     );
+}
+
+#[test]
+#[ignore]
+fn signing_git_commits_gpg_with_scoped_policy() {
+    let gpg = locate("gpg").expect("gpg must be on PATH: the signing-git-commits gate needs GnuPG");
+    let git = locate("git").expect("git must be on PATH: the signing-git-commits gate needs git");
+    let run = Run::new();
+    let (agent_tag, _, agent) = run.create_agent();
+    let wallet = create_wallet(&run, "gpg", json!([]));
+    let other_wallet = create_wallet(&run, "gpg-outside-scope", json!([]));
+    run.allow_tag_signing(
+        "agents-sign-gpg",
+        &agent_tag,
+        &format!("activity.type == 'ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2' && wallet.id == '{wallet}'"),
+    );
+
+    let created = create_key(&run, &wallet, USER_ID);
+    let fingerprint = created["fingerprint"].as_str().unwrap().to_string();
+    let rerun = run.ok(run.admin().args([
+        "gpg",
+        "keys",
+        "create",
+        "--wallet-id",
+        &wallet,
+        "--user-id",
+        USER_ID,
+    ]));
+    assert_eq!(
+        rerun,
+        json!({
+            "reason": "gpg_key_registered",
+            "organizationId": run.org(),
+            "walletId": wallet,
+            "keyIndex": created["keyIndex"],
+            "fingerprint": fingerprint,
+            "userId": USER_ID,
+            "created": created["created"],
+        }),
+        "rerunning create with a user ID the wallet holds registers that key"
+    );
+    let other = create_key(&run, &other_wallet, SECOND_USER_ID);
+    let other_fingerprint = other["fingerprint"].as_str().unwrap().to_string();
+
+    let added = add_key(&run, &mut run.as_user(&agent), &wallet, &fingerprint);
+    assert_eq!(
+        added,
+        json!({
+            "reason": "gpg_key_registered",
+            "organizationId": run.org(),
+            "walletId": wallet,
+            "keyIndex": created["keyIndex"],
+            "fingerprint": fingerprint,
+            "userId": USER_ID,
+            "created": created["created"],
+        })
+    );
+    let exported =
+        run.ok(run
+            .as_user(&agent)
+            .args(["gpg", "keys", "export", "--key", &fingerprint]));
+    assert_eq!(exported["fingerprint"], fingerprint, "{exported}");
+    let gnupghome = import_public_key(
+        &run,
+        &gpg,
+        run.home.path(),
+        &fingerprint,
+        exported["armored"].as_str().unwrap(),
+    );
+
+    add_key(
+        &run,
+        &mut run.as_user(&agent),
+        &other_wallet,
+        &other_fingerprint,
+    );
+    run.err_unauthorized(run.as_user(&agent).args([
+        "gpg",
+        "keys",
+        "export",
+        "--key",
+        &other_fingerprint,
+    ]));
+    let payload = run.home.path().join("payload.txt");
+    fs::write(&payload, b"outside the policy scope\n").unwrap();
+    run.err_unauthorized(
+        run.as_user(&agent)
+            .args(["gpg", "sign", "--key", &other_fingerprint])
+            .arg(&payload),
+    );
+
+    let openpgp = |home: &Path, program: &Path, cmd: &mut process::Command| {
+        run.inherit_environment(run.as_user(&agent), cmd);
+        cmd.env("HOME", home).env("GNUPGHOME", &gnupghome);
+        openpgp_config(program, Some(&fingerprint), cmd);
+    };
+    let commit = signed_commit("signed by tk");
+    let tk = Path::new(env!("CARGO_BIN_EXE_tk"));
+
+    let repo = run.home.path().join("repo");
+    fs::create_dir(&repo).unwrap();
+    let own_home = |cmd: &mut process::Command| openpgp(run.home.path(), tk, cmd);
+    run.git_ok(&git, &repo, own_home, &["init", "--quiet"]);
+    run.git_ok(&git, &repo, own_home, &commit);
+    run.git_ok(&git, &repo, own_home, &["verify-commit", "HEAD"]);
+
+    let other_home = run.home.path().join("other-home");
+    fs::create_dir(&other_home).unwrap();
+    let other_repo = other_home.join("repo");
+    fs::create_dir(&other_repo).unwrap();
+    let no_registry = |cmd: &mut process::Command| openpgp(&other_home, tk, cmd);
+    run.git_ok(&git, &other_repo, no_registry, &["init", "--quiet"]);
+    let unregistered = Run::git(&git, &other_repo, no_registry, &commit);
+    assert!(
+        !unregistered.status.success(),
+        "git signed from a HOME with no registry"
+    );
+    let wrapper = run.home.path().join("tk-wrapper.sh");
+    fs::write(
+        &wrapper,
+        format!(
+            r#"#!/bin/sh
+export HOME='{}'
+exec '{}' "$@"
+"#,
+            run.home.path().display(),
+            tk.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+    let wrapped = |cmd: &mut process::Command| openpgp(&other_home, &wrapper, cmd);
+    run.git_ok(&git, &other_repo, wrapped, &commit);
+    run.git_ok(&git, &other_repo, wrapped, &["verify-commit", "HEAD"]);
 }

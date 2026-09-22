@@ -7,8 +7,8 @@ Follow [authentication](./authentication.md) first.
 ## Keys
 
 ```bash
-# Register a Turnkey private key locally.
-tk ssh keys add --private-key-id PRIVATE_KEY_ID
+# Create an Ed25519 private key in Turnkey and register it locally.
+tk ssh keys create --name agent-ssh
 tk ssh keys list
 
 # Print a public key, for authorized_keys or GitHub.
@@ -42,6 +42,12 @@ tk ssh agent start --key SSH_FINGERPRINT --key ANOTHER_SSH_FINGERPRINT
 tk ssh agent start --profile agent
 ```
 
+```bash
+# Move the socket and pid file off their defaults under ~/.config/turnkey/.
+# `status` and `stop` take the same two flags.
+tk ssh agent start --socket /run/agent/ssh.sock --pid-file /run/agent/ssh.pid
+```
+
 Restart after adding or removing keys:
 
 ```bash
@@ -51,3 +57,9 @@ tk ssh agent start
 
 To sign Git commits with a registered key, see
 [git signing](./git-signing.md).
+
+## Skills
+
+- [sidecar-patterns](../skills/sidecar-patterns/SKILL.md): serving keys from a socket under the agent's `HOME` and restarting the daemon after each renewal.
+- [using-ssh](../skills/using-ssh/SKILL.md): creating and registering the key, serving it as a non-root agent, and restarting after rotation.
+- [signing-git-commits](../skills/signing-git-commits/SKILL.md): the SSH signing alternative built on a registered key.

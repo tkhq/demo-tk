@@ -1,16 +1,97 @@
-//! Turnkey private-key lookup used when an SSH key is registered.
-
 use anyhow::{Context, Result};
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 use turnkey_auth::ssh::Ed25519PublicKey;
-use turnkey_client::TurnkeyClient;
 use turnkey_client::generated::external::data::v1::PrivateKey;
+use turnkey_client::generated::immutable::activity::v1::{
+    CreatePrivateKeysIntentV2, CreatePrivateKeysResultV2, PrivateKeyParams, PrivateKeyResult,
+};
 use turnkey_client::generated::immutable::common::v1::Curve;
-use turnkey_client::generated::{GetPrivateKeyRequest, GetPrivateKeyResponse};
+use turnkey_client::generated::{
+    GetPrivateKeyRequest, GetPrivateKeyResponse, GetPrivateKeysRequest, GetPrivateKeysResponse,
+};
+use turnkey_client::{ActivityResult, TurnkeyClient};
 use uuid::Uuid;
 
 use crate::errors::{ActivityError, ActivityErrorKind, InvalidInput, MissingResource};
 use crate::ssh::registry::PrivateKeyId;
+
+pub struct NamedPrivateKey {
+    pub id: PrivateKeyId,
+    pub public_key: Ed25519PublicKey,
+    pub created: bool,
+}
+
+pub async fn create_private_key(
+    client: &TurnkeyClient<TurnkeyP256ApiKey>,
+    organization_id: Uuid,
+    name: String,
+) -> Result<NamedPrivateKey> {
+    let GetPrivateKeysResponse { private_keys } = client
+        .get_private_keys(GetPrivateKeysRequest {
+            organization_id: organization_id.to_string(),
+        })
+        .await
+        .map_err(anyhow::Error::new)
+        .with_context(|| format!("list private keys before creating {name}"))?;
+    if let Some(existing) = private_keys
+        .into_iter()
+        .find(|key| key.private_key_name == name)
+    {
+        let (id, public_key) = ed25519_public_key(existing)?;
+        return Ok(NamedPrivateKey {
+            id,
+            public_key,
+            created: false,
+        });
+    }
+    let ActivityResult {
+        result: CreatePrivateKeysResultV2 { private_keys },
+        activity_id,
+        status: _,
+        app_proofs: _,
+    } = client
+        .create_private_keys(
+            organization_id.to_string(),
+            client.current_timestamp(),
+            CreatePrivateKeysIntentV2 {
+                private_keys: vec![PrivateKeyParams {
+                    private_key_name: name.clone(),
+                    curve: Curve::Ed25519,
+                    private_key_tags: Vec::new(),
+                    address_formats: Vec::new(),
+                }],
+            },
+        )
+        .await
+        .map_err(anyhow::Error::new)
+        .with_context(|| format!("create private key {name}"))?;
+    let id = match <[PrivateKeyResult; 1]>::try_from(private_keys) {
+        Ok(
+            [
+                PrivateKeyResult {
+                    private_key_id,
+                    addresses: _,
+                },
+            ],
+        ) => PrivateKeyId::from(private_key_id),
+        Err(other) => {
+            return Err(ActivityError::new(
+                ActivityErrorKind::MalformedResponse,
+                format!(
+                    "create_private_keys activity {activity_id} returned {} private keys",
+                    other.len()
+                ),
+            )
+            .into());
+        }
+    };
+    let public_key = get_private_key(client, organization_id, &id).await?;
+    Ok(NamedPrivateKey {
+        id,
+        public_key,
+        created: true,
+    })
+}
 
 pub async fn get_private_key(
     client: &TurnkeyClient<TurnkeyP256ApiKey>,
@@ -27,8 +108,13 @@ pub async fn get_private_key(
         .with_context(|| format!("get private key {requested_id}"))?;
     let private_key =
         private_key.ok_or_else(|| MissingResource::new("private key", requested_id.to_string()))?;
+    let (_, public_key) = ed25519_public_key(private_key)?;
+    Ok(public_key)
+}
+
+fn ed25519_public_key(private_key: PrivateKey) -> Result<(PrivateKeyId, Ed25519PublicKey)> {
     let PrivateKey {
-        private_key_id: _,
+        private_key_id,
         public_key,
         private_key_name: _,
         curve,
@@ -39,9 +125,10 @@ pub async fn get_private_key(
         exported: _,
         imported: _,
     } = private_key;
+    let id = PrivateKeyId::from(private_key_id);
     if curve != Curve::Ed25519 {
         return Err(InvalidInput(format!(
-            "private key {requested_id} has curve {}; tk signs SSH payloads with CURVE_ED25519 keys",
+            "private key {id} has curve {}; tk signs SSH payloads with CURVE_ED25519 keys",
             curve.as_str_name()
         ))
         .into());
@@ -53,17 +140,17 @@ pub async fn get_private_key(
     let bytes = hex::decode(encoded).map_err(|error| {
         ActivityError::new(
             ActivityErrorKind::MalformedResponse,
-            format!("private key {requested_id} publicKey is not hex"),
+            format!("private key {id} publicKey is not hex"),
         )
         .with_source(error)
     })?;
     let bytes: [u8; 32] = bytes.try_into().map_err(|_wrong_length: Vec<u8>| {
         ActivityError::new(
             ActivityErrorKind::MalformedResponse,
-            format!("private key {requested_id} publicKey is not 32 bytes"),
+            format!("private key {id} publicKey is not 32 bytes"),
         )
     })?;
-    Ok(Ed25519PublicKey::from_bytes(bytes))
+    Ok((id, Ed25519PublicKey::from_bytes(bytes)))
 }
 
 // Asserts on the classified error code.

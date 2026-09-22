@@ -38,6 +38,15 @@ fn cli_help_lists_registry_ssh_commands() {
         .stdout(predicate::str::contains("--key"))
         .stdout(predicate::str::contains("--socket"))
         .stdout(predicate::str::contains("--pid-file"));
+
+    let mut gpg = Command::new(env!("CARGO_BIN_EXE_tk"));
+    gpg.args(["gpg", "agent", "serve", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--key <KEY>"))
+        .stdout(predicate::str::contains("--socket <path>"))
+        .stdout(predicate::str::contains("--socket-mode <SOCKET_MODE>"))
+        .stdout(predicate::str::contains("foreground"));
 }
 
 #[test]

@@ -6,10 +6,12 @@ use std::cell::RefCell;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::net::UnixStream;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
+use std::process::{self, Child};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 use uuid::Uuid;
@@ -31,6 +33,8 @@ pub(crate) const AGENT_TAG: &str = "agent";
 pub(crate) const HUMAN_TAG: &str = "human-approver";
 const ATTEMPTS: u32 = 5;
 const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(10);
+const CHILD_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
+const CHILD_READINESS_POLL_INTERVAL: Duration = Duration::from_millis(20);
 
 fn backoff(attempt: u32) {
     thread::sleep(Duration::from_secs(1u64 << (attempt - 1)));
@@ -118,6 +122,10 @@ pub(crate) fn allow_once(agent_tag: &str, human_tag: &str) -> String {
         tag_consensus(agent_tag),
         tag_consensus(human_tag)
     )
+}
+
+pub(crate) fn signed_commit(message: &str) -> [&str; 6] {
+    ["commit", "-S", "--quiet", "--allow-empty", "-m", message]
 }
 
 pub(crate) fn user_params(name: &str, api_keys: Value) -> String {
@@ -291,6 +299,30 @@ impl Run {
         text
     }
 
+    pub(crate) fn wait_for_child_socket(
+        &self,
+        child: &mut Option<Child>,
+        path: &Path,
+        process: &str,
+        readiness: &str,
+    ) {
+        let deadline = Instant::now() + CHILD_READINESS_TIMEOUT;
+        while UnixStream::connect(path).is_err() {
+            if child.as_mut().unwrap().try_wait().unwrap().is_some() {
+                let output = child.take().unwrap().wait_with_output().unwrap();
+                panic!(
+                    "{process} exited before {readiness}: {}",
+                    self.redact(&output.stderr)
+                );
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{process} did not finish {readiness}"
+            );
+            thread::sleep(CHILD_READINESS_POLL_INTERVAL);
+        }
+    }
+
     /// Runs the binary once, redacting tracked secrets from both streams.
     fn output(&self, cmd: &mut Command) -> (Option<i32>, String, String) {
         let output = cmd.output().unwrap();
@@ -344,6 +376,21 @@ impl Run {
         self.record(cmd, 1)
     }
 
+    pub(crate) fn ok_created_or_reregistered(
+        &self,
+        cmd: &mut Command,
+        created: &str,
+        registered: &str,
+    ) -> Value {
+        let record = self.ok(cmd);
+        let reason = record["reason"].as_str();
+        assert!(
+            reason == Some(created) || reason == Some(registered),
+            "{record}"
+        );
+        record
+    }
+
     fn human_attempt(&self, cmd: &mut Command) -> (Option<i32>, String, String) {
         for attempt in 1..ATTEMPTS {
             let (code, stdout, stderr) = self.output(cmd);
@@ -379,6 +426,13 @@ impl Run {
         assert_eq!(record["status"], "completed", "{record}");
         assert_eq!(record["activity"]["id"], id);
         record
+    }
+
+    pub(crate) fn approve_and_wait(&self, approver: &TurnkeyP256ApiKey, activity: &str) -> Value {
+        self.ok(self
+            .as_user(approver)
+            .args(["activity", "approve", activity]));
+        self.wait(activity)
     }
 
     /// Submits once and waits for pending activities.
@@ -656,6 +710,91 @@ impl Run {
             .to_string()
     }
 
+    pub(crate) fn deny_agent_credentials(&self, agent_tag: &str) {
+        self.create_policy_from_flags(
+            &self.name("agents-no-credentials"),
+            "deny",
+            &tag_consensus(agent_tag),
+            "activity.resource == 'CREDENTIAL'",
+        );
+    }
+
+    pub(crate) fn allow_tag_signing(&self, name: &str, tag: &str, condition: &str) {
+        self.create_policy_from_flags(&self.name(name), "allow", &tag_consensus(tag), condition);
+    }
+
+    pub(crate) fn allow_agent_export(&self, consensus: &str, level: &str) {
+        self.create_policy_from_flags(
+            &self.name(&format!("agents-export-{level}")),
+            "allow",
+            consensus,
+            &format!(
+                "activity.type == 'ACTIVITY_TYPE_EXPORT_SECRETS' && secret.static_properties['consensus'] == '{level}'"
+            ),
+        );
+    }
+
+    pub(crate) fn import_secret_from_file(&self, name: &str, level: &str, value: &str) -> String {
+        let file = self
+            .home()
+            .join(format!("{}.txt", name.rsplit('/').next().unwrap()));
+        fs::write(&file, value).unwrap();
+        let imported = self.submit(
+            self.admin()
+                .args([
+                    "secret",
+                    "import",
+                    name,
+                    "--property",
+                    &format!("consensus={level}"),
+                    "--from-file",
+                ])
+                .arg(&file),
+            "secret.import",
+        );
+        assert_eq!(imported["data"]["name"], name, "{imported}");
+        imported["data"]["secretId"].as_str().unwrap().to_string()
+    }
+
+    pub(crate) fn git(
+        git: &Path,
+        repo: &Path,
+        configure: impl FnOnce(&mut process::Command),
+        args: &[&str],
+    ) -> process::Output {
+        let mut command = process::Command::new(git);
+        configure(&mut command);
+        command
+            .current_dir(repo)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("XDG_CONFIG_HOME")
+            .args([
+                "-c",
+                "user.name=tk e2e",
+                "-c",
+                "user.email=tk-e2e@example.com",
+            ])
+            .args(args)
+            .output()
+            .expect("git should run")
+    }
+
+    pub(crate) fn git_ok(
+        &self,
+        git: &Path,
+        repo: &Path,
+        configure: impl FnOnce(&mut process::Command),
+        args: &[&str],
+    ) -> process::Output {
+        let output = Self::git(git, repo, configure, args);
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            self.redact(&output.stderr)
+        );
+        output
+    }
+
     pub(crate) fn register_api_key(&self, user_id: &str, name: &str, public_key: &str) -> Value {
         self.submit(
             self.admin().args([
@@ -703,6 +842,84 @@ impl Run {
             "user.create",
         );
         (created_user_id(&created), key)
+    }
+
+    pub(crate) fn create_agent(&self) -> (String, String, TurnkeyP256ApiKey) {
+        let tag_id = self.create_tag(AGENT_TAG);
+        let (user_id, key) = self.create_tagged_user("agent", AGENT_TAG);
+        (tag_id, user_id, key)
+    }
+
+    pub(crate) fn api_key_id(&self, user_id: &str, public_key: &str) -> String {
+        let listed = self.ok(self.admin().args(["api-key", "list", "--user-id", user_id]));
+        listed["data"]["apiKeys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|key| key["credential"]["publicKey"] == public_key)
+            .unwrap_or_else(|| panic!("api key {public_key} missing: {listed}"))["apiKeyId"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    pub(crate) fn inherit_environment(&self, bundle: Command, command: &mut process::Command) {
+        for (name, value) in bundle.get_envs() {
+            match value {
+                Some(value) => command.env(name, value),
+                None => command.env_remove(name),
+            };
+        }
+        command.env("TURNKEY_API_BASE_URL", &self.config.api_base_url);
+    }
+
+    pub(crate) fn err_unauthorized(&self, cmd: &mut Command) -> Value {
+        let denied = self.err(cmd);
+        assert_eq!(denied["code"], "unauthorized", "{denied}");
+        assert_eq!(denied["httpStatus"], 403, "{denied}");
+        denied
+    }
+
+    pub(crate) fn assert_api_key_register_denied(&self, cmd: &mut Command, user_id: &str) {
+        let escape = json!({
+            "userId": user_id,
+            "apiKeys": [{
+                "apiKeyName": "escape",
+                "publicKey": hex::encode(self.key().compressed_public_key()),
+                "curveType": "API_KEY_CURVE_P256",
+            }],
+        });
+        self.err_unauthorized(cmd.args([
+            "api-key",
+            "register",
+            "--input-json",
+            &escape.to_string(),
+        ]));
+    }
+
+    pub(crate) fn create_session_agent(
+        &self,
+        label: &str,
+        expires_in: &str,
+    ) -> (Value, TurnkeyP256ApiKey) {
+        let key = self.key();
+        let created = self.submit(
+            self.admin().args([
+                "user",
+                "create",
+                "--user-name",
+                &self.name(label),
+                "--tag-name",
+                AGENT_TAG,
+                "--public-key",
+                &hex::encode(key.compressed_public_key()),
+                "--expires-in",
+                expires_in,
+                "--anchor-key",
+            ]),
+            "user.create",
+        );
+        (created, key)
     }
 
     /// Saves the admin key as a profile named after this run and logs in.

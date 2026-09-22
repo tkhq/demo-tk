@@ -52,10 +52,15 @@ pub fn parse_point_hex(address: &str) -> Result<UncompressedPoint, OpenPgpError>
 }
 
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(test, derive(Debug))]
 /// The 20 byte SHA-1 fingerprint of an `OpenPGP` public key packet.
 pub struct Fingerprint([u8; 20]);
 
 impl Fingerprint {
+    pub(crate) fn from_bytes(bytes: [u8; 20]) -> Self {
+        Self(bytes)
+    }
+
     pub(crate) fn as_bytes(&self) -> &[u8; 20] {
         &self.0
     }

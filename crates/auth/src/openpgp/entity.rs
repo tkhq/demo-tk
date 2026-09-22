@@ -5,12 +5,13 @@ use std::pin::Pin;
 use anyhow::{Context, Result};
 
 use super::OpenPgpError;
+pub use super::armor::ArmoredSignature;
 use super::armor::{BlockType, armor};
 use super::key::{Fingerprint, UncompressedPoint, primary_key_packet};
 use super::packet::{new_format_packet, subpacket};
 use super::signature::{
-    SignedObject, creation_time_subpacket, digest, hashed_portion, issuer_fingerprint_subpacket,
-    issuer_key_id_subpacket, key_hash_prefix, signature_packet,
+    P256Scalar, SignedObject, creation_time_subpacket, digest, hashed_portion,
+    issuer_fingerprint_subpacket, issuer_key_id_subpacket, key_hash_prefix, signature_packet,
 };
 
 /// RFC 4880 5.2.3.21 key flags: certify | sign.
@@ -109,32 +110,39 @@ pub struct OpenPgpKey {
     pub signing: SigningKey,
 }
 
-async fn build_signature(
+async fn build_signature<S: SignDigest + ?Sized>(
     object: SignedObject,
     hashed_subpackets: Vec<u8>,
     key: SigningKey,
     data_to_hash: &[u8],
-    signer: &dyn SignDigest,
+    signer: &S,
 ) -> Result<Vec<u8>> {
     let issuer = key.fingerprint();
     let hashed = hashed_portion(object, &hashed_subpackets);
     let digest_bytes = digest(data_to_hash, &hashed);
-    let signature = signer
+    let EcdsaSignature { r, s } = signer
         .sign_digest(key.point, digest_bytes)
         .await
         .with_context(|| format!("failed to sign the {object} digest"))?;
+    let (r, s) = P256Scalar::parse(r)
+        .zip(P256Scalar::parse(s))
+        .ok_or(OpenPgpError::SignatureScalarOutOfRange)
+        .context("encode the OpenPGP signature packet")?;
 
     Ok(signature_packet(
         hashed,
         &issuer_key_id_subpacket(issuer),
         &digest_bytes,
-        &signature.r,
-        &signature.s,
+        r.as_bytes(),
+        s.as_bytes(),
     ))
 }
 
 /// A byte-for-byte reproducible armored public key block: primary key, User ID, and self signature.
-pub async fn export_public_key(key: &OpenPgpKey, signer: &dyn SignDigest) -> Result<String> {
+pub async fn export_public_key<S: SignDigest + ?Sized>(
+    key: &OpenPgpKey,
+    signer: &S,
+) -> Result<String> {
     let primary = primary_key_packet(key.signing.point, key.signing.created);
     let user_id_bytes = key.user_id.as_bytes();
 
@@ -178,27 +186,95 @@ pub async fn export_public_key(key: &OpenPgpKey, signer: &dyn SignDigest) -> Res
     Ok(armor(BlockType::PublicKeyBlock, &data))
 }
 
-/// A binary document signature over `data`, as raw tag 2 packet bytes.
-pub async fn detached_signature(
+/// An ASCII armored document signature with validated hashed metadata.
+pub async fn armored_detached_signature<S: SignDigest + ?Sized>(
     key: SigningKey,
     data: &[u8],
-    signer: &dyn SignDigest,
+    signer: &S,
     now: u32,
-) -> Result<Vec<u8>> {
-    let fingerprint = key.fingerprint();
+) -> Result<ArmoredSignature> {
     let mut hashed = creation_time_subpacket(now);
-    hashed.extend_from_slice(&issuer_fingerprint_subpacket(fingerprint));
-    build_signature(SignedObject::Document, hashed, key, data, signer).await
-}
-
-/// Wraps a signature packet in an ASCII armored signature block.
-pub fn armor_signature(packet: &[u8]) -> String {
-    armor(BlockType::Signature, packet)
+    hashed.extend_from_slice(&issuer_fingerprint_subpacket(key.fingerprint()));
+    let packet = build_signature(SignedObject::Document, hashed, key, data, signer).await?;
+    Ok(ArmoredSignature::from_parts(
+        &packet,
+        now,
+        key.fingerprint(),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
+
+    struct CellSigner {
+        next_scalar: Cell<u8>,
+    }
+
+    impl SignDigest for CellSigner {
+        fn sign_digest<'a>(
+            &'a self,
+            _signer: UncompressedPoint,
+            _digest: [u8; 32],
+        ) -> SignDigestFuture<'a> {
+            let scalar = self.next_scalar.get();
+            self.next_scalar.set(scalar.wrapping_add(1));
+            let signature = EcdsaSignature {
+                r: [scalar; 32],
+                s: [scalar; 32],
+            };
+            Box::pin(async move { Ok(signature) })
+        }
+    }
+
+    #[tokio::test]
+    async fn armored_detached_signature_retains_metadata_and_accepts_a_non_sync_signer() {
+        let cell_signer = CellSigner {
+            next_scalar: Cell::new(1),
+        };
+        let signer: &dyn SignDigest = &cell_signer;
+        let key = SigningKey {
+            point: [4; 65]
+                .try_into()
+                .expect("an uncompressed point should parse"),
+            created: 1_700_000_000,
+        };
+
+        let signature = armored_detached_signature(key, b"document", signer, 1_700_000_001)
+            .await
+            .expect("the owned signature future should complete");
+
+        assert_eq!(signature.created(), 1_700_000_001);
+        assert_eq!(signature.fingerprint(), &key.fingerprint());
+        assert_eq!(cell_signer.next_scalar.get(), 2);
+    }
+
+    #[tokio::test]
+    async fn export_public_key_rejects_a_self_signature_scalar_at_or_above_the_curve_order() {
+        let cell_signer = CellSigner {
+            next_scalar: Cell::new(0xff),
+        };
+        let key = OpenPgpKey {
+            user_id: UserId::parse("Ada <ada@example.com>".to_owned()).unwrap(),
+            signing: SigningKey {
+                point: [4; 65]
+                    .try_into()
+                    .expect("an uncompressed point should parse"),
+                created: 1_700_000_000,
+            },
+        };
+
+        let error = export_public_key(&key, &cell_signer)
+            .await
+            .expect_err("an out of range scalar should be rejected");
+
+        assert!(matches!(
+            error.downcast_ref::<OpenPgpError>(),
+            Some(OpenPgpError::SignatureScalarOutOfRange)
+        ));
+    }
 
     #[test]
     fn user_id_parse_rejects_a_nul_or_a_newline() {

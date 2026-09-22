@@ -12,9 +12,7 @@ use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 use serde::Serialize;
 use tokio::fs;
-use turnkey_auth::openpgp::entity::{
-    UserId, armor_signature, detached_signature, export_public_key,
-};
+use turnkey_auth::openpgp::entity::{UserId, armored_detached_signature, export_public_key};
 use uuid::Uuid;
 
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
@@ -27,6 +25,7 @@ use crate::outcome::Outcome;
 use registry::{GpgKeyEntry, KeyName, Scope, SelectError, SigningKeyName};
 use signer::TurnkeySigner;
 
+mod agent;
 mod keys;
 pub mod registry;
 pub mod shim;
@@ -41,11 +40,13 @@ pub enum GpgCommand {
     },
     /// Write an armored detached signature for a file. With no file, tk signs stdin.
     Sign(SignArgs),
+    /// Serve registered `OpenPGP` keys over a Unix socket.
+    Agent(agent::Args),
 }
 
 #[derive(Debug, Subcommand)]
 pub enum KeysCommand {
-    /// Create a signing account for a user ID and register the key.
+    /// Create a signing account for a user ID, or reuse the wallet's key with that user ID, and register it.
     Create(CreateArgs),
     /// Register an existing key from a wallet so git and tk gpg sign can use it.
     Add(AddArgs),
@@ -302,6 +303,7 @@ async fn open_wallet(
 
 pub async fn run(command: GpgCommand, options: &AuthOptions) -> Result<Outcome> {
     match command {
+        GpgCommand::Agent(args) => agent::run(args, options).await,
         GpgCommand::Keys { command } => run_keys(command, options).await,
         GpgCommand::Sign(SignArgs {
             key: KeyArgs { key },
@@ -323,8 +325,9 @@ pub async fn run(command: GpgCommand, options: &AuthOptions) -> Result<Outcome> 
             let (entry, client) = select_registered(options, key).await?;
             let signer = TurnkeySigner::new(&client, entry.organization_id);
             let now = unix_now()?;
-            let packet = detached_signature(entry.key.signing, &data, &signer, now).await?;
-            let armored = armor_signature(&packet);
+            let signature =
+                armored_detached_signature(entry.key.signing, &data, &signer, now).await?;
+            let armored = signature.into_string();
             if let Some(path) = &output {
                 fs::write(path, &armored)
                     .await
@@ -370,13 +373,33 @@ async fn run_keys(command: KeysCommand, options: &AuthOptions) -> Result<Outcome
             }))
         }
         KeysCommand::Create(CreateArgs { wallet_id, user_id }) => {
-            let (organization_id, client, keys::WalletKeys { keys: _, occupied }) =
-                open_wallet(options, wallet_id).await?;
-            let index = keys::next_free_index(&occupied);
-            let key = keys::create_key(&client, organization_id, wallet_id, index, user_id).await?;
-            Ok(Outcome::GpgKeyCreated(
-                register(organization_id, wallet_id, key).await?,
-            ))
+            let (
+                organization_id,
+                client,
+                keys::WalletKeys {
+                    keys: existing,
+                    occupied,
+                },
+            ) = open_wallet(options, wallet_id).await?;
+            let selected = registry::select(
+                Scope::Wallet(wallet_id),
+                existing,
+                |key| &key.key,
+                Some(KeyName::UserId(user_id.as_str().to_owned())),
+            );
+            let (key, outcome): (_, fn(KeyRegistered) -> Outcome) = match selected {
+                Ok(key) => (key, Outcome::GpgKeyRegistered),
+                Err(SelectError::Empty { .. } | SelectError::NoMatch { .. }) => {
+                    let index = keys::next_free_index(&occupied);
+                    let key = keys::create_key(&client, organization_id, wallet_id, index, user_id)
+                        .await?;
+                    (key, Outcome::GpgKeyCreated)
+                }
+                Err(error @ (SelectError::Unnamed { .. } | SelectError::Ambiguous { .. })) => {
+                    return Err(selection_error(error, "name one with --key"));
+                }
+            };
+            Ok(outcome(register(organization_id, wallet_id, key).await?))
         }
         KeysCommand::Add(AddArgs { wallet_id, key }) => {
             let (
@@ -501,7 +524,7 @@ mod tests {
         assert_eq!(
             error.to_string().lines().next(),
             Some(
-                r"error: invalid value '0123456789ABCDE' for '--key <KEY>': expected a fingerprint or long key ID of at least 16 hex characters"
+                r"error: invalid value '0123456789ABCDE' for '--key <KEY>': expected a fingerprint or long key ID of 16 to 40 hex characters"
             )
         );
     }

@@ -17,16 +17,19 @@ use uuid::Uuid;
 use crate::errors::{InvalidInput, Malformed};
 
 const LONG_KEY_ID_CHARS: usize = 16;
+const FINGERPRINT_CHARS: usize = 40;
 
 /// A key as `user.signingkey` or `--key` names it: the hex tail of a
-/// fingerprint, at least a long key ID. `GnuPG`'s grouping into fours and
-/// trailing "!" are normalized away.
+/// fingerprint, from a long key ID up to the whole fingerprint. `GnuPG`'s
+/// grouping into fours and trailing "!" are normalized away.
 #[derive(Clone, Debug)]
 #[cfg_attr(test, derive(PartialEq))]
 pub struct SigningKeyName(String);
 
 #[derive(Debug, thiserror::Error)]
-#[error("expected a fingerprint or long key ID of at least {LONG_KEY_ID_CHARS} hex characters")]
+#[error(
+    "expected a fingerprint or long key ID of {LONG_KEY_ID_CHARS} to {FINGERPRINT_CHARS} hex characters"
+)]
 pub struct SigningKeyNameError;
 
 impl FromStr for SigningKeyName {
@@ -41,15 +44,26 @@ impl FromStr for SigningKeyName {
             .filter(|c| !c.is_ascii_whitespace())
             .map(|c| c.to_ascii_uppercase())
             .collect();
-        (value.len() >= LONG_KEY_ID_CHARS && value.chars().all(|c| c.is_ascii_hexdigit()))
-            .then_some(Self(value))
-            .ok_or(SigningKeyNameError)
+        ((LONG_KEY_ID_CHARS..=FINGERPRINT_CHARS).contains(&value.len())
+            && value.chars().all(|c| c.is_ascii_hexdigit()))
+        .then_some(Self(value))
+        .ok_or(SigningKeyNameError)
     }
 }
 
 impl Display for SigningKeyName {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
+    }
+}
+
+impl SigningKeyName {
+    pub(in crate::gpg) fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub(in crate::gpg) fn matches_fingerprint(&self, fingerprint: &Fingerprint) -> bool {
+        fingerprint.ends_with(&self.0)
     }
 }
 
@@ -62,7 +76,7 @@ pub enum KeyName {
 impl KeyName {
     fn matches(&self, key: &OpenPgpKey) -> bool {
         match self {
-            Self::Suffix(name) => key.signing.fingerprint().ends_with(&name.0),
+            Self::Suffix(name) => name.matches_fingerprint(&key.signing.fingerprint()),
             Self::UserId(user_id) => key.user_id.as_str() == user_id,
         }
     }
@@ -315,5 +329,15 @@ mod tests {
                 "{requested:?} should normalize to the full fingerprint"
             );
         }
+    }
+
+    #[test]
+    fn a_name_longer_than_a_fingerprint_is_a_user_id() {
+        let long = "FEDCBA9876543210FEDCBA9876543210FEDCBA980";
+        long.parse::<SigningKeyName>().unwrap_err();
+        assert!(matches!(
+            KeyName::from(long.to_string()),
+            KeyName::UserId(user_id) if user_id == long
+        ));
     }
 }

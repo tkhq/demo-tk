@@ -8,10 +8,9 @@ use assert_cmd::Command as TkCommand;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::run::{Run, bare_cli};
+use crate::run::{Run, bare_cli, result};
 use crate::ssh::{
-    check_signature, create_ed25519_key, generate_local_key, inherit_admin_environment, locate,
-    register_key, text,
+    check_signature, create_ed25519_key, generate_local_key, locate, register_key, text,
 };
 
 /// Stops the agent when the test ends, whether or not it passed.
@@ -145,9 +144,9 @@ fn agent_serves_every_registered_key_and_reports_its_lifecycle() {
     };
     let run = Run::new();
     let first_id = create_ed25519_key(&run);
-    let first = register_key(&run, &first_id);
+    let first = register_key(&run, &mut run.admin(), &first_id);
     let second_id = create_ed25519_key(&run);
-    let second = register_key(&run, &second_id);
+    let second = register_key(&run, &mut run.admin(), &second_id);
     let payload = run.home().join("payload.txt");
     fs::write(&payload, b"signed through the tk ssh agent\n").unwrap();
     let signature = run.home().join("payload.txt.sig");
@@ -233,7 +232,7 @@ fn agent_serves_every_registered_key_and_reports_its_lifecycle() {
     // Registry edits do not reach the running agent, and the human output
     // says so.
     let mut readd = Command::new(env!("CARGO_BIN_EXE_tk"));
-    inherit_admin_environment(&run, &mut readd);
+    run.inherit_environment(run.admin(), &mut readd);
     let readded = run.human_stdout(TkCommand::from_std(readd).args([
         "ssh",
         "keys",
@@ -289,9 +288,9 @@ fn agent_start_narrows_by_key_profile_and_organization() {
     };
     let run = Run::new();
     let first_id = create_ed25519_key(&run);
-    let first = register_key(&run, &first_id);
+    let first = register_key(&run, &mut run.admin(), &first_id);
     let second_id = create_ed25519_key(&run);
-    let second = register_key(&run, &second_id);
+    let second = register_key(&run, &mut run.admin(), &second_id);
     let first_fingerprint = text(&first["fingerprint"]).to_string();
     let second_fingerprint = text(&second["fingerprint"]).to_string();
     let payload = run.home().join("payload.txt");
@@ -438,4 +437,156 @@ fn agent_start_narrows_by_key_profile_and_organization() {
         "the registry holds no SSH keys; register one with tk ssh keys add --private-key-id ID"
             .to_string(),
     );
+}
+
+#[test]
+#[ignore]
+fn using_ssh_register_serve_sign() {
+    let ssh_add = locate("ssh-add").expect("using-ssh needs ssh-add on PATH");
+    let ssh_keygen = locate("ssh-keygen").expect("using-ssh needs ssh-keygen on PATH");
+    let run = Run::new();
+    let (agent_tag, agent_id, agent_key) = run.create_agent();
+    let create_key = |label: &str| {
+        let name = run.name(label);
+        let created = run.ok_created_or_reregistered(
+            run.admin().args(["ssh", "keys", "create", "--name", &name]),
+            "ssh_key_created",
+            "ssh_key_registered",
+        );
+        assert_eq!(created["organizationId"], run.org(), "{created}");
+        assert!(
+            text(&created["fingerprint"]).starts_with("SHA256:"),
+            "{created}"
+        );
+        assert!(
+            text(&created["publicKey"]).starts_with("ssh-ed25519 "),
+            "{created}"
+        );
+        let reused = run.ok(run.admin().args(["ssh", "keys", "create", "--name", &name]));
+        assert_eq!(
+            reused,
+            json!({
+                "reason": "ssh_key_registered",
+                "organizationId": created["organizationId"],
+                "privateKeyId": created["privateKeyId"],
+                "fingerprint": created["fingerprint"],
+                "publicKey": created["publicKey"],
+            })
+        );
+        text(&created["privateKeyId"]).to_string()
+    };
+    let served_id = create_key("agent-ssh");
+    let unserved_id = create_key("agent-ssh-unserved");
+    run.allow_tag_signing(
+        "agents-sign-ssh",
+        &agent_tag,
+        &format!(
+            "activity.type == 'ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2' && private_key.id == '{served_id}'"
+        ),
+    );
+    let payload = run.home().join("payload.txt");
+    fs::write(&payload, b"signed through the agent's tk ssh agent\n").unwrap();
+    let signature = run.home().join("payload.txt.sig");
+    let socket = run.home().join("agent/ssh.sock");
+    let pid_file = run.home().join("agent/ssh.pid");
+    let paths: [(&str, &Path); 2] = [("--socket", &socket), ("--pid-file", &pid_file)];
+
+    let served = register_key(&run, &mut run.as_user(&agent_key), &served_id);
+    assert_eq!(served["privateKeyId"], served_id, "{served}");
+    let unserved = register_key(&run, &mut run.as_user(&agent_key), &unserved_id);
+    assert_eq!(
+        run.ok(run
+            .as_user(&agent_key)
+            .args(["ssh", "public-key", "--key", &served_id])),
+        json!({
+            "reason": "public_key_printed",
+            "fingerprint": served["fingerprint"],
+            "publicKey": served["publicKey"],
+        })
+    );
+    let served_public_key = public_key_file(&run, "served.pub", &served);
+    let unserved_public_key = public_key_file(&run, "unserved.pub", &unserved);
+
+    let agent = Agent::start(&run, &mut run.as_user(&agent_key), &[], &paths);
+    assert_eq!(
+        agent.listed_keys(&ssh_add),
+        sorted(vec![
+            advertised(&served, &served_id),
+            advertised(&unserved, &unserved_id)
+        ])
+    );
+    assert_eq!(
+        agent.status(),
+        json!({
+            "reason": "agent_status_report",
+            "pid": agent.started["pid"],
+            "socket": agent.started["socket"],
+            "keys": agent.fingerprints(),
+        })
+    );
+    let sign_and_check = |agent: &Agent<'_>| {
+        let signed = agent.sign(&ssh_keygen, &served_public_key, &payload);
+        assert!(
+            signed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&signed.stderr)
+        );
+        let checked = check_signature(&ssh_keygen, &served_public_key, &payload, &signature);
+        assert!(
+            checked.status.success(),
+            "{}",
+            String::from_utf8_lossy(&checked.stderr)
+        );
+        fs::remove_file(&signature).unwrap();
+    };
+    sign_and_check(&agent);
+    let denied = agent.sign(&ssh_keygen, &unserved_public_key, &payload);
+    assert!(
+        !denied.status.success(),
+        "the agent signed with a key no policy allows"
+    );
+    assert!(!signature.exists());
+
+    let next_key = run.key();
+    run.register_api_key(
+        &agent_id,
+        &run.name("agent-next"),
+        &hex::encode(next_key.compressed_public_key()),
+    );
+    let profile = run.name("agent");
+    run.login_as(&profile, &next_key);
+    sign_and_check(&agent);
+    let stale_socket = run.home().join("agent/stale.sock");
+    let stale_pid_file = run.home().join("agent/stale.pid");
+    let stale = Agent::start(
+        &run,
+        &mut run.as_user(&agent_key),
+        &[],
+        &[("--socket", &stale_socket), ("--pid-file", &stale_pid_file)],
+    );
+    assert_eq!(agent.stop(), json!({"reason": "agent_stopped"}));
+    let restarted = Agent::start(&run, run.cli().args(["--profile", &profile]), &[], &paths);
+
+    let old_id = run.api_key_id(&agent_id, &hex::encode(agent_key.compressed_public_key()));
+    let deleted = run.submit(
+        run.admin()
+            .args(["api-key", "delete", "--user-id", &agent_id, &old_id]),
+        "api-key.delete",
+    );
+    assert_eq!(
+        result(&deleted, "deleteApiKeysResult")["apiKeyIds"],
+        json!([old_id])
+    );
+    let revoked = run.err(run.as_user(&agent_key).arg("whoami"));
+    assert_eq!(revoked["code"], "unauthorized", "{revoked}");
+
+    let refused = stale.sign(&ssh_keygen, &served_public_key, &payload);
+    assert!(
+        !refused.status.success(),
+        "a daemon holding the revoked credential still signed"
+    );
+    assert!(!signature.exists());
+    assert_eq!(stale.stop(), json!({"reason": "agent_stopped"}));
+    sign_and_check(&restarted);
+    assert_eq!(restarted.stop(), json!({"reason": "agent_stopped"}));
 }

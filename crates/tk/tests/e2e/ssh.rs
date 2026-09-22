@@ -6,10 +6,11 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use assert_cmd::Command as TkCommand;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
-use crate::run::{Run, bare_cli, result};
+use crate::run::{Run, bare_cli, result, signed_commit};
 
 pub(crate) fn locate(binary: &str) -> Option<PathBuf> {
     env::var_os("PATH").and_then(|path| {
@@ -42,28 +43,34 @@ pub(crate) fn create_ed25519_key(run: &Run) -> String {
     create_private_key(run, "CURVE_ED25519")
 }
 
-pub(crate) fn register_key(run: &Run, private_key_id: &str) -> Value {
-    run.ok(run
-        .admin()
-        .args(["ssh", "keys", "add", "--private-key-id", private_key_id]))
+pub(crate) fn register_key(run: &Run, cli: &mut TkCommand, private_key_id: &str) -> Value {
+    let added = run.ok(cli.args(["ssh", "keys", "add", "--private-key-id", private_key_id]));
+    assert_eq!(added["reason"], "ssh_key_registered", "{added}");
+    added
 }
 
 pub(crate) fn text(value: &Value) -> &str {
     value.as_str().expect("the record field should be a string")
 }
 
-/// The binary with the admin bundle in the environment and no tk flags, as
-/// git and ssh-keygen invoke it.
-pub(crate) fn inherit_admin_environment(run: &Run, command: &mut Command) {
-    for (name, value) in run.admin().get_envs() {
-        match value {
-            Some(value) => command.env(name, value),
-            None => command.env_remove(name),
-        };
-    }
+fn ssh_signing_config(
+    ssh_keygen: &Path,
+    allowed_signers: &Path,
+    signing_key: &str,
+    command: &mut Command,
+) {
     command
-        .env("HOME", run.home())
-        .env("TURNKEY_API_BASE_URL", &run.config.api_base_url);
+        .env("TK_SSH_KEYGEN_PROGRAM", ssh_keygen)
+        .args(["-c", "gpg.format=ssh"])
+        .arg("-c")
+        .arg(format!("gpg.ssh.program={}", env!("CARGO_BIN_EXE_tk")))
+        .arg("-c")
+        .arg(format!(
+            "gpg.ssh.allowedSignersFile={}",
+            allowed_signers.display()
+        ))
+        .arg("-c")
+        .arg(format!("user.signingkey=key::{signing_key}"));
 }
 
 /// Writes a fresh OpenSSH key pair and returns its public key path.
@@ -137,8 +144,7 @@ fn ssh_key_register_list_print_and_remove_by_every_name() {
     let run = Run::new();
     let private_key_id = create_ed25519_key(&run);
 
-    let added = register_key(&run, &private_key_id);
-    assert_eq!(added["reason"], "ssh_key_registered");
+    let added = register_key(&run, &mut run.admin(), &private_key_id);
     assert_eq!(added["organizationId"], run.org());
     assert_eq!(added["privateKeyId"], private_key_id);
     let fingerprint = added["fingerprint"]
@@ -158,7 +164,7 @@ fn ssh_key_register_list_print_and_remove_by_every_name() {
         listed
     );
     // Re-adding a registered key overwrites its entry rather than duplicating it.
-    assert_eq!(register_key(&run, &private_key_id), added);
+    assert_eq!(register_key(&run, &mut run.admin(), &private_key_id), added);
     assert_eq!(
         run.ok(run.admin_offline().args(["ssh", "keys", "list"])),
         listed
@@ -244,7 +250,7 @@ fn ssh_key_register_list_print_and_remove_by_every_name() {
         json!({"reason": "ssh_keys_registered", "keys": []})
     );
 
-    register_key(&run, &private_key_id);
+    register_key(&run, &mut run.admin(), &private_key_id);
     assert_eq!(
         run.ok(run
             .admin_offline()
@@ -252,7 +258,7 @@ fn ssh_key_register_list_print_and_remove_by_every_name() {
         registration_record("ssh_key_removed", &added)
     );
 
-    register_key(&run, &private_key_id);
+    register_key(&run, &mut run.admin(), &private_key_id);
     assert_eq!(
         run.ok(run
             .admin_offline()
@@ -303,8 +309,8 @@ fn ssh_key_registration_rejects_other_curves_and_unknown_ids() {
     // Several keys and no name is the unnamed error for print and remove.
     let first_id = create_ed25519_key(&run);
     let second_id = create_ed25519_key(&run);
-    register_key(&run, &first_id);
-    register_key(&run, &second_id);
+    register_key(&run, &mut run.admin(), &first_id);
+    register_key(&run, &mut run.admin(), &second_id);
     let unnamed = run.err(run.admin_offline().args(["ssh", "public-key"]));
     assert_eq!(unnamed["code"], "invalid_input");
     assert_eq!(
@@ -322,13 +328,9 @@ fn git_signing_selects_the_public_key_git_names() {
     };
     let run = Run::new();
     let first_id = create_ed25519_key(&run);
-    let first = run.ok(run
-        .admin()
-        .args(["ssh", "keys", "add", "--private-key-id", &first_id]));
+    let first = register_key(&run, &mut run.admin(), &first_id);
     let second_id = create_ed25519_key(&run);
-    let second = run.ok(run
-        .admin()
-        .args(["ssh", "keys", "add", "--private-key-id", &second_id]));
+    let second = register_key(&run, &mut run.admin(), &second_id);
 
     let repository = run.home().join("ssh-git-repository");
     fs::create_dir(&repository).expect("the git repository directory should be creatable");
@@ -342,63 +344,24 @@ fn git_signing_selects_the_public_key_git_names() {
     )
     .expect("the allowed signers file should be writable");
 
-    let git_command = |args: &[&str]| {
-        let mut command = Command::new(&git);
-        inherit_admin_environment(&run, &mut command);
-        command
-            .current_dir(&repository)
-            .env("GIT_CONFIG_NOSYSTEM", "1")
-            .env_remove("XDG_CONFIG_HOME")
-            .env("TK_SSH_KEYGEN_PROGRAM", &ssh_keygen)
-            .args([
-                "-c",
-                "user.name=tk e2e",
-                "-c",
-                "user.email=tk-e2e@example.com",
-            ])
-            .args(["-c", "gpg.format=ssh"])
-            .arg("-c")
-            .arg(format!("gpg.ssh.program={}", env!("CARGO_BIN_EXE_tk")))
-            .arg("-c")
-            .arg(format!(
-                "gpg.ssh.allowedSignersFile={}",
-                allowed_signers.display()
-            ))
-            .arg("-c")
-            .arg(format!(
-                "user.signingkey=key::{}",
-                second["publicKey"].as_str().unwrap()
-            ))
-            .args(args)
-            .output()
-            .expect("git should run")
+    let ssh_signing = |command: &mut Command| {
+        run.inherit_environment(run.admin(), command);
+        ssh_signing_config(
+            &ssh_keygen,
+            &allowed_signers,
+            text(&second["publicKey"]),
+            command,
+        );
     };
 
-    let initialized = git_command(&["init", "--quiet"]);
-    assert!(
-        initialized.status.success(),
-        "{}",
-        run.redact(&initialized.stderr)
+    run.git_ok(&git, &repository, ssh_signing, &["init", "--quiet"]);
+    run.git_ok(
+        &git,
+        &repository,
+        ssh_signing,
+        &signed_commit("signed by the second registered SSH key"),
     );
-    let committed = git_command(&[
-        "commit",
-        "-S",
-        "--quiet",
-        "--allow-empty",
-        "-m",
-        "signed by the second registered SSH key",
-    ]);
-    assert!(
-        committed.status.success(),
-        "{}",
-        run.redact(&committed.stderr)
-    );
-    let verified = git_command(&["verify-commit", "HEAD"]);
-    assert!(
-        verified.status.success(),
-        "{}",
-        run.redact(&verified.stderr)
-    );
+    let verified = run.git_ok(&git, &repository, ssh_signing, &["verify-commit", "HEAD"]);
 
     let verification = format!(
         "{}{}",
@@ -436,7 +399,7 @@ fn passthrough_signing_errors_name_the_key_and_git_sign_signs() {
 
     let shim = |args: &[&str]| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_tk"));
-        inherit_admin_environment(&run, &mut command);
+        run.inherit_environment(run.admin(), &mut command);
         let output = command.args(args).output().expect("tk should run");
         assert!(output.stdout.is_empty(), "the shim wrote to stdout");
         (output.status.code(), run.redact(&output.stderr))
@@ -463,7 +426,7 @@ fn passthrough_signing_errors_name_the_key_and_git_sign_signs() {
     );
 
     let private_key_id = create_ed25519_key(&run);
-    let registered = register_key(&run, &private_key_id);
+    let registered = register_key(&run, &mut run.admin(), &private_key_id);
     let registered_public_key = run.home().join("registered.pub");
     fs::write(
         &registered_public_key,
@@ -508,7 +471,7 @@ fn passthrough_signing_errors_name_the_key_and_git_sign_signs() {
     // Verification operations run the real ssh-keygen, and a missing one is
     // reported rather than mistaken for a signing request.
     let mut passthrough = Command::new(env!("CARGO_BIN_EXE_tk"));
-    inherit_admin_environment(&run, &mut passthrough);
+    run.inherit_environment(run.admin(), &mut passthrough);
     let output = passthrough
         .env(
             "TK_SSH_KEYGEN_PROGRAM",
@@ -565,5 +528,94 @@ fn passthrough_signing_errors_name_the_key_and_git_sign_signs() {
         checked.status.success(),
         "{}",
         String::from_utf8_lossy(&checked.stderr)
+    );
+}
+
+#[test]
+#[ignore]
+fn signing_git_commits_ssh_signing_with_scoped_policy() {
+    let git = locate("git").expect("git must be on PATH: the signing-git-commits gate needs git");
+    let ssh_keygen = locate("ssh-keygen")
+        .expect("ssh-keygen must be on PATH: the signing-git-commits gate needs OpenSSH");
+    let run = Run::new();
+    let (agent_tag, _, agent) = run.create_agent();
+    let allowed_id = create_ed25519_key(&run);
+    let other_id = create_ed25519_key(&run);
+    run.allow_tag_signing(
+        "agents-sign-ssh",
+        &agent_tag,
+        &format!(
+            "activity.type == 'ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2' && private_key.id == '{allowed_id}'"
+        ),
+    );
+
+    let allowed = register_key(&run, &mut run.as_user(&agent), &allowed_id);
+    assert_eq!(allowed["privateKeyId"], allowed_id, "{allowed}");
+    let other = register_key(&run, &mut run.as_user(&agent), &other_id);
+    let printed = run.ok(run
+        .as_user(&agent)
+        .args(["ssh", "public-key", "--key", &allowed_id]));
+    assert_eq!(
+        printed,
+        json!({
+            "reason": "public_key_printed",
+            "fingerprint": allowed["fingerprint"],
+            "publicKey": allowed["publicKey"],
+        })
+    );
+    let public_key = text(&allowed["publicKey"]);
+
+    let repository = run.home().join("ssh-signing-repository");
+    fs::create_dir(&repository).expect("the git repository directory should be creatable");
+    let allowed_signers = run.home().join("allowed_signers");
+    fs::write(
+        &allowed_signers,
+        format!("tk-e2e@example.com {public_key}\n"),
+    )
+    .expect("the allowed signers file should be writable");
+
+    let ssh_signing = |signing_key: &str, command: &mut Command| {
+        run.inherit_environment(run.as_user(&agent), command);
+        ssh_signing_config(&ssh_keygen, &allowed_signers, signing_key, command);
+    };
+    let allowed_signing = |command: &mut Command| ssh_signing(public_key, command);
+    let commit = signed_commit("signed by tk");
+
+    run.git_ok(&git, &repository, allowed_signing, &["init", "--quiet"]);
+    run.git_ok(&git, &repository, allowed_signing, &commit);
+    let verified = run.git_ok(
+        &git,
+        &repository,
+        allowed_signing,
+        &["verify-commit", "HEAD"],
+    );
+    let verification = format!(
+        "{}{}",
+        String::from_utf8_lossy(&verified.stdout),
+        String::from_utf8_lossy(&verified.stderr)
+    );
+    assert!(
+        verification.contains(text(&allowed["fingerprint"])),
+        "verification did not name the allowed key: {verification}"
+    );
+    let head = run
+        .git_ok(&git, &repository, allowed_signing, &["rev-parse", "HEAD"])
+        .stdout;
+
+    let refused = Run::git(
+        &git,
+        &repository,
+        |command| ssh_signing(text(&other["publicKey"]), command),
+        &commit,
+    );
+    assert!(
+        !refused.status.success(),
+        "git signed with a key outside the policy scope"
+    );
+    assert_eq!(
+        run.git_ok(&git, &repository, allowed_signing, &["rev-parse", "HEAD"])
+            .stdout,
+        head,
+        "the refused commit moved HEAD"
     );
 }

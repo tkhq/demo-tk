@@ -331,9 +331,8 @@ pub async fn is_default_running() -> bool {
 }
 
 fn default_agent_dir() -> Result<PathBuf> {
-    let home = env::var_os("HOME")
-        .ok_or_else(|| anyhow!("missing HOME; use --socket and --pid-file to set paths"))?;
-    Ok(Path::new(&home).join(".config/turnkey"))
+    auth::config_dir()
+        .ok_or_else(|| anyhow!("missing HOME; use --socket and --pid-file to set paths"))
 }
 
 async fn wait_for_startup(socket: &Path, child: &mut Child) -> Result<()> {
