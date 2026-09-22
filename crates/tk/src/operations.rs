@@ -33,8 +33,10 @@ const MAX_ERROR_BODY_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Args)]
 pub struct RequestArgs {
+    /// Absolute API path under /public/v1/, such as /public/v1/query/whoami.
     #[arg(long, value_parser = RequestPath::parse)]
     path: RequestPath,
+    /// Exact request body.
     #[arg(
         long,
         required_unless_present = "body_file",
@@ -54,14 +56,25 @@ pub enum ActivityCommand {
     /// List activities, one page at a time.
     List(ListArgs),
     /// Fetch one activity by ID.
-    Get { id: String },
-    /// Approve a pending activity by ID.
-    Approve { id: String },
-    /// Reject a pending activity by ID.
-    Reject { id: String },
+    Get {
+        /// Activity ID.
+        id: String,
+    },
+    /// Approve a `pending` activity by ID.
+    Approve {
+        /// Activity ID.
+        id: String,
+    },
+    /// Reject a `pending` activity by ID.
+    Reject {
+        /// Activity ID.
+        id: String,
+    },
     /// Poll one activity until it reaches a terminal status.
     Wait {
+        /// Activity ID.
         id: String,
+        /// Seconds to poll before failing with `wait_timeout`.
         #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
         timeout: u64,
     },
@@ -69,9 +82,10 @@ pub enum ActivityCommand {
 
 #[derive(Debug, Args)]
 pub struct ListArgs {
+    /// Page size.
     #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..))]
     limit: u32,
-    /// API after cursor (activity ID); pagination is explicitly caller-driven.
+    /// Activity ID to continue after.
     #[arg(long)]
     cursor: Option<String>,
     /// Keep only these statuses, filtered by the server; repeatable. pending matches created, pending, consensus-needed, and authenticators-needed activities.

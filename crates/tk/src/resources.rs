@@ -27,23 +27,29 @@ use crate::{
 
 #[derive(Debug, Subcommand)]
 pub enum UserCommand {
+    /// List users.
     List {
-        /// Keep only users carrying this tag, given as a tag id or an exact tag name.
+        /// Keep only users carrying this tag, given as a tag ID or an exact tag name.
         #[arg(long, value_name = "NAME_OR_ID")]
         tag: Option<TagSelector>,
     },
+    /// Fetch one user by ID.
     Get {
+        /// User ID.
         id: Uuid,
     },
     /// Create a user from flags, or one or more users from a
     /// `CreateUsersIntentV4` parameters object.
     Create(CreateUserArgs),
-    /// Update user name, email, phone, or tag membership.
+    /// Update a user from an `UpdateUserIntentV2` parameters object.
     Update(BodyArgs),
+    /// Delete users by ID.
     Delete {
+        /// User IDs.
         #[arg(required = true, num_args = 1..)]
         ids: Vec<Uuid>,
     },
+    /// Manage user tags.
     Tag {
         #[command(subcommand)]
         command: TagCommand,
@@ -52,11 +58,15 @@ pub enum UserCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum TagCommand {
+    /// List user tags.
     List,
     /// Create a tag by name, or from a `CreateUserTagIntent` parameters object.
     Create(CreateTagArgs),
+    /// Update a tag from an `UpdateUserTagIntent` parameters object.
     Update(BodyArgs),
+    /// Delete tags by ID.
     Delete {
+        /// Tag IDs.
         #[arg(required = true, num_args = 1..)]
         ids: Vec<Uuid>,
     },
@@ -64,8 +74,11 @@ pub enum TagCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum PolicyCommand {
+    /// List policies.
     List,
+    /// Fetch one policy by ID.
     Get {
+        /// Policy ID.
         id: Uuid,
     },
     /// Create a policy from flags, or from a `CreatePolicyIntentV3` parameters
@@ -73,13 +86,17 @@ pub enum PolicyCommand {
     Create(CreatePolicyArgs),
     /// Create multiple policies from a parameters object containing policies.
     CreateBatch(BodyArgs),
-    /// Update with policyEffect/policyCondition/policyConsensus field names.
+    /// Update a policy from an `UpdatePolicyIntentV2` parameters object.
     Update(BodyArgs),
+    /// Delete policies by ID.
     Delete {
+        /// Policy IDs.
         #[arg(required = true, num_args = 1..)]
         ids: Vec<Uuid>,
     },
+    /// List the policy evaluations recorded for one activity.
     Evaluations {
+        /// Activity ID.
         activity_id: Uuid,
     },
 }
@@ -102,13 +119,16 @@ impl FromStr for TagSelector {
 
 #[derive(Debug, Subcommand)]
 pub enum ApiKeyCommand {
-    /// List API keys for one user or for every user, optionally by expiry.
+    /// List API keys.
     List(ApiKeyListArgs),
-    /// Register public keys using `CreateApiKeysIntentV2` parameters.
+    /// Register public keys from a `CreateApiKeysIntentV2` parameters object.
     Register(BodyArgs),
+    /// Delete API keys of one user by ID.
     Delete {
+        /// User who owns the keys.
         #[arg(long)]
         user_id: Uuid,
+        /// API key IDs.
         #[arg(required = true, num_args = 1..)]
         ids: Vec<Uuid>,
     },
@@ -129,7 +149,7 @@ pub struct ApiKeyListArgs {
     /// List the keys of this user.
     #[arg(long)]
     user_id: Option<Uuid>,
-    /// List the keys of every user in the organization, read from the users listing.
+    /// List the keys of every user in the organization.
     #[arg(long)]
     all_users: bool,
     /// Keep only keys whose expiry is at most this far ahead, such as 2h or 7d.
@@ -175,10 +195,10 @@ pub struct CreateUserArgs {
     /// Email of the user.
     #[arg(long, requires = "user_name")]
     email: Option<String>,
-    /// Tag id to attach (repeatable).
+    /// Tag ID to attach.
     #[arg(long = "tag", requires = "user_name")]
     tags: Vec<Uuid>,
-    /// Tag name to attach, resolved against the organization's tags (repeatable).
+    /// Tag name to attach, resolved against the organization's tags.
     #[arg(long = "tag-name", requires = "user_name")]
     tag_names: Vec<String>,
     /// Compressed P256 public key (hex) to register as the user's API key.
@@ -188,8 +208,10 @@ pub struct CreateUserArgs {
     #[arg(long, requires = "public_key")]
     expires_in: Option<ExpiresIn>,
     /// Also register a never-expiring anchor key whose private half is
-    /// generated here and discarded. Turnkey requires every user to hold one
-    /// long-lived credential, so this lets a user otherwise live on expiring
+    /// generated here and discarded.
+    ///
+    /// Turnkey requires every user to hold one long-lived credential; the
+    /// anchor key satisfies that so the user can otherwise live on expiring
     /// keys alone.
     #[arg(long, requires = "user_name")]
     anchor_key: bool,
@@ -217,10 +239,10 @@ enum EffectArg {
 pub struct CreatePolicyArgs {
     #[command(flatten)]
     body: BodySource,
-    /// Name of the policy; needs --effect and --condition and/or --consensus.
+    /// Name of the policy.
     #[arg(long, requires_all = ["effect", "rule"])]
     name: Option<String>,
-    /// Whether matching activities are allowed or denied.
+    /// Effect of the policy.
     #[arg(long, value_enum, requires = "name")]
     effect: Option<EffectArg>,
     /// Condition expression, evaluated against the activity.

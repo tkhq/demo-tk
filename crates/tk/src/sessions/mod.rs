@@ -24,7 +24,9 @@ use crate::operations::OperationOutput;
 #[derive(Debug, Subcommand)]
 pub enum SessionCommand {
     /// Generate a new credential for a saved profile and print its public key
-    /// for a provisioner to register. The private key stays on this machine.
+    /// for a provisioner to register.
+    ///
+    /// The private key never leaves this machine.
     Request {
         /// Saved profile that will use the new credential.
         #[arg(long = "profile-name")]
@@ -33,8 +35,7 @@ pub enum SessionCommand {
         #[arg(long)]
         replace: bool,
     },
-    /// Register a public key on a user as an expiring API key. Run with the
-    /// provisioner's identity; re-run after approval.
+    /// Register a public key on a user as an expiring API key.
     Provision(ProvisionArgs),
     /// Switch a saved profile to its pending credential once it is registered.
     Activate {
@@ -42,8 +43,7 @@ pub enum SessionCommand {
         #[arg(long = "profile-name")]
         name: String,
     },
-    /// Report when a saved profile's credential expires; exits with
-    /// `session_expiring` when less than `--warn-before` remains.
+    /// Report when a saved profile's credential expires.
     Status(StatusArgs),
 }
 

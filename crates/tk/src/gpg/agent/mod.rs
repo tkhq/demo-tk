@@ -57,15 +57,17 @@ enum Command {
 
 #[derive(Debug, ClapArgs)]
 struct ServeArgs {
-    /// Serve this registered key and no other key.
+    /// Serve only this registered key.
     #[arg(long)]
     key: SigningKeyName,
 
-    /// Unix socket path to bind for `OpenPGP` signing requests.
-    #[arg(long, value_name = "path", value_parser = PathBufValueParser::new().try_map(SocketPath::try_from))]
+    /// Unix socket path to bind for PGP signing requests.
+    #[arg(long, value_name = "PATH", value_parser = PathBufValueParser::new().try_map(SocketPath::try_from))]
     socket: Option<SocketPath>,
 
-    /// Octal permissions for the socket. Access to it grants signing authority.
+    /// Octal permissions for the socket.
+    ///
+    /// Access to the socket grants signing authority.
     #[arg(long, default_value = "600")]
     socket_mode: SocketMode,
 }

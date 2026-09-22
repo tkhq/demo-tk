@@ -12,6 +12,7 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::sync::LazyLock;
+use strum::IntoEnumIterator;
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 
 static PUBLIC_KEY: LazyLock<String> =
@@ -480,7 +481,7 @@ fn documented_fields(text: &str, heading: &str) -> BTreeSet<String> {
         .unwrap_or_else(|| panic!("cli-convention.md lacks section {heading}"));
     section
         .lines()
-        .skip_while(|line| !line.starts_with("| Field"))
+        .skip_while(|line| !line.starts_with('|'))
         .skip(2)
         .take_while(|line| line.starts_with('|'))
         .map(|line| {
@@ -529,6 +530,23 @@ fn cli_convention_record_tables_name_the_serialized_fields() {
         ));
     }
     assert_eq!(serialized, documented_fields(&text, "### Error records"));
+}
+
+// The reference table is checked against the enum, not assigned from it.
+#[allow(clippy::disallowed_types)]
+#[test]
+fn cli_convention_error_code_table_names_every_error_code() {
+    let text = fs::read_to_string(repo_root().join("skills/references/cli-convention.md")).unwrap();
+    let declared: BTreeSet<String> = crate::errors::ErrorCode::iter()
+        .map(|code| {
+            serde_json::to_value(code)
+                .unwrap()
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(documented_fields(&text, "## Error codes"), declared);
 }
 
 fn invocations(body: &str) -> Vec<Vec<String>> {

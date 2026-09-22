@@ -3,6 +3,8 @@
 Sign with a wallet account. Inputs follow the [resources](./resources.md)
 conventions.
 
+Follow [authentication](./authentication.md) first.
+
 ```bash
 # Sign a 32-byte digest as is.
 tk sign payload --input-json '{

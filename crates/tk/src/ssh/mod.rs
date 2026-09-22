@@ -38,11 +38,14 @@ pub enum SshCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum KeysCommand {
-    /// Create an Ed25519 private key in Turnkey, or reuse the one with that name, and register it.
+    /// Create an Ed25519 private key in Turnkey and register it.
+    ///
+    /// A second key with the same name is never created; the existing one is
+    /// registered instead.
     Create(CreateArgs),
     /// Fetch and register an Ed25519 private key.
     Add(AddArgs),
-    /// List all registered SSH keys without contacting Turnkey.
+    /// List the registered SSH keys without contacting Turnkey.
     List,
     /// Forget a registered key without changing the Turnkey private key.
     Remove(RemoveArgs),
@@ -77,6 +80,7 @@ pub struct KeyArgs {
 
 #[derive(Debug, Args)]
 pub struct GitSignArgs {
+    /// Arguments Git passes to its SSH signing program, in ssh-keygen form.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     ssh_keygen_args: Vec<String>,
 }

@@ -3,6 +3,8 @@
 Import, list, and export UTF-8 secret values. One trailing newline is
 stripped on import.
 
+Follow [authentication](./authentication.md) first.
+
 ```bash
 # From stdin, from a file, or prompted with input hidden.
 echo -n "$API_TOKEN" | tk secret import api-token

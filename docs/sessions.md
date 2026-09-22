@@ -4,6 +4,8 @@ A session key is a Turnkey API key with an expiration. `tk session` splits its
 lifecycle so that the private key never leaves the machine that uses it and the
 identity allowed to register keys never sees it.
 
+Follow [authentication](./authentication.md) first.
+
 ```mermaid
 sequenceDiagram
     participant Agent as agent host

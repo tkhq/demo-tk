@@ -278,3 +278,20 @@ Default guidance for coding-agent runs in this repository.
   Two docs never carry the same footer sentence.
 - `docs/commands.md` is generated; never edit it by hand. Change the command
   and regenerate with `TK_UPDATE_COMMANDS_MD=1 cargo test -p tk commands_reference`.
+
+## Help text
+
+- Every visible command, positional, and flag has help. Its first line is one
+  sentence stating what the command or value does. A second paragraph exists
+  only for behavior the flags cannot show and that matters before running:
+  what never happens, a security consequence, a precondition. Procedures and
+  mechanism belong in `skills/` and `docs/`.
+- Help never inventories other flags, subcommands, or record fields, and never
+  says a flag is repeatable or lists its possible values; clap and the
+  generated reference render those. State each fact once: on the flag it
+  describes, not again on the command.
+- Statuses, error codes, record fields, and other commands appear in
+  backticks; literal examples stay literal. Value names are `UPPER_SNAKE`.
+- The root help states prompting, JSON output, and exit codes, and points at
+  the `cli-convention` reference for record shapes and error codes. A test
+  binds the error-code table in that reference to the `ErrorCode` enum.

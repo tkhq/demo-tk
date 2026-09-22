@@ -94,41 +94,41 @@ enum Command {
 
 #[derive(Debug, ClapArgs)]
 struct StartArgs {
-    /// Serve only this registered key. May be repeated.
-    #[arg(long, value_name = "key")]
+    /// Serve only this registered key.
+    #[arg(long, value_name = "KEY")]
     key: Vec<SshKeyName>,
 
-    /// Unix socket path to bind for SSH agent connections.
-    #[arg(long, value_name = "path")]
+    /// Unix socket path for SSH agent connections.
+    #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
 
-    /// PID file path for tracking the background SSH agent.
-    #[arg(long, value_name = "path")]
+    /// PID file path of the background SSH agent.
+    #[arg(long, value_name = "PATH")]
     pid_file: Option<PathBuf>,
 }
 
 #[derive(Debug, ClapArgs)]
 struct AgentPathArgs {
-    /// Unix socket path bound for SSH agent connections.
-    #[arg(long, value_name = "path")]
+    /// Unix socket path for SSH agent connections.
+    #[arg(long, value_name = "PATH")]
     socket: Option<PathBuf>,
 
-    /// PID file path for tracking the background SSH agent.
-    #[arg(long, value_name = "path")]
+    /// PID file path of the background SSH agent.
+    #[arg(long, value_name = "PATH")]
     pid_file: Option<PathBuf>,
 }
 
 #[derive(Debug, ClapArgs)]
 struct InternalRunArgs {
-    /// Serve only this registered key. May be repeated.
-    #[arg(long, value_name = "key")]
+    /// Serve only this registered key.
+    #[arg(long, value_name = "KEY")]
     key: Vec<SshKeyName>,
 
-    /// Unix socket path to bind for SSH agent connections.
-    #[arg(long, value_name = "path")]
+    /// Unix socket path for SSH agent connections.
+    #[arg(long, value_name = "PATH")]
     socket: PathBuf,
 
-    /// PID file path for tracking the background SSH agent.
-    #[arg(long, value_name = "path", hide = true)]
+    /// PID file path of the background SSH agent.
+    #[arg(long, value_name = "PATH", hide = true)]
     pid_file: PathBuf,
 }

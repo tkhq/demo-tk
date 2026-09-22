@@ -29,7 +29,7 @@ pub enum SecretCommand {
         /// Secret ID to continue after.
         #[arg(long)]
         cursor: Option<Uuid>,
-        /// Only secrets carrying this static property (repeatable; all must match).
+        /// Only secrets carrying this static property; every given property must match.
         #[arg(long = "property", value_name = "KEY=VALUE", value_parser = parse_key_value)]
         properties: Vec<KeyValue>,
         /// Only secrets whose name starts with this prefix, for example hermes/.
@@ -48,24 +48,24 @@ pub enum SecretCommand {
         #[arg(long = "property", value_name = "KEY=VALUE", value_parser = parse_key_value)]
         properties: Vec<KeyValue>,
     },
-    /// Export every matching secret and print dotenv lines for a process's
-    /// startup environment. Names are PREFIX/VAR; VAR is the line's key.
+    /// Export every matching secret as dotenv lines.
+    ///
+    /// Secret names are `PREFIX/VAR`; `VAR` becomes the line's key.
     #[command(group = ArgGroup::new("selector").required(true).multiple(true))]
     Env {
-        /// Only secrets carrying this static property (repeatable; all must match).
+        /// Only secrets carrying this static property; every given property must match.
         #[arg(long = "property", value_name = "KEY=VALUE", value_parser = parse_key_value, group = "selector")]
         properties: Vec<KeyValue>,
         /// Only secrets whose name starts with this prefix, for example hermes/.
         #[arg(long, group = "selector")]
         name_prefix: Option<String>,
     },
-    /// Delete a secret. Secrets are immutable: to rotate one, delete it and
-    /// import the new value under the same name.
+    /// Delete a secret.
     Delete {
         #[command(flatten)]
         secret: SecretSelector,
     },
-    /// Export a secret's value; re-run after approval.
+    /// Export a secret's value.
     Export {
         #[command(flatten)]
         secret: SecretSelector,
@@ -78,7 +78,6 @@ pub enum SecretCommand {
     },
 }
 
-/// Exactly one of `--name` or `--id` selects the secret.
 #[derive(Debug, Args)]
 #[group(required = true, multiple = false)]
 pub struct SecretSelector {
