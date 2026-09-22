@@ -2,7 +2,7 @@
 
 [package]
 name = "turnkey_tk"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.95"
@@ -14,7 +14,7 @@ categories = ["command-line-utilities", "cryptography", "authentication"]
 readme = "README.md"
 include = [
     "build.rs",
-    "docs/**/*.md",
+    "docs/*.md",
     "skills/**/*.md",
     "src/**/*.rs",
     "LICENSE",
