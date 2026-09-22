@@ -9,9 +9,6 @@ Follow [authentication](./authentication.md) first.
 ```bash
 # Create an Ed25519 private key in Turnkey and register it locally.
 tk ssh keys create --name agent-ssh
-
-# Or register an existing Turnkey private key.
-tk ssh keys add --private-key-id PRIVATE_KEY_ID
 tk ssh keys list
 
 # Print a public key, for authorized_keys or GitHub.
@@ -21,10 +18,6 @@ tk ssh public-key --key SSH_FINGERPRINT
 # Forget a key. The Turnkey private key is unchanged.
 tk ssh keys remove SSH_FINGERPRINT
 ```
-
-`create` prints `ssh_key_created`, or `ssh_key_registered` when the name
-already exists; `add` prints `ssh_key_registered`. Re-adding a registered key
-overwrites its entry.
 
 ## Agent
 
