@@ -1,18 +1,20 @@
 use std::fmt::{self, Display, Formatter};
 use std::fs;
 use std::io::{self, Read};
+use std::mem::take;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Error, Result};
-use clap::{Args, Subcommand};
+use clap::{Args, Subcommand, ValueEnum};
 use reqwest::Url;
 use serde::{Serialize, Serializer, de::DeserializeOwned, ser::SerializeStruct};
 use serde_json::{Value, error::Category, from_slice, json};
 use tokio::time::{sleep, timeout};
 use turnkey_api_key_stamper::Stamp;
 use turnkey_client::generated::{
-    ActivityStatus, GetActivitiesRequest, GetActivityRequest, external::options::v1::Pagination,
+    ActivityStatus, ActivityType, GetActivitiesRequest, GetActivityRequest,
+    external::options::v1::Pagination,
 };
 use uuid::Uuid;
 
@@ -21,6 +23,9 @@ use crate::errors::{
     ActivityError, ActivityErrorKind, InvalidInput, Malformed, UnexpectedHttpStatus,
     transient_status,
 };
+use crate::sessions::duration::ExpiresIn;
+
+const WALK_PAGE_SIZE: usize = 100;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -47,13 +52,7 @@ pub struct RequestArgs {
 #[derive(Debug, Subcommand)]
 pub enum ActivityCommand {
     /// List activities, one page at a time.
-    List {
-        #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..))]
-        limit: u32,
-        /// API after cursor (activity ID); pagination is explicitly caller-driven.
-        #[arg(long)]
-        cursor: Option<String>,
-    },
+    List(ListArgs),
     /// Fetch one activity by ID.
     Get { id: String },
     /// Approve a pending activity by ID.
@@ -66,6 +65,55 @@ pub enum ActivityCommand {
         #[arg(long, default_value_t = 60, value_parser = clap::value_parser!(u64).range(1..))]
         timeout: u64,
     },
+}
+
+#[derive(Debug, Args)]
+pub struct ListArgs {
+    #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..))]
+    limit: u32,
+    /// API after cursor (activity ID); pagination is explicitly caller-driven.
+    #[arg(long)]
+    cursor: Option<String>,
+    /// Keep only these statuses, filtered by the server; repeatable. pending matches created, pending, consensus-needed, and authenticators-needed activities.
+    #[arg(long, value_enum)]
+    status: Vec<StatusFilter>,
+    /// Keep only these activity types, filtered by the server, such as `ACTIVITY_TYPE_CREATE_USER_TAG`; repeatable.
+    #[arg(long = "type", value_name = "ACTIVITY_TYPE", value_parser = parse_activity_type)]
+    types: Vec<ActivityType>,
+    /// Keep only activities created within this window, such as 24h, filtered here: walks pages newest first from --cursor until one is older; --limit caps the matches and sets nextCursor so the same command with --cursor resumes.
+    #[arg(long, value_name = "DURATION")]
+    since: Option<ExpiresIn>,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+#[cfg_attr(test, derive(PartialEq))]
+enum StatusFilter {
+    Pending,
+    Completed,
+    Rejected,
+    Failed,
+}
+
+impl StatusFilter {
+    fn statuses(self) -> &'static [ActivityStatus] {
+        match self {
+            Self::Pending => &[
+                ActivityStatus::Created,
+                ActivityStatus::Pending,
+                ActivityStatus::ConsensusNeeded,
+                ActivityStatus::AuthenticatorsNeeded,
+            ],
+            Self::Completed => &[ActivityStatus::Completed],
+            Self::Rejected => &[ActivityStatus::Rejected],
+            Self::Failed => &[ActivityStatus::Failed],
+        }
+    }
+}
+
+fn parse_activity_type(value: &str) -> Result<ActivityType, String> {
+    ActivityType::from_str_name(value)
+        .filter(|kind| *kind != ActivityType::Unspecified)
+        .ok_or_else(|| format!("unknown activity type {value:?}; expected an ACTIVITY_TYPE_ name"))
 }
 
 #[cfg_attr(test, derive(Debug))]
@@ -460,7 +508,7 @@ pub(crate) async fn query_activity(auth: &ResolvedAuth, id: &str) -> Result<Valu
 
 pub async fn run_activity(args: ActivityCommand, auth: &ResolvedAuth) -> Result<OperationOutput> {
     match args {
-        ActivityCommand::List { limit, cursor } => list(auth, limit, cursor).await,
+        ActivityCommand::List(args) => list(auth, args).await,
         ActivityCommand::Get { id } => {
             let value = query_activity(auth, &id).await?;
             Ok(OperationOutput::result("activity.get", value))
@@ -471,33 +519,82 @@ pub async fn run_activity(args: ActivityCommand, auth: &ResolvedAuth) -> Result<
     }
 }
 
-async fn list(auth: &ResolvedAuth, limit: u32, cursor: Option<String>) -> Result<OperationOutput> {
-    let request = GetActivitiesRequest {
-        organization_id: auth.org_id.to_string(),
-        filter_by_status: vec![],
-        filter_by_type: vec![],
-        pagination_options: Some(Pagination {
-            limit: limit.to_string(),
-            before: String::new(),
-            after: cursor.unwrap_or_default(),
-        }),
-    };
+async fn list(auth: &ResolvedAuth, args: ListArgs) -> Result<OperationOutput> {
+    let ListArgs {
+        limit,
+        cursor,
+        status,
+        types,
+        since,
+    } = args;
+    let limit = limit as usize;
+    let cutoff = since
+        .map(|since| Ok::<_, Error>(unix_now()?.as_secs().saturating_sub(since.seconds())))
+        .transpose()?;
+    let filter_by_status: Vec<ActivityStatus> = status
+        .iter()
+        .flat_map(|filter| filter.statuses().iter().copied())
+        .collect();
     let endpoint = url(
         auth.api_base_url.as_str(),
         "/public/v1/query/list_activities",
     )?;
-    let response = post::<Value>(auth, endpoint, encode(&request)?, false).await?;
-    let items = response
-        .get("activities")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            ActivityError::new(
-                ActivityErrorKind::MalformedResponse,
-                "response omitted activities",
-            )
-        })?;
-    let next = if items.len() == limit as usize {
-        items.last().and_then(|item| item.get("id")).cloned()
+    let page_size = if cutoff.is_some() {
+        limit.min(WALK_PAGE_SIZE)
+    } else {
+        limit
+    };
+    let mut request = GetActivitiesRequest {
+        organization_id: auth.org_id.to_string(),
+        filter_by_status,
+        filter_by_type: types,
+        pagination_options: Some(Pagination {
+            limit: page_size.to_string(),
+            before: String::new(),
+            after: cursor.unwrap_or_default(),
+        }),
+    };
+    let mut items = Vec::new();
+    let mut capped = false;
+    'pages: loop {
+        let mut response = post::<Value>(auth, endpoint.clone(), encode(&request)?, false).await?;
+        let page = response
+            .get_mut("activities")
+            .and_then(Value::as_array_mut)
+            .map(take)
+            .ok_or_else(|| {
+                ActivityError::new(
+                    ActivityErrorKind::MalformedResponse,
+                    "response omitted activities",
+                )
+            })?;
+        let full = page.len() == page_size;
+        let Some(cutoff) = cutoff else {
+            capped = full;
+            items = page;
+            break;
+        };
+        for item in page {
+            if created_at_seconds(&item)? < cutoff {
+                break 'pages;
+            }
+            items.push(item);
+            if items.len() == limit {
+                capped = true;
+                break 'pages;
+            }
+        }
+        if !full {
+            break;
+        }
+        if let Some(pagination) = &mut request.pagination_options
+            && let Some(last) = items.last()
+        {
+            pagination.after = activity_id(last)?.to_owned();
+        }
+    }
+    let next = if capped {
+        items.last().map(activity_id).transpose()?.map(Value::from)
     } else {
         None
     };
@@ -505,6 +602,28 @@ async fn list(auth: &ResolvedAuth, limit: u32, cursor: Option<String>) -> Result
         "activity.list",
         json!({"items":items,"nextCursor":next}),
     ))
+}
+
+fn activity_id(item: &Value) -> Result<&str> {
+    item.get("id").and_then(Value::as_str).ok_or_else(|| {
+        ActivityError::new(ActivityErrorKind::MalformedResponse, "activity omitted id").into()
+    })
+}
+
+fn created_at_seconds(item: &Value) -> Result<u64> {
+    item.pointer("/createdAt/seconds")
+        .and_then(Value::as_str)
+        .and_then(|seconds| seconds.parse().ok())
+        .ok_or_else(|| {
+            ActivityError::new(
+                ActivityErrorKind::MalformedResponse,
+                format!(
+                    "activity {} omitted or malformed createdAt.seconds",
+                    activity_id(item).unwrap_or("?")
+                ),
+            )
+            .into()
+        })
 }
 
 async fn wait(auth: &ResolvedAuth, id: &str, seconds: u64) -> Result<OperationOutput> {

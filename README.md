@@ -14,15 +14,16 @@ Paste this into your agent:
 ```
 Install the Turnkey tk CLI with
 `curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/tkhq/tk/main/install.sh | sh`.
-Install the tk skills by downloading https://github.com/tkhq/tk/tree/main/skills
-into your skills directory, read its SKILL.md, and walk me through
-bootstrapping my Turnkey organization at https://app.turnkey.com.
+Install the tk skills with `tk skills install --into <your skills directory>`,
+read the installed turnkey-tk/SKILL.md, and walk me through bootstrapping my
+Turnkey organization at https://app.turnkey.com.
 ```
 
 The skills in [skills/](./skills/SKILL.md) cover bootstrapping an
 organization, managing identities, policies, activities, and secrets,
 provisioning long-lived and session agents, SSH, Git signing, inspecting
-agents, and deploying tk beside an agent.
+agents, and deploying tk beside an agent. The binary carries the same package,
+so `tk skills install --into DIR` writes it as `DIR/turnkey-tk`.
 
 ## Manual installation
 
@@ -42,6 +43,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/tkhq/tk/
 - [SSH](./docs/ssh-agent.md): registered keys and the SSH agent
 - [Git signing](./docs/git-signing.md)
 - [GPG signing](./docs/gpg-signing.md)
+- [Skills](./docs/skills.md): the agent skills package embedded in the binary
 - [Command reference](./docs/commands.md): every command and flag, generated from the parser
 
 ## Contact us

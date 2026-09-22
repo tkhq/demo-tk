@@ -1,6 +1,6 @@
 ---
 name: inspecting-agents
-description: Answer operational questions about an organization's Turnkey agents with tk list and get commands, explicit pagination, and jq: what is pending and for how long, who voted, which users carry a tag, which keys each agent holds and when they expire, which secrets carry which properties, which policies mention a tag, who minted a key. Use for audits and "what is the state of X" questions; not for changing anything.
+description: Answer operational questions about an organization's Turnkey agents with tk list filters, explicit pagination, and jq: what is pending and for how long, who voted, which users carry a tag, which keys each agent holds and when they expire, which secrets carry which properties, which policies mention a tag, who minted a key. Use for audits and "what is the state of X" questions; not for changing anything.
 ---
 
 # Inspecting agents
@@ -9,28 +9,29 @@ Result: a read-only report that answers each question with the command that
 produced it and the field the answer came from. Nothing is created, voted
 on, or deleted.
 
-There are no server-side filters in this checkout. Every question below is a
-full traversal of one or more lists plus a local `jq` selection, so each
-answer states its provenance: the command, the page or pages read, and the
-field.
+Each question below is one `tk` list narrowed by its filter flags plus a
+`jq` projection; `jq` selects only where no flag exists (the tag-id search
+over policies, the public-key join that attributes a mint). Each answer
+states its provenance: the command, the pages read, and the field.
 
 ## Reference
 
-- [resources](../../docs/resources.md): `user`, `user tag`, `api-key`, and `policy` list records.
-- [activities](../../docs/activities.md): `activity list` pages and `activity get`.
-- [secrets](../../docs/secrets.md): `secret list` metadata and paging.
+- [resources](../../docs/resources.md): `user list` tag filtering, `user tag` records, `api-key list` owner selection and expiry modes, and `policy` records.
+- [activities](../../docs/activities.md): `activity list` filtering and paging, and `activity get`.
+- [secrets](../../docs/secrets.md): `secret list` filtering.
 
 ## Rules
 
 - Read only. Approving, rejecting, or waiting on what you find belongs to
   [monitoring-activities](../monitoring-activities/SKILL.md).
-- Page to the end before answering "none". `activity list` and
-  `secret list` page with `--limit` and `--cursor`; a page is the last one
-  when `data.nextCursor` is `null`. `user list`, `user tag list`,
-  `policy list`, and `api-key list` return everything in one response.
-- Resolve tag names once, with `user tag list`, and match by `tagId`
-  everywhere else. `userTags[]` on a user and the text of a policy carry
-  ids, not names.
+- Page to the end before answering "none". `activity list` pages with
+  `--limit` and `--cursor`; a page is the last one when `data.nextCursor` is
+  `null`. A filtered `secret list` pages the same way; see
+  [secrets](../../docs/secrets.md). `user list`,
+  `user tag list`, `policy list`, and `api-key list` return everything in one
+  response.
+- `user list --tag` takes a tag name or id. Policy text carries tag ids, not
+  names, so step 7 resolves the name once with `user tag list`.
 - `expiresAt` on an API key is a Unix-millisecond string, or `null` for a
   key that never expires. On the session route the anchor is the only
   permanent key an agent should hold; on the long-lived route the one
@@ -59,37 +60,40 @@ or ids the question is about. Every command below prints one JSON record;
    AGENT_TAG=$(tk --profile admin --message-format json user tag list | jq -r '.data.userTags[] | select(.tagName == "agent") | .tagId')
    ```
 
-   `data.userTags[]` carries `tagId`, `tagName`, and `userIds`. Steps 2 and
-   7 use `$AGENT_TAG`. A name that matches nothing leaves the variable
-   empty; stop and report that, do not fall back to a substring match.
+   `data.userTags[]` carries `tagId`, `tagName`, and `userIds`. Step 7 uses
+   `$AGENT_TAG`; step 2 takes the name directly. A name that matches nothing
+   leaves the variable empty; stop and report that, do not fall back to a
+   substring match.
 
 2. **Which users carry a tag.**
 
    <!-- example: inspecting.tagged-users -->
    ```sh
-   tk --profile admin --message-format json user list | jq --arg tag "$AGENT_TAG" '.data.users[] | select(.userTags | any(. == $tag)) | {userId, userName}'
+   tk --profile admin --message-format json user list --tag agent | jq '.data.users[] | {userId, userName}'
    ```
 
-   `data.users[].userTags[]` is the list of tag ids on each user. The list
-   is complete in one response.
+   The list is complete in one response.
 
 3. **Which keys an agent holds and when they expire.**
 
    <!-- example: inspecting.keys -->
    ```sh
    tk --profile admin --message-format json api-key list --user-id AGENT_USER_ID | jq '.data.apiKeys[] | {apiKeyId, apiKeyName, publicKey: .credential.publicKey, expiresAt}'
-   tk --profile admin --message-format json api-key list --user-id AGENT_USER_ID | jq -r '.data.apiKeys[] | select(.expiresAt == null) | .apiKeyId'
+   tk --profile admin --message-format json api-key list --all-users --long-lived | jq -r '.data.apiKeys[] | "\(.userId) \(.apiKeyId)"'
+   tk --profile admin --message-format json api-key list --all-users --expiring-within 24h | jq -r '.data.apiKeys[] | "\(.userId) \(.apiKeyId) \(.expiresAt)"'
    ```
 
-   The second command lists the permanent keys. A session-route agent
-   should show exactly one, its anchor; more than one permanent key on such
-   an agent is a finding. Run step 3 once per user id from step 2.
+   The first command reads one user from step 2. The second lists every
+   permanent key by owner: a session-route agent should own exactly one, its
+   anchor; more than one is a finding. The third lists keys that expire
+   within the window; see [resources](../../docs/resources.md) for the
+   expiry modes.
 
 4. **What is pending and for how long.**
 
    <!-- example: inspecting.pending -->
    ```sh
-   tk --profile admin --message-format json activity list --limit 50 | jq --arg now "$(date +%s)" '.data.items[] | select(.status == "ACTIVITY_STATUS_CONSENSUS_NEEDED") | {id, type, ageSeconds: (($now | tonumber) - (.createdAt.seconds | tonumber))}'
+   tk --profile admin --message-format json activity list --status pending --limit 50 | jq --arg now "$(date +%s)" '.data.items[] | {id, type, status, ageSeconds: (($now | tonumber) - (.createdAt.seconds | tonumber))}'
    ```
 
    `data.items[]` is one page, newest first; `createdAt.seconds` is a
@@ -97,12 +101,11 @@ or ids the question is about. Every command below prints one JSON record;
 
    <!-- example: inspecting.next-page -->
    ```sh
-   NEXT_ACTIVITY_ID=$(tk --profile admin --message-format json activity list --limit 50 | jq -r '.data.nextCursor')
-   tk --profile admin --message-format json activity list --limit 50 --cursor $NEXT_ACTIVITY_ID | jq -r '.data.nextCursor'
+   NEXT_ACTIVITY_ID=$(tk --profile admin --message-format json activity list --status pending --limit 50 | jq -r '.data.nextCursor')
+   tk --profile admin --message-format json activity list --status pending --limit 50 --cursor $NEXT_ACTIVITY_ID | jq -r '.data.nextCursor'
    ```
 
-   Apply the step 4 filter to every page and concatenate. A pending
-   activity appears on exactly one page.
+   Concatenate the pages. A pending activity appears on exactly one page.
 
 5. **Who voted on an activity.**
 
@@ -119,12 +122,12 @@ or ids the question is about. Every command below prints one JSON record;
 
    <!-- example: inspecting.secrets -->
    ```sh
-   tk --profile admin --message-format json secret list --limit 100 | jq '.data.secrets[] | {name, properties: (.staticProperties | map("\(.key)=\(.value)"))}'
-   tk --profile admin --message-format json secret list --limit 100 --cursor SECRET_ID | jq -r '.data.nextCursor'
+   tk --profile admin --message-format json secret list --property env=prod | jq '.data.secrets[] | {name, properties: (.staticProperties | map("\(.key)=\(.value)"))}'
+   tk --profile admin --message-format json secret list --name-prefix service/ --property env=prod | jq -r '.data.secrets[].name'
    ```
 
    `staticProperties[]` is `key` and `value`; values of the secrets
-   themselves are never listed. Page with `--cursor` as in step 4.
+   themselves are never listed.
 
 7. **Which policies mention a tag.**
 
@@ -137,16 +140,19 @@ or ids the question is about. Every command below prints one JSON record;
    whether the tag is an approver, a target, or both.
 
 8. **Who minted a key.** Take the key's `credential.publicKey` from step 3
-   into `$KEY_PUBLIC_KEY`, then join it against each page of activities:
+   into `$KEY_PUBLIC_KEY`, then join it against each page of the activities
+   that can mint one:
 
    <!-- example: inspecting.minted-by -->
    ```sh
-   tk --profile admin --message-format json activity list --limit 50 | jq --arg pk "$KEY_PUBLIC_KEY" '.data.items[] | select(any(.intent.createApiKeysIntentV2.apiKeys[]?, .intent.createUsersIntentV4.users[]?.apiKeys[]?; .publicKey == $pk)) | {id, type, status, minted: .createdAt.seconds, voters: [.votes[].userId]}'
+   tk --profile admin --message-format json activity list --type 'ACTIVITY_TYPE_CREATE_API_KEYS_V2' --type 'ACTIVITY_TYPE_CREATE_USERS_V4' --limit 50 | jq --arg pk "$KEY_PUBLIC_KEY" '.data.items[] | select(any(.intent.createApiKeysIntentV2.apiKeys[]?, .intent.createUsersIntentV4.users[]?.apiKeys[]?; .publicKey == $pk)) | {id, type, status, minted: .createdAt.seconds, voters: [.votes[].userId]}'
    ```
 
-   Page as in step 4. One match gives the activity and its voters, the
-   first of which submitted it. No match across every page is "unknown".
-   Empty output on the first page alone proves nothing.
+   Page as in step 4, keeping both `--type` flags on every page; add
+   `--since 7d` when the key is known to be recent. One match gives the
+   activity and its voters, the first of which submitted it. No match across
+   every page is "unknown". Empty output on the first page alone proves
+   nothing.
 
 9. **Hand off.** One line per question: the answer, the command, the pages
    read (`1 of 1`, `3 of 3`), and the field it came from. Pending ids,
@@ -161,22 +167,22 @@ or ids the question is about. Every command below prints one JSON record;
 
 ## Troubleshooting
 
-- `jq: command not found`: install `jq`; every recipe here selects from the
-  JSON record with it. Nothing in `tk` depends on it.
-- `user get` or `api-key list` fails with `not_found`: the user id belongs
-  to another organization or was mistyped. Check `--profile` and the id
-  from step 2.
+- `jq: command not found`: install `jq`; every recipe here projects fields
+  from the JSON record with it. Nothing in `tk` depends on it.
+- `user list --tag`, `user get`, or `api-key list` fails with `not_found`:
+  the tag name or user id belongs to another organization or was mistyped.
+  Check `--profile` and the id from step 2.
 - Step 1 leaves `$AGENT_TAG` empty: the tag name is different in this
   organization. Read the full `user tag list` output and pick the id by
   hand; do not guess from a similar name.
 - A page has zero items but the previous page had a cursor: the previous
   page was exactly `--limit` long. That empty page is the end.
-- `activity list` shows nothing pending but a command reported `pending`:
-  the vote may have landed since. `activity get ACTIVITY_ID` shows the
-  current status of that one activity.
-- Step 8 finds no match: widen the traversal to every page before saying
-  "unknown"; an activity older than the pages read is not evidence of
-  anything.
+- `activity list --status pending` shows nothing but a command reported
+  `pending`: the vote may have landed since. `activity get ACTIVITY_ID`
+  shows the current status of that one activity.
+- Step 8 finds no match: widen the traversal to every page, and drop
+  `--since` if you added it, before saying "unknown"; an activity older than
+  the pages read is not evidence of anything.
 
 ## Related Skills
 

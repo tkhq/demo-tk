@@ -8,7 +8,10 @@ use reqwest::Client;
 use std::net::TcpListener;
 use std::sync::OnceLock;
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
-use wiremock::{Mock, MockServer, ResponseTemplate, matchers::path};
+use wiremock::{
+    Mock, MockServer, ResponseTemplate,
+    matchers::{body_partial_json, path},
+};
 #[derive(Debug, Parser)]
 struct RequestCli {
     #[command(flatten)]
@@ -142,6 +145,140 @@ fn parser_enforces_body_source_and_safe_path() {
             .kind(),
         ErrorKind::ValueValidation
     );
+}
+
+#[test]
+fn list_parser_accepts_repeated_filters_and_rejects_unknown_types() {
+    let ActivityCommand::List(args) = ActivityCli::try_parse_from([
+        "tk",
+        "list",
+        "--status",
+        "pending",
+        "--status",
+        "failed",
+        "--type",
+        "ACTIVITY_TYPE_CREATE_USER_TAG",
+        "--type",
+        "ACTIVITY_TYPE_CREATE_POLICY_V3",
+        "--since",
+        "36h",
+    ])
+    .unwrap()
+    .activity
+    else {
+        panic!("expected list");
+    };
+    assert_eq!(args.limit, 50);
+    assert_eq!(args.cursor, None);
+    assert_eq!(args.status, [StatusFilter::Pending, StatusFilter::Failed]);
+    assert_eq!(
+        args.types,
+        [ActivityType::CreateUserTag, ActivityType::CreatePolicyV3]
+    );
+    assert_eq!(args.since.map(ExpiresIn::seconds), Some(36 * 3_600));
+    for bad in [
+        ["tk", "list", "--type", "ACTIVITY_TYPE_UNSPECIFIED"],
+        ["tk", "list", "--type", "CREATE_USER_TAG"],
+        ["tk", "list", "--since", "1w"],
+        ["tk", "list", "--status", "created"],
+    ] {
+        let error = ActivityCli::try_parse_from(bad).unwrap_err();
+        assert!(
+            matches!(
+                error.kind(),
+                ErrorKind::ValueValidation | ErrorKind::InvalidValue
+            ),
+            "{bad:?}: {error}"
+        );
+    }
+}
+
+fn listed(seconds: u64, ids: impl IntoIterator<Item = u32>) -> Value {
+    let items: Vec<Value> = ids
+        .into_iter()
+        .map(|n| {
+            json!({
+                "id": format!("id-{n}"),
+                "status": "ACTIVITY_STATUS_COMPLETED",
+                "createdAt": {"seconds": seconds.to_string(), "nanos": "0"},
+                "votes": [],
+            })
+        })
+        .collect();
+    json!({"activities": items})
+}
+
+async fn list_since(auth: &ResolvedAuth, limit: u32, cursor: Option<&str>) -> Value {
+    list(
+        auth,
+        ListArgs {
+            limit,
+            cursor: cursor.map(str::to_owned),
+            status: vec![StatusFilter::Completed],
+            types: vec![],
+            since: Some("1h".parse().unwrap()),
+        },
+    )
+    .await
+    .unwrap()
+    .into_data()
+}
+
+#[tokio::test]
+async fn since_walks_full_pages_and_stops_at_the_window_or_the_cap() {
+    let server = MockServer::start().await;
+    let now = unix_now().unwrap().as_secs();
+    let page = |limit: &str, after: &str, body: Value| {
+        Mock::given(path("/public/v1/query/list_activities"))
+            .and(body_partial_json(json!({
+                "filterByStatus": ["ACTIVITY_STATUS_COMPLETED"],
+                "paginationOptions": {"limit": limit, "after": after},
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+    };
+    page("100", "", listed(now, 1..=100)).mount(&server).await;
+    page("99", "", listed(now, 1..=99)).mount(&server).await;
+    let mut tail = listed(now - 60, 101..=102);
+    let mut old = listed(now - 7_200, 103..=103);
+    tail["activities"]
+        .as_array_mut()
+        .unwrap()
+        .append(old["activities"].as_array_mut().unwrap());
+    page("100", "id-100", tail).mount(&server).await;
+    page("100", "id-99", listed(now - 60, 100..=101))
+        .mount(&server)
+        .await;
+    let auth = auth(&server, TurnkeyP256ApiKey::generate());
+
+    let all = list_since(&auth, 500, None).await;
+    let ids: Vec<String> = all["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        ids,
+        (1..=102).map(|n| format!("id-{n}")).collect::<Vec<_>>()
+    );
+    assert_eq!(all["nextCursor"], Value::Null);
+    assert_eq!(all["items"][0]["votes"], json!([]));
+
+    let capped = list_since(&auth, 99, None).await;
+    assert_eq!(capped["items"].as_array().unwrap().len(), 99);
+    assert_eq!(capped["nextCursor"], "id-99");
+
+    let resumed = list_since(&auth, 500, Some("id-99")).await;
+    assert_eq!(
+        resumed["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["id"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["id-100", "id-101"]
+    );
+    assert_eq!(resumed["nextCursor"], Value::Null);
 }
 
 #[tokio::test]

@@ -8,6 +8,7 @@ use crate::output::{ColorChoice, Ctx, ErrorMessage, MessageFormat, Shell, StdCtx
 use crate::resources::{ApiKeyCommand, PolicyCommand, PreparedResource, UserCommand};
 use crate::secrets::{PreparedSecret, SecretCommand};
 use crate::sessions::{self, SessionCommand};
+use crate::skills::{self, SkillsCommand};
 use crate::ssh::{self, SshCommand};
 use crate::wallets::{PreparedWalletCommand, SignCommand, WalletCommand};
 use anyhow::Result;
@@ -75,8 +76,10 @@ SSH agent:
   export SSH_AUTH_SOCK=~/.config/turnkey/ssh-agent.sock
 
 Skills:
-  Download https://github.com/tkhq/tk/tree/main/skills into your agent's skills
-  directory and start from its SKILL.md.
+  tk skills install --into DIR
+  Writes the turnkey-tk package embedded in this binary as DIR/turnkey-tk;
+  start from its SKILL.md. The same package is published at
+  https://github.com/tkhq/tk/tree/main/skills.
 "#;
 
 #[derive(Debug, Parser)]
@@ -199,6 +202,7 @@ async fn run_operation(
             command: ApiKeyCommands::Generate(generate),
         } => return emit(&mut ctx, generate.run().await),
         Operation::Gpg { command } => return emit(&mut ctx, gpg::run(command, options).await),
+        Operation::Skills { command } => return emit(&mut ctx, skills::run(command)),
         Operation::Request(request) => {
             run_prepared(request.prepare(), options, async |prepared, auth| {
                 prepared.run(&auth).await
@@ -379,6 +383,11 @@ enum Operation {
         #[command(subcommand)]
         command: GpgCommand,
     },
+    /// List, show, and install the turnkey-tk agent skills embedded in this binary.
+    Skills {
+        #[command(subcommand)]
+        command: SkillsCommand,
+    },
     /// Verify a saved profile with Turnkey and select it.
     Login(LoginArgs),
     /// Verify the selected identity remotely.
@@ -421,6 +430,7 @@ impl Operation {
             Operation::Secret { .. } => "secret",
             Operation::Session { .. } => "session",
             Operation::Gpg { .. } => "gpg",
+            Operation::Skills { .. } => "skills",
             Operation::Login(_) => "login",
             Operation::Whoami => "whoami",
             Operation::Auth { .. } => "auth",

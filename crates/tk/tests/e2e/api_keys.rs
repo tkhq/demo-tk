@@ -1,5 +1,6 @@
-use crate::run::{AGENT_TAG, HUMAN_TAG, Run, allow_once, result, tag_consensus};
+use crate::run::{AGENT_TAG, HUMAN_TAG, Run, allow_once, created_user_id, result, tag_consensus};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::fs;
 
 #[test]
@@ -238,4 +239,105 @@ fn provisioning_agent_identity_isolation_denies_cross_agent_export() {
         "--name-prefix",
         &format!("{}/", run.name("ops")),
     ]));
+}
+
+#[test]
+#[ignore]
+fn api_key_list_selects_owner_and_expiry() {
+    let run = Run::new();
+    let key = run.key();
+    let public_key = hex::encode(key.compressed_public_key());
+    let user_name = run.name("expiring");
+    let created = run.submit(
+        run.admin().args([
+            "user",
+            "create",
+            "--user-name",
+            &user_name,
+            "--public-key",
+            &public_key,
+            "--expires-in",
+            "1h",
+            "--anchor-key",
+        ]),
+        "user.create",
+    );
+    let user_id = created_user_id(&created);
+    let (other_id, other_key) = run.create_user("other");
+    let other_public = hex::encode(other_key.compressed_public_key());
+
+    let names = |record: &Value| -> Vec<String> {
+        record["data"]["apiKeys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|key| key["apiKeyName"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    let long_lived =
+        run.ok(run
+            .admin()
+            .args(["api-key", "list", "--user-id", &user_id, "--long-lived"]));
+    assert_eq!(long_lived["command"], "api-key.list");
+    assert_eq!(
+        names(&long_lived),
+        vec![format!("{user_name}-anchor")],
+        "{long_lived}"
+    );
+    assert_eq!(long_lived["data"]["apiKeys"][0]["expiresAt"], Value::Null);
+    assert_eq!(long_lived["data"]["apiKeys"][0]["userId"], user_id);
+
+    let expiring = run.ok(run.admin().args([
+        "api-key",
+        "list",
+        "--user-id",
+        &user_id,
+        "--expiring-within",
+        "2h",
+    ]));
+    assert_eq!(
+        names(&expiring),
+        vec![format!("{user_name}-key")],
+        "{expiring}"
+    );
+    assert!(
+        expiring["data"]["apiKeys"][0]["expiresAt"].is_string(),
+        "{expiring}"
+    );
+    assert_eq!(expiring["data"]["apiKeys"][0]["userId"], user_id);
+
+    let expired = run.ok(run
+        .admin()
+        .args(["api-key", "list", "--user-id", &user_id, "--expired"]));
+    assert_eq!(expired["data"]["apiKeys"], json!([]), "{expired}");
+
+    let all = run.ok(run.admin().args(["api-key", "list", "--all-users"]));
+    assert_eq!(all["command"], "api-key.list");
+    let owners: BTreeSet<&str> = all["data"]["apiKeys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|key| key["userId"].as_str().unwrap())
+        .collect();
+    assert!(owners.contains(user_id.as_str()), "{all}");
+    assert!(owners.contains(other_id.as_str()), "{all}");
+    let others = all["data"]["apiKeys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|key| key["credential"]["publicKey"] == other_public)
+        .unwrap_or_else(|| panic!("other user's key missing: {all}"));
+    assert_eq!(others["userId"], other_id);
+    assert_eq!(others["expiresAt"], Value::Null);
+
+    let all_expiring =
+        run.ok(run
+            .admin()
+            .args(["api-key", "list", "--all-users", "--expiring-within", "2h"]));
+    assert_eq!(
+        names(&all_expiring),
+        vec![format!("{user_name}-key")],
+        "{all_expiring}"
+    );
 }

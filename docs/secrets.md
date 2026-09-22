@@ -9,10 +9,6 @@ echo -n "$API_TOKEN" | tk secret import api-token
 tk secret import db-password --from-file ./password.txt
 tk secret import ssh-passphrase
 
-# Metadata only; values are never listed.
-tk secret list
-tk secret list --limit 100 --cursor SECRET_ID
-
 # Values.
 tk secret export --name api-token
 tk secret export --id SECRET_ID
@@ -24,6 +20,18 @@ Scripting:
 API_TOKEN=$(tk secret export --name api-token)
 tk secret export --name db-password --out ./password.txt   # new file, mode 0600
 tk secret export --name api-token --message-format json | jq -r .data.value
+```
+
+## Listing
+
+```bash
+# Metadata only; values are never listed.
+tk secret list
+tk secret list --limit 100 --cursor SECRET_ID
+# Only secrets carrying every property given.
+tk secret list --property env=prod --property team=payments
+# Only secrets whose name starts with the prefix; combines with --property.
+tk secret list --name-prefix service/
 ```
 
 ## Rotation

@@ -8,6 +8,7 @@ use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
+use uuid::Uuid;
 
 #[test]
 #[ignore]
@@ -156,6 +157,35 @@ fn user_create_from_flags_resolves_tag_names_and_registers_anchor_and_expiring_k
     assert_eq!(unknown_tag["code"], "not_found", "{unknown_tag}");
 }
 
+#[test]
+#[ignore]
+fn user_list_filters_by_tag_name_or_id() {
+    let run = Run::new();
+    let tag_name = run.name("tagged");
+    let tag_id = run.create_tag(&tag_name);
+    let (first, _) = run.create_tagged_user("tagged-a", &tag_name);
+    let (second, _) = run.create_tagged_user("tagged-b", &tag_name);
+    run.create_user("untagged");
+
+    let expected: BTreeSet<String> = [first, second].into_iter().collect();
+    for selector in [tag_name.as_str(), tag_id.as_str()] {
+        let listed = run.ok(run.admin().args(["user", "list", "--tag", selector]));
+        assert_eq!(listed["command"], "user.list");
+        let ids: BTreeSet<String> = listed["data"]["users"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|user| user["userId"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(ids, expected, "{listed}");
+    }
+
+    for selector in [run.name("no-such-tag"), Uuid::new_v4().to_string()] {
+        let missing = run.err(run.admin().args(["user", "list", "--tag", &selector]));
+        assert_eq!(missing["code"], "not_found", "{missing}");
+    }
+}
+
 struct Recipe {
     example: &'static str,
     filter: &'static str,
@@ -171,19 +201,23 @@ const AGENT_TAG_ID: Recipe = Recipe {
 };
 const TAGGED_USERS: Recipe = Recipe {
     example: "inspecting.tagged-users",
-    filter: r#".data.users[] | select(.userTags | any(. == $tag)) | {userId, userName}"#,
+    filter: ".data.users[] | {userId, userName}",
 };
 const KEYS: Recipe = Recipe {
     example: "inspecting.keys",
     filter: r#".data.apiKeys[] | {apiKeyId, apiKeyName, publicKey: .credential.publicKey, expiresAt}"#,
 };
-const PERMANENT_KEYS: Recipe = Recipe {
+const LONG_LIVED_KEYS: Recipe = Recipe {
     example: "inspecting.keys",
-    filter: r#".data.apiKeys[] | select(.expiresAt == null) | .apiKeyId"#,
+    filter: r#".data.apiKeys[] | "\(.userId) \(.apiKeyId)""#,
+};
+const EXPIRING_KEYS: Recipe = Recipe {
+    example: "inspecting.keys",
+    filter: r#".data.apiKeys[] | "\(.userId) \(.apiKeyId) \(.expiresAt)""#,
 };
 const PENDING: Recipe = Recipe {
     example: "inspecting.pending",
-    filter: r#".data.items[] | select(.status == "ACTIVITY_STATUS_CONSENSUS_NEEDED") | {id, type, ageSeconds: (($now | tonumber) - (.createdAt.seconds | tonumber))}"#,
+    filter: r#".data.items[] | {id, type, status, ageSeconds: (($now | tonumber) - (.createdAt.seconds | tonumber))}"#,
 };
 const NEXT_CURSOR: Recipe = Recipe {
     example: "inspecting.next-page",
@@ -197,6 +231,10 @@ const SECRETS: Recipe = Recipe {
     example: "inspecting.secrets",
     filter: r#".data.secrets[] | {name, properties: (.staticProperties | map("\(.key)=\(.value)"))}"#,
 };
+const SECRET_NAMES: Recipe = Recipe {
+    example: "inspecting.secrets",
+    filter: ".data.secrets[].name",
+};
 const POLICIES: Recipe = Recipe {
     example: "inspecting.policies",
     filter: r#".data.policies[] | select((.consensus // "") + (.condition // "") | contains($tag)) | {policyId, policyName, effect}"#,
@@ -205,16 +243,18 @@ const MINTED_BY: Recipe = Recipe {
     example: "inspecting.minted-by",
     filter: r#".data.items[] | select(any(.intent.createApiKeysIntentV2.apiKeys[]?, .intent.createUsersIntentV4.users[]?.apiKeys[]?; .publicKey == $pk)) | {id, type, status, minted: .createdAt.seconds, voters: [.votes[].userId]}"#,
 };
-const RECIPES: [&Recipe; 11] = [
+const RECIPES: [&Recipe; 13] = [
     &TAGS,
     &AGENT_TAG_ID,
     &TAGGED_USERS,
     &KEYS,
-    &PERMANENT_KEYS,
+    &LONG_LIVED_KEYS,
+    &EXPIRING_KEYS,
     &PENDING,
     &NEXT_CURSOR,
     &VOTES,
     &SECRETS,
+    &SECRET_NAMES,
     &POLICIES,
     &MINTED_BY,
 ];
@@ -342,17 +382,16 @@ fn inspecting_agents_jq_recipes_answer_live_records() {
         "{tags}"
     );
 
-    let users = run.ok(run.admin().args(["user", "list"]));
-    let tagged: BTreeSet<(String, String)> =
-        jq_values(&users, &["--arg", "tag", &agent_tag, TAGGED_USERS.filter])
-            .into_iter()
-            .map(|user| {
-                (
-                    user["userId"].as_str().unwrap().to_owned(),
-                    user["userName"].as_str().unwrap().to_owned(),
-                )
-            })
-            .collect();
+    let users = run.ok(run.admin().args(["user", "list", "--tag", AGENT_TAG]));
+    let tagged: BTreeSet<(String, String)> = jq_values(&users, &[TAGGED_USERS.filter])
+        .into_iter()
+        .map(|user| {
+            (
+                user["userId"].as_str().unwrap().to_owned(),
+                user["userName"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
     assert_eq!(
         tagged,
         BTreeSet::from([
@@ -377,10 +416,38 @@ fn inspecting_agents_jq_recipes_answer_live_records() {
         .find(|key| key["apiKeyName"] == format!("{agent_two_name}-anchor"))
         .unwrap_or_else(|| panic!("anchor key missing: {keys}"));
     assert_eq!(anchor["expiresAt"], Value::Null, "{anchor}");
+    let anchor_id = anchor["apiKeyId"].as_str().unwrap();
+    let expiring_id = expiring["apiKeyId"].as_str().unwrap();
+
+    let long_lived = run.ok(run
+        .admin()
+        .args(["api-key", "list", "--all-users", "--long-lived"]));
+    let long_lived = jq_lines(&long_lived, LONG_LIVED_KEYS.filter, &[]);
     assert_eq!(
-        jq_lines(&keys, PERMANENT_KEYS.filter, &[]),
-        [anchor["apiKeyId"].as_str().unwrap()],
-        "{keys}"
+        long_lived
+            .iter()
+            .filter(|line| line.starts_with(&agent_two_id))
+            .collect::<Vec<_>>(),
+        [&format!("{agent_two_id} {anchor_id}")],
+        "{long_lived:?}"
+    );
+    assert!(
+        long_lived
+            .iter()
+            .any(|line| line.starts_with(&agent_one_id)),
+        "{long_lived:?}"
+    );
+    let expiring_soon =
+        run.ok(run
+            .admin()
+            .args(["api-key", "list", "--all-users", "--expiring-within", "24h"]));
+    assert_eq!(
+        jq_lines(&expiring_soon, EXPIRING_KEYS.filter, &[]),
+        [format!(
+            "{agent_two_id} {expiring_id} {}",
+            expiring["expiresAt"].as_str().unwrap()
+        )],
+        "{expiring_soon}"
     );
 
     let now = SystemTime::now()
@@ -388,7 +455,9 @@ fn inspecting_agents_jq_recipes_answer_live_records() {
         .unwrap()
         .as_secs()
         .to_string();
-    let page = run.ok(run.admin().args(["activity", "list", "--limit", "50"]));
+    let page = run.ok(run
+        .admin()
+        .args(["activity", "list", "--status", "pending", "--limit", "50"]));
     let pending_items = jq_values(&page, &["--arg", "now", &now, PENDING.filter]);
     assert_eq!(pending_items.len(), 1, "{page}");
     assert_eq!(pending_items[0]["id"], pending_id, "{page}");
@@ -396,8 +465,26 @@ fn inspecting_agents_jq_recipes_answer_live_records() {
         pending_items[0]["type"], "ACTIVITY_TYPE_CREATE_USER_TAG",
         "{page}"
     );
+    assert_eq!(
+        pending_items[0]["status"], "ACTIVITY_STATUS_CONSENSUS_NEEDED",
+        "{page}"
+    );
     let age = pending_items[0]["ageSeconds"].as_i64().unwrap();
     assert!((0..3600).contains(&age), "{}", pending_items[0]);
+    assert_eq!(jq_lines(&page, NEXT_CURSOR.filter, &[]), ["null"], "{page}");
+    let first = run.ok(run
+        .admin()
+        .args(["activity", "list", "--status", "pending", "--limit", "1"]));
+    let next = jq_lines(&first, NEXT_CURSOR.filter, &[]);
+    assert_eq!(next, [pending_id.as_str()], "{first}");
+    let rest = run.ok(run.admin().args([
+        "activity", "list", "--status", "pending", "--limit", "1", "--cursor", &next[0],
+    ]));
+    assert_eq!(
+        rest["data"],
+        json!({"items": [], "nextCursor": null}),
+        "{rest}"
+    );
 
     let got = run.ok(run.admin().args(["activity", "get", &pending_id]));
     assert_eq!(
@@ -406,7 +493,9 @@ fn inspecting_agents_jq_recipes_answer_live_records() {
         "{got}"
     );
 
-    let secrets = run.ok(run.admin().args(["secret", "list", "--limit", "100"]));
+    let secrets = run.ok(run
+        .admin()
+        .args(["secret", "list", "--property", "env=prod"]));
     assert_eq!(
         jq_values(&secrets, &[SECRETS.filter]),
         [json!({"name": secret_name, "properties": ["env=prod", "team=payments"]})],
@@ -416,6 +505,27 @@ fn inspecting_agents_jq_recipes_answer_live_records() {
         jq_lines(&secrets, NEXT_CURSOR.filter, &[]),
         ["null"],
         "{secrets}"
+    );
+    let staging = run.ok(run
+        .admin()
+        .args(["secret", "list", "--property", "env=staging"]));
+    assert_eq!(
+        jq_values(&staging, &[SECRETS.filter]),
+        [] as [Value; 0],
+        "{staging}"
+    );
+    let prefixed = run.ok(run.admin().args([
+        "secret",
+        "list",
+        "--name-prefix",
+        &run.name("service/"),
+        "--property",
+        "env=prod",
+    ]));
+    assert_eq!(
+        jq_lines(&prefixed, SECRET_NAMES.filter, &[]),
+        [secret_name.as_str()],
+        "{prefixed}"
     );
 
     let policies = run.ok(run.admin().args(["policy", "list"]));
@@ -430,7 +540,16 @@ fn inspecting_agents_jq_recipes_answer_live_records() {
         "{policies}"
     );
 
-    let first = run.ok(run.admin().args(["activity", "list", "--limit", "2"]));
+    let mint_types = [
+        "--type",
+        "ACTIVITY_TYPE_CREATE_API_KEYS_V2",
+        "--type",
+        "ACTIVITY_TYPE_CREATE_USERS_V4",
+    ];
+    let first = run.ok(run
+        .admin()
+        .args(["activity", "list", "--limit", "2"])
+        .args(mint_types));
     assert_eq!(
         jq_values(
             &first,
@@ -451,13 +570,17 @@ fn inspecting_agents_jq_recipes_answer_live_records() {
         pages.push(
             run.ok(run
                 .admin()
-                .args(["activity", "list", "--limit", "2", "--cursor", cursor])),
+                .args(["activity", "list", "--limit", "2", "--cursor", cursor])
+                .args(mint_types)),
         );
     }
     assert!(pages.len() >= 3, "{} pages", pages.len());
-    let ids: Vec<&str> = pages
+    let items: Vec<&Value> = pages
         .iter()
         .flat_map(|page| page["data"]["items"].as_array().unwrap())
+        .collect();
+    let ids: Vec<&str> = items
+        .iter()
         .map(|item| item["id"].as_str().unwrap())
         .collect();
     let unique: BTreeSet<&str> = ids.iter().copied().collect();
@@ -466,16 +589,15 @@ fn inspecting_agents_jq_recipes_answer_live_records() {
         ids.len(),
         "pages repeated an activity: {ids:?}"
     );
-    assert_eq!(
-        ids.iter().filter(|id| **id == pending_id).count(),
-        1,
-        "{ids:?}"
-    );
-    let pending_across_pages: Vec<Value> = pages
-        .iter()
-        .flat_map(|page| jq_values(page, &["--arg", "now", &now, PENDING.filter]))
-        .collect();
-    assert_eq!(pending_across_pages.len(), 1, "{pending_across_pages:?}");
+    assert!(unique.contains(minted_two_activity.as_str()), "{ids:?}");
+    assert!(unique.contains(registered_activity.as_str()), "{ids:?}");
+    assert!(!unique.contains(pending_id.as_str()), "{ids:?}");
+    for item in &items {
+        assert!(
+            mint_types.contains(&item["type"].as_str().unwrap()),
+            "{item}"
+        );
+    }
 
     let minted = |public_key: &str| -> Vec<Value> {
         pages

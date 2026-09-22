@@ -71,6 +71,7 @@ Subcommands:
 - [`tk secret`](#tk-secret): List, import, and export Secrets
 - [`tk session`](#tk-session): Short-lived credentials for agent profiles
 - [`tk gpg`](#tk-gpg): Create PGP keys as wallet accounts, register them, export them, and sign with them
+- [`tk skills`](#tk-skills): List, show, and install the turnkey-tk agent skills embedded in this binary
 - [`tk login`](#tk-login): Verify a saved profile with Turnkey and select it
 - [`tk whoami`](#tk-whoami): Verify the selected identity remotely
 - [`tk auth`](#tk-auth): Manage API authentication
@@ -104,8 +105,10 @@ SSH agent:
   export SSH_AUTH_SOCK=~/.config/turnkey/ssh-agent.sock
 
 Skills:
-  Download https://github.com/tkhq/tk/tree/main/skills into your agent's skills
-  directory and start from its SKILL.md.
+  tk skills install --into DIR
+  Writes the turnkey-tk package embedded in this binary as DIR/turnkey-tk;
+  start from its SKILL.md. The same package is published at
+  https://github.com/tkhq/tk/tree/main/skills.
 ```
 
 ### `tk activity`
@@ -136,6 +139,9 @@ tk activity list [OPTIONS]
 |---|---|---|
 | `--limit <LIMIT>` | default `50` |  |
 | `--cursor <CURSOR>` |  | API after cursor (activity ID); pagination is explicitly caller-driven |
+| `--status <STATUS> (repeatable)` | one of `pending`, `completed`, `rejected`, `failed` | Keep only these statuses, filtered by the server; repeatable. pending matches created, pending, consensus-needed, and authenticators-needed activities |
+| `--type <ACTIVITY_TYPE> (repeatable)` |  | Keep only these activity types, filtered by the server, such as `ACTIVITY_TYPE_CREATE_USER_TAG`; repeatable |
+| `--since <DURATION>` |  | Keep only activities created within this window, such as 24h, filtered here: walks pages newest first from --cursor until one is older; --limit caps the matches and sets nextCursor so the same command with --cursor resumes |
 
 #### `tk activity get`
 
@@ -381,6 +387,10 @@ Subcommands:
 tk user list [OPTIONS]
 ```
 
+| Argument | Notes | Description |
+|---|---|---|
+| `--tag <NAME_OR_ID>` |  | Keep only users carrying this tag, given as a tag id or an exact tag name |
+
 #### `tk user get`
 
 ```
@@ -625,7 +635,7 @@ tk api-key [OPTIONS] <COMMAND>
 Subcommands:
 
 - [`tk api-key generate`](#tk-api-key-generate): Generate a protected local credential file without registration
-- [`tk api-key list`](#tk-api-key-list)
+- [`tk api-key list`](#tk-api-key-list): List API keys for one user or for every user, optionally by expiry
 - [`tk api-key register`](#tk-api-key-register): Register public keys using `CreateApiKeysIntentV2` parameters
 - [`tk api-key delete`](#tk-api-key-delete)
 
@@ -643,13 +653,24 @@ tk api-key generate [OPTIONS]
 
 #### `tk api-key list`
 
+List API keys for one user or for every user, optionally by expiry
+
 ```
-tk api-key list [OPTIONS]
+tk api-key list [OPTIONS] <--user-id <USER_ID>|--all-users>
 ```
 
 | Argument | Notes | Description |
 |---|---|---|
-| `--user-id <USER_ID>` |  |  |
+| `--user-id <USER_ID>` |  | List the keys of this user |
+| `--all-users` |  | List the keys of every user in the organization, read from the users listing |
+| `--expiring-within <DURATION>` |  | Keep only keys whose expiry is at most this far ahead, such as 2h or 7d |
+| `--expired` |  | Keep only keys whose expiry has passed |
+| `--long-lived` |  | Keep only keys that never expire |
+
+Constraints:
+
+- at most one of `--expiring-within`, `--expired`, `--long-lived`
+- exactly one of `--user-id`, `--all-users`
 
 #### `tk api-key register`
 
@@ -854,8 +875,10 @@ tk secret list [OPTIONS]
 
 | Argument | Notes | Description |
 |---|---|---|
-| `--limit <LIMIT>` | default `50` | Page size |
+| `--limit <LIMIT>` | default `50` | Page size, or the most matches to return when filtering |
 | `--cursor <CURSOR>` |  | Secret ID to continue after |
+| `--property <KEY=VALUE> (repeatable)` |  | Only secrets carrying this static property (repeatable; all must match) |
+| `--name-prefix <NAME_PREFIX>` |  | Only secrets whose name starts with this prefix, for example hermes/ |
 
 #### `tk secret import`
 
@@ -1123,6 +1146,52 @@ tk gpg agent serve [OPTIONS] --key <KEY>
 | `--key <KEY>` | required | Serve this registered key and no other key |
 | `--socket <path>` |  | Unix socket path to bind for `OpenPGP` signing requests |
 | `--socket-mode <SOCKET_MODE>` | default `600` | Octal permissions for the socket. Access to it grants signing authority |
+
+### `tk skills`
+
+List, show, and install the turnkey-tk agent skills embedded in this binary
+
+```
+tk skills [OPTIONS] <COMMAND>
+```
+
+Subcommands:
+
+- [`tk skills list`](#tk-skills-list): List the embedded skills with their descriptions
+- [`tk skills show`](#tk-skills-show): Print one embedded skill as Markdown
+- [`tk skills install`](#tk-skills-install): Install the turnkey-tk package as DIR/turnkey-tk; an existing destination is never replaced, the same package is a no-op, and any other content is refused with `invalid_input`
+
+#### `tk skills list`
+
+List the embedded skills with their descriptions
+
+```
+tk skills list [OPTIONS]
+```
+
+#### `tk skills show`
+
+Print one embedded skill as Markdown
+
+```
+tk skills show [OPTIONS] --name <NAME>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--name <NAME>` | required | A skill name from `tk skills list`, or `references/NAME` for a reference |
+
+#### `tk skills install`
+
+Install the turnkey-tk package as DIR/turnkey-tk; an existing destination is never replaced, the same package is a no-op, and any other content is refused with `invalid_input`
+
+```
+tk skills install [OPTIONS] --into <DIR>
+```
+
+| Argument | Notes | Description |
+|---|---|---|
+| `--into <DIR>` | required | Directory that receives the `turnkey-tk` package; created when missing |
 
 ### `tk login`
 

@@ -17,18 +17,24 @@ use zeroize::Zeroizing;
 use crate::auth::ResolvedAuth;
 use crate::errors::InvalidInput;
 use crate::operations::OperationOutput;
-use input::{SecretName, SecretRef, UniqueKeyValues, parse_key_value, read_value};
+use input::{SecretName, SecretRef, Selector, UniqueKeyValues, parse_key_value, read_value};
 
 #[derive(Debug, Subcommand)]
 pub enum SecretCommand {
     /// List secret metadata; values are never returned.
     List {
-        /// Page size.
+        /// Page size, or the most matches to return when filtering.
         #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=100))]
         limit: u32,
         /// Secret ID to continue after.
         #[arg(long)]
         cursor: Option<Uuid>,
+        /// Only secrets carrying this static property (repeatable; all must match).
+        #[arg(long = "property", value_name = "KEY=VALUE", value_parser = parse_key_value)]
+        properties: Vec<KeyValue>,
+        /// Only secrets whose name starts with this prefix, for example hermes/.
+        #[arg(long)]
+        name_prefix: Option<String>,
     },
     /// Encrypt and import a new named secret.
     Import {
@@ -104,7 +110,7 @@ impl From<SecretSelector> for SecretRef {
 pub enum PreparedSecret {
     List {
         limit: u32,
-        cursor: Option<Uuid>,
+        listing: Listing,
     },
     Import {
         name: SecretName,
@@ -117,11 +123,18 @@ pub enum PreparedSecret {
         context: UniqueKeyValues,
     },
     Env {
-        properties: UniqueKeyValues,
-        name_prefix: Option<String>,
+        selector: Selector,
     },
     Delete {
         secret: SecretRef,
+    },
+}
+
+pub enum Listing {
+    Page(Option<Uuid>),
+    Filtered {
+        after: Option<Uuid>,
+        selector: Selector,
     },
 }
 
@@ -129,7 +142,25 @@ impl SecretCommand {
     /// Validates arguments and reads input before resolving credentials.
     pub fn prepare(self, non_interactive: bool) -> Result<PreparedSecret> {
         Ok(match self {
-            Self::List { limit, cursor } => PreparedSecret::List { limit, cursor },
+            Self::List {
+                limit,
+                cursor,
+                properties,
+                name_prefix,
+            } => {
+                let listing = if properties.is_empty() && name_prefix.is_none() {
+                    Listing::Page(cursor)
+                } else {
+                    Listing::Filtered {
+                        after: cursor,
+                        selector: Selector::new(
+                            UniqueKeyValues::parse(properties, "--property")?,
+                            name_prefix,
+                        ),
+                    }
+                };
+                PreparedSecret::List { limit, listing }
+            }
             Self::Import {
                 name,
                 from_file,
@@ -150,8 +181,10 @@ impl SecretCommand {
                 properties,
                 name_prefix,
             } => PreparedSecret::Env {
-                properties: UniqueKeyValues::parse(properties, "--property")?,
-                name_prefix,
+                selector: Selector::new(
+                    UniqueKeyValues::parse(properties, "--property")?,
+                    name_prefix,
+                ),
             },
             Self::Export {
                 secret,
@@ -207,7 +240,9 @@ impl Display for SecretOutput {
 impl PreparedSecret {
     pub async fn run(self, auth: ResolvedAuth) -> Result<SecretOutput> {
         match self {
-            Self::List { limit, cursor } => export::list(auth, limit, cursor).await.map(Into::into),
+            Self::List { limit, listing } => {
+                export::list(auth, limit, listing).await.map(Into::into)
+            }
             Self::Import {
                 name,
                 value,
@@ -220,10 +255,7 @@ impl PreparedSecret {
                 out,
                 context,
             } => export::run(auth, secret, out, context).await,
-            Self::Env {
-                properties,
-                name_prefix,
-            } => env::run(auth, properties, name_prefix).await,
+            Self::Env { selector } => env::run(auth, selector).await,
             Self::Delete { secret } => delete::run(auth, secret).await.map(Into::into),
         }
     }
@@ -247,6 +279,43 @@ mod tests {
             SecretCommand::Export { secret, .. } => Ok(secret.into()),
             other => panic!("expected an export command, parsed {other:?}"),
         }
+    }
+
+    #[test]
+    fn list_parses_typed_filters_and_cursor() {
+        let id = Uuid::new_v4().to_string();
+        let parse =
+            |args: &[&str]| Cli::try_parse_from(["tk"].into_iter().chain(args.iter().copied()));
+        let filtered = parse(&["list", "--property", "env=prod", "--name-prefix", "svc/"]).unwrap();
+        let SecretCommand::List {
+            limit: 50,
+            cursor: None,
+            properties,
+            name_prefix: Some(prefix),
+        } = filtered.command
+        else {
+            panic!("expected a filtered list, parsed {:?}", filtered.command)
+        };
+        assert_eq!(
+            properties,
+            [KeyValue {
+                key: "env".into(),
+                value: "prod".into()
+            }]
+        );
+        assert_eq!(prefix, "svc/");
+        let paged = parse(&["list", "--limit", "10", "--cursor", &id]).unwrap();
+        let SecretCommand::List {
+            limit: 10,
+            cursor: Some(cursor),
+            properties,
+            name_prefix: None,
+        } = paged.command
+        else {
+            panic!("expected a paged list, parsed {:?}", paged.command)
+        };
+        assert_eq!(cursor.to_string(), id);
+        assert!(properties.is_empty());
     }
 
     #[test]

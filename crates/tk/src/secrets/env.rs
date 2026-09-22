@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 
 use super::SecretOutput;
 use super::export::{Binding, Exported, export_value, list_all, remove};
-use super::input::{UniqueKeyValues, quorum_for};
+use super::input::{Selector, UniqueKeyValues, quorum_for};
 use crate::auth::{ResolvedAuth, state_dir};
 use crate::errors::{InvalidInput, Malformed, PendingApprovals};
 use crate::operations::OperationOutput;
@@ -25,27 +25,16 @@ struct Selected {
     secret_id: Uuid,
 }
 
-fn select(
-    secrets: Vec<SecretMetadata>,
-    properties: &BTreeMap<String, String>,
-) -> Result<BTreeMap<String, Selected>> {
+fn select(secrets: Vec<SecretMetadata>) -> Result<BTreeMap<String, Selected>> {
     let mut selected = BTreeMap::new();
     for secret in secrets {
         let SecretMetadata {
             secret_id,
             name,
-            static_properties,
+            static_properties: _,
             created_at_unix_ms: _,
         } = secret;
         let Some(name) = name else { continue };
-        let has_all = properties.iter().all(|(key, value)| {
-            static_properties
-                .iter()
-                .any(|property| property.key == *key && property.value == *value)
-        });
-        if !has_all {
-            continue;
-        }
         let var = name
             .rsplit_once('/')
             .map_or(name.as_str(), |(_, var)| var)
@@ -106,24 +95,11 @@ fn line(out: &mut String, var: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
-pub(super) async fn run(
-    auth: ResolvedAuth,
-    properties: UniqueKeyValues,
-    name_prefix: Option<String>,
-) -> Result<SecretOutput> {
+pub(super) async fn run(auth: ResolvedAuth, selector: Selector) -> Result<SecretOutput> {
     let quorum = quorum_for(auth.api_base_url.as_str())?;
     let state_dir = state_dir()?;
-    let properties: BTreeMap<String, String> = properties.into();
-    let secrets = list_all(&auth, |secret| {
-        name_prefix.as_deref().is_none_or(|prefix| {
-            secret
-                .name
-                .as_deref()
-                .is_some_and(|name| name.starts_with(prefix))
-        })
-    })
-    .await?;
-    let selected = select(secrets, &properties)?;
+    let secrets = list_all(&auth, None, None, |secret| selector.matches(secret)).await?;
+    let selected = select(secrets)?;
     if selected.is_empty() {
         return Err(InvalidInput("no secrets match the selection".into()).into());
     }
@@ -219,22 +195,20 @@ mod tests {
     }
 
     #[test]
-    fn selects_every_property_keyed_by_var() {
-        let unilateral = BTreeMap::from([("consensus".to_owned(), "unilateral".to_owned())]);
+    fn selects_every_secret_keyed_by_var() {
         let secrets = vec![
             secret("hermes/OTHER", &[("consensus", "approval")]),
             secret("hermes/API_TOKEN", &[("consensus", "unilateral")]),
         ];
-        let selected = select(secrets, &unilateral).unwrap();
+        let selected = select(secrets).unwrap();
         let vars: Vec<&str> = selected.keys().map(String::as_str).collect();
-        assert_eq!(vars, ["API_TOKEN"]);
+        assert_eq!(vars, ["API_TOKEN", "OTHER"]);
         assert_eq!(selected["API_TOKEN"].name, "hermes/API_TOKEN");
     }
 
     #[test]
     fn rejects_bad_variable_names_and_duplicates() {
-        let none = BTreeMap::new();
-        let error = select(vec![secret("hermes/not-a-var", &[])], &none).unwrap_err();
+        let error = select(vec![secret("hermes/not-a-var", &[])]).unwrap_err();
         let InvalidInput(message) = error
             .downcast_ref::<InvalidInput>()
             .expect("an InvalidInput error");
@@ -242,8 +216,7 @@ mod tests {
             message,
             "secret hermes/not-a-var does not end in a valid environment variable name; expected <prefix>/<VAR>"
         );
-        let error =
-            select(vec![secret("a/TOKEN", &[]), secret("b/TOKEN", &[])], &none).unwrap_err();
+        let error = select(vec![secret("a/TOKEN", &[]), secret("b/TOKEN", &[])]).unwrap_err();
         let InvalidInput(message) = error
             .downcast_ref::<InvalidInput>()
             .expect("an InvalidInput error");

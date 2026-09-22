@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, from_slice, json, to_value, to_vec};
 use std::fmt::Display;
 use std::io::ErrorKind;
-use std::mem::take;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tracing::warn;
@@ -23,8 +22,8 @@ use turnkey_enclave_encrypt::{QuorumPublicKey, client::ExportClient};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use super::SecretOutput;
 use super::input::{SecretName, SecretRef, UniqueKeyValues, quorum_for};
+use super::{Listing, SecretOutput};
 use crate::auth::{
     ResolvedAuth, SecureCreateError, build_turnkey_client, secure_create, state_dir,
 };
@@ -37,36 +36,48 @@ const NEXT_STEP: &str = "After approval, run the same export command again.";
 pub(super) async fn list(
     auth: ResolvedAuth,
     limit: u32,
-    cursor: Option<Uuid>,
+    listing: Listing,
 ) -> Result<OperationOutput> {
-    let ResolvedAuth {
-        org_id,
-        api_base_url,
-        stamper,
-        ..
-    } = auth;
-    let client = build_turnkey_client(stamper, &api_base_url)?;
-    let response = client
-        .list_secrets(ListSecretsRequest {
-            organization_id: org_id.to_string(),
-            pagination_options: Some(Pagination {
-                limit: limit.to_string(),
-                before: String::new(),
-                after: cursor.map(|id| id.to_string()).unwrap_or_default(),
-            }),
-        })
-        .await?;
-    let next_cursor = (response.secrets.len() == limit as usize)
-        .then(|| {
-            response
-                .secrets
-                .last()
-                .map(|secret| secret.secret_id.clone())
-        })
-        .flatten();
+    let limit = limit as usize;
+    let (secrets, next_cursor) = match listing {
+        Listing::Filtered { after, selector } => {
+            let mut secrets = list_all(&auth, after, Some(limit + 1), |secret| {
+                selector.matches(secret)
+            })
+            .await?;
+            let next_cursor = (secrets.len() > limit).then(|| {
+                secrets.pop();
+                secrets.last().map(|secret| secret.secret_id.clone())
+            });
+            (secrets, next_cursor.flatten())
+        }
+        Listing::Page(cursor) => {
+            let ResolvedAuth {
+                org_id,
+                api_base_url,
+                stamper,
+                ..
+            } = auth;
+            let client = build_turnkey_client(stamper, &api_base_url)?;
+            let ListSecretsResponse { secrets } = client
+                .list_secrets(ListSecretsRequest {
+                    organization_id: org_id.to_string(),
+                    pagination_options: Some(Pagination {
+                        limit: limit.to_string(),
+                        before: String::new(),
+                        after: cursor.map(|id| id.to_string()).unwrap_or_default(),
+                    }),
+                })
+                .await?;
+            let next_cursor = (secrets.len() == limit)
+                .then(|| secrets.last().map(|secret| secret.secret_id.clone()))
+                .flatten();
+            (secrets, next_cursor)
+        }
+    };
     Ok(OperationOutput::result(
         "secret.list",
-        json!({"secrets": to_value(response.secrets)?, "nextCursor": next_cursor}),
+        json!({"secrets": to_value(secrets)?, "nextCursor": next_cursor}),
     ))
 }
 
@@ -205,31 +216,32 @@ impl PendingExport {
 
 pub(super) async fn list_all(
     auth: &ResolvedAuth,
+    after: Option<Uuid>,
+    cap: Option<usize>,
     mut keep: impl FnMut(&SecretMetadata) -> bool,
 ) -> Result<Vec<SecretMetadata>> {
     let mut secrets = Vec::new();
-    let mut after = String::new();
+    let mut request = ListSecretsRequest {
+        organization_id: auth.org_id.to_string(),
+        pagination_options: Some(Pagination {
+            limit: "100".into(),
+            before: String::new(),
+            after: after.map(|id| id.to_string()).unwrap_or_default(),
+        }),
+    };
     loop {
-        let ListSecretsResponse { secrets: page } = query(
-            "/public/v1/query/list_secrets",
-            &ListSecretsRequest {
-                organization_id: auth.org_id.to_string(),
-                pagination_options: Some(Pagination {
-                    limit: "100".into(),
-                    before: String::new(),
-                    after: take(&mut after),
-                }),
-            },
-            auth,
-        )
-        .await?;
+        let ListSecretsResponse { secrets: page } =
+            query("/public/v1/query/list_secrets", &request, auth).await?;
         let full = page.len() == 100;
-        after = page
-            .last()
-            .map(|secret| secret.secret_id.clone())
-            .unwrap_or_default();
-        secrets.extend(page.into_iter().filter(&mut keep));
-        if !full {
+        if full
+            && let Some(pagination) = &mut request.pagination_options
+            && let Some(last) = page.last()
+        {
+            pagination.after = last.secret_id.clone();
+        }
+        let room = cap.map_or(usize::MAX, |cap| cap - secrets.len());
+        secrets.extend(page.into_iter().filter(&mut keep).take(room));
+        if !full || cap.is_some_and(|cap| secrets.len() >= cap) {
             break;
         }
     }
@@ -237,7 +249,10 @@ pub(super) async fn list_all(
 }
 
 pub(super) async fn resolve_name(auth: &ResolvedAuth, name: SecretName) -> Result<Uuid> {
-    let matches = list_all(auth, |secret| secret.name.as_deref() == Some(name.as_str())).await?;
+    let matches = list_all(auth, None, None, |secret| {
+        secret.name.as_deref() == Some(name.as_str())
+    })
+    .await?;
     match matches.as_slice() {
         [] => Err(MissingResource::new("secret", name).into()),
         [one] => Uuid::parse_str(&one.secret_id).context("secret id from the API is not a UUID"),
