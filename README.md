@@ -41,4 +41,11 @@ curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/tkhq/tk/
 - [Git signing](./docs/git-signing.md)
 - [GPG signing](./docs/gpg-signing.md)
 
-For maintainers: [releasing](./docs/releasing.md).
+## Contact us
+
+`tk` is part of Turnkey's agent auth beta. To ask a question or tell us what
+your agents need, reach us at
+[turnkey.com/agent-auth-beta](https://www.turnkey.com/agent-auth-beta).
+
+For the thinking behind this project, see
+[this thread](https://x.com/ZekeMostov/status/2100277046207266887).
