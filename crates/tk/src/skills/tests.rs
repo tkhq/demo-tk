@@ -87,7 +87,7 @@ fn every_documented_tk_invocation_parses_against_clap() {
                     path.display(),
                     fence.start_line
                 )),
-                Lang::Json | Lang::Yaml | Lang::Plain => {}
+                Lang::Json | Lang::Yaml | Lang::Mermaid | Lang::Plain => {}
             }
         }
         for (line, body) in blocks
@@ -335,7 +335,7 @@ fn policy_examples_use_compressed_keys_and_scoped_signing_allows() {
                     let script = script(path, fence.start_line, &fence.body, &PUBLIC_KEY).unwrap();
                     (script.literals, script.invocations)
                 }
-                Lang::Yaml | Lang::Plain | Lang::Unknown(_) => continue,
+                Lang::Yaml | Lang::Mermaid | Lang::Plain | Lang::Unknown(_) => continue,
             };
             let negative = fence.comments.iter().any(|c| c == "negative-example");
             for literal in literals {
@@ -993,6 +993,10 @@ tk whoami
 ```yml
 key: value
 ```
+```mermaid
+flowchart LR
+    a --> b
+```
 "#,
     )
     .fences
@@ -1007,6 +1011,7 @@ key: value
             Lang::Plain,
             Lang::Shell,
             Lang::Yaml,
+            Lang::Mermaid,
         ]
     );
 }

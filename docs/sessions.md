@@ -4,26 +4,28 @@ A session key is a Turnkey API key with an expiration. `tk session` splits its
 lifecycle so that the private key never leaves the machine that uses it and the
 identity allowed to register keys never sees it.
 
-```
-agent host                                provisioner host              human
-----------                                ----------------              -----
-tk session request --profile-name agent
-  -> new keypair under ~/.config/turnkey/tk/api-keys/
-  -> prints publicKey and userId
-                     ---- public key + user id (any transport) ---->
-                                          tk --profile provisioner \
-                                            session provision --user-id U \
-                                            --public-key PK --expires-in 7d
-                                          -> status pending, activity id
-                                                                       approves
-                                          same command again
-                                          -> completed, apiKeyId
-                     <---- done ----
-tk session activate --profile-name agent
-  -> profile now uses the new key; old generated key file removed
-tk session status --profile-name agent
-  -> expiresAt, secondsLeft; exit 1 with code session_expiring
-     when under --warn-before (default 48h)
+```mermaid
+sequenceDiagram
+    participant Agent as agent host
+    participant Provisioner as provisioner host
+    participant Human as human approver
+    participant Turnkey as Turnkey API
+
+    Agent->>Agent: tk session request --profile-name agent
+    Note over Agent: new keypair under ~/.config/turnkey/tk/api-keys/<br/>prints publicKey and userId<br/>private key never leaves this host
+    Agent->>Provisioner: public key + user id (any transport)
+    Provisioner->>Turnkey: tk --profile provisioner session provision<br/>--user-id U --public-key PK --expires-in 7d
+    Turnkey-->>Provisioner: status pending, activity id
+    Human->>Turnkey: approves
+    Provisioner->>Turnkey: same command again
+    Turnkey-->>Provisioner: completed, apiKeyId
+    Provisioner-->>Agent: done
+    Agent->>Turnkey: tk session activate --profile-name agent
+    Turnkey-->>Agent: whoami verifies the pending key
+    Note over Agent: profile now uses the new key<br/>old generated key file removed
+    Agent->>Turnkey: tk session status --profile-name agent
+    Turnkey-->>Agent: expiresAt, secondsLeft
+    Note over Agent: exit 1 with code session_expiring<br/>when under --warn-before (default 48h)
 ```
 
 ## Request

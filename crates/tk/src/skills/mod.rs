@@ -11,6 +11,7 @@ enum Lang {
     Shell,
     Json,
     Yaml,
+    Mermaid,
     Plain,
     Unknown(String),
 }
@@ -21,6 +22,7 @@ impl Lang {
             "sh" | "bash" => Self::Shell,
             "json" => Self::Json,
             "yaml" | "yml" => Self::Yaml,
+            "mermaid" => Self::Mermaid,
             "" => Self::Plain,
             other => Self::Unknown(other.to_owned()),
         }
