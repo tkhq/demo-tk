@@ -1,14 +1,31 @@
-[workspace.package]
+[workspace]
+
+[package]
+name = "turnkey_tk"
 version = "0.4.0"
 edition = "2024"
 license = "Apache-2.0"
 rust-version = "1.95"
+description = "A CLI for machines to use Turnkey for git, ssh, and credential management"
+repository = "https://github.com/tkhq/tk"
+homepage = "https://www.turnkey.com/agent-auth-beta"
+keywords = ["turnkey", "cli", "ssh", "git", "signing"]
+categories = ["command-line-utilities", "cryptography", "authentication"]
+readme = "README.md"
+include = [
+    "build.rs",
+    "docs/**/*.md",
+    "skills/**/*.md",
+    "src/**/*.rs",
+    "LICENSE",
+    "README.md",
+]
 
-[workspace]
-members = ["crates/auth", "crates/tk"]
-resolver = "3"
+[[bin]]
+name = "tk"
+path = "src/main.rs"
 
-[workspace.lints.rust]
+[lints.rust]
 missing_docs = "deny"
 # Coding style
 unused_qualifications = "deny"
@@ -16,7 +33,7 @@ redundant_imports = "deny"
 unused_lifetimes = "deny"
 trivial_numeric_casts = "deny"
 
-[workspace.lints.clippy]
+[lints.clippy]
 # Scaffolding
 print_stdout = "deny"
 print_stderr = "deny"
@@ -54,15 +71,13 @@ disallowed_types = "deny"
 assertions_on_result_states = "deny"
 manual_assert = "deny"
 
-[workspace.dependencies]
+[dependencies]
 anstyle = { version = "1.0.14", default-features = false }
 anyhow = { version = "1.0.104", default-features = false }
-assert_cmd = { version = "2.2.2", default-features = false }
 base64 = { version = "0.23.1", default-features = false, features = ["std"] }
 clap = { version = "4.6.6", features = ["std", "derive", "help", "usage", "error-context", "env"], default-features = false }
 hex = { version = "0.4.3", default-features = false, features = ["std"] }
 libc = { version = "0.2.189", default-features = false }
-predicates = { version = "3.1.4", default-features = false }
 rand_core = { version = "0.6.4", default-features = false, features = ["getrandom"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "http2"] }
 rpassword = { version = "7.4", default-features = false }
@@ -71,17 +86,24 @@ serde_json = { version = "1.0.151", default-features = false, features = ["std"]
 sha1 = { version = "0.10", default-features = false }
 sha2 = { version = "0.11.0", default-features = false }
 socket2 = { version = "0.6.5", default-features = false }
-strum = { version = "0.28.0", default-features = false, features = ["derive", "std", "strum_macros"] }
-tempfile = { version = "3.27.0", default-features = false }
 thiserror = { version = "2.0.20", default-features = false }
-tokio = { version = "=1.53.1", default-features = false }
+tokio = { version = "=1.53.1", default-features = false, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "time"] }
 toml = { version = "1.1.5", default-features = false, features = ["serde", "parse", "display"] }
 tracing = { version = "0.1.44", default-features = false, features = ["attributes", "std"] }
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["ansi", "env-filter", "fmt"] }
-turnkey_auth = { path = "crates/auth" }
-turnkey_api_key_stamper = { git = "https://github.com/tkhq/rust-sdk.git", rev = "ccbf6b4baa6db7797c15a6e101dc0c9f34515ede" }
-turnkey_client = { git = "https://github.com/tkhq/rust-sdk.git", rev = "ccbf6b4baa6db7797c15a6e101dc0c9f34515ede" }
-turnkey_enclave_encrypt = { git = "https://github.com/tkhq/rust-sdk.git", rev = "ccbf6b4baa6db7797c15a6e101dc0c9f34515ede" }
+turnkey_api_key_stamper = "0.16.0"
+turnkey_client = "0.16.0"
+turnkey_enclave_encrypt = "0.16.0"
 uuid = { version = "1", default-features = false, features = ["serde", "std", "v4"] }
-wiremock = { version = "0.6.5", default-features = false }
 zeroize = { version = "1.8", default-features = false, features = ["alloc", "serde"] }
+
+[build-dependencies]
+sha2 = { version = "0.11.0", default-features = false }
+
+[dev-dependencies]
+assert_cmd = { version = "2.2.2", default-features = false }
+predicates = { version = "3.1.4", default-features = false }
+strum = { version = "0.28.0", default-features = false, features = ["derive", "std", "strum_macros"] }
+tempfile = { version = "3.27.0", default-features = false }
+tokio = { version = "=1.53.1", default-features = false, features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "sync", "time"] }
+wiremock = { version = "0.6.5", default-features = false }

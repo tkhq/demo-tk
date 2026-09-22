@@ -23,9 +23,9 @@ jobs:
         run: |
           set -euo pipefail
           manifest_version=$(cargo metadata --locked --format-version 1 \
-            | jq -r '.packages[] | select(.name == "tk") | .version')
+            | jq -r '.packages[] | select(.name == "turnkey_tk") | .version')
           if [ "$GITHUB_REF_NAME" != "v$manifest_version" ]; then
-            echo "Tag $GITHUB_REF_NAME does not match the tk manifest version $manifest_version" >&2
+            echo "Tag $GITHUB_REF_NAME does not match the turnkey_tk manifest version $manifest_version" >&2
             exit 1
           fi
           git fetch --no-tags origin main:refs/remotes/origin/main
@@ -66,7 +66,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           rustup target add "$TARGET"
-          cargo build --locked --release --package tk --bin tk --target "$TARGET"
+          cargo build --locked --release --bin tk --target "$TARGET"
       - name: Package archive and checksum
         shell: bash
         env:
