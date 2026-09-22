@@ -153,6 +153,7 @@ mv -f "$staged_binary" "$destination"
 staged_binary=
 
 echo "Installed tk $version to $destination"
+echo "Install the agent skills with: tk skills install --into <your skills directory>"
 case ":${PATH:-}:" in
     *":$install_dir:"*) ;;
     *) echo "Add $install_dir to PATH to run tk." ;;

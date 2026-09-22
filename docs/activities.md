@@ -5,6 +5,12 @@ Every mutation is an activity. Inspect, vote on, and wait for them.
 ```bash
 tk activity list --limit 50
 tk activity list --limit 50 --cursor ACTIVITY_ID
+# Keep only pending activities; repeat --status for more than one status.
+tk activity list --status pending
+# Keep only one activity type; repeat --type for more than one type.
+tk activity list --type 'ACTIVITY_TYPE_CREATE_USER_TAG'
+# Keep only activities created in the last day.
+tk activity list --since 24h --limit 100
 tk activity get ACTIVITY_ID
 ```
 

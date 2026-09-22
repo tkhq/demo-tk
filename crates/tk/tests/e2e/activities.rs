@@ -162,6 +162,124 @@ fn monitoring_activities_approve_reject_wait() {
     );
 }
 
+#[test]
+#[ignore]
+fn activity_list_filters_by_status_type_and_since() {
+    let run = Run::new();
+    let agent_tag = run.create_tag(AGENT_TAG);
+    let human_tag = run.create_tag(HUMAN_TAG);
+    let (_, agent) = run.create_tagged_user("agent", AGENT_TAG);
+    let policy = run.submit(
+        run.admin().args([
+            "policy",
+            "create",
+            "--name",
+            &run.name("agents-create-tags-with-approval"),
+            "--effect",
+            "allow",
+            "--consensus",
+            &allow_once(&agent_tag, &human_tag),
+            "--condition",
+            "activity.type == 'ACTIVITY_TYPE_CREATE_USER_TAG'",
+        ]),
+        "policy.create",
+    );
+    let policy_activity = id_of(&policy);
+    let policy_type = policy["data"]["activity"]["type"].as_str().unwrap();
+
+    let pending = run.ok(run.as_user(&agent).args([
+        "user",
+        "tag",
+        "create",
+        "--name",
+        &run.name("awaiting-approval"),
+    ]));
+    assert_eq!(pending["status"], "pending", "{pending}");
+    let pending_activity = id_of(&pending);
+
+    let by_pending = run.ok(run
+        .admin()
+        .args(["activity", "list", "--status", "pending"]));
+    assert_eq!(by_pending["command"], "activity.list");
+    assert_eq!(
+        ids(&by_pending),
+        [pending_activity.as_str()],
+        "{by_pending}"
+    );
+    assert_eq!(by_pending["data"]["nextCursor"], Value::Null);
+
+    let by_completed = run.ok(run
+        .admin()
+        .args(["activity", "list", "--status", "completed"]));
+    let completed = ids(&by_completed);
+    assert!(
+        completed.contains(&policy_activity.as_str()),
+        "{by_completed}"
+    );
+    assert!(
+        !completed.contains(&pending_activity.as_str()),
+        "{by_completed}"
+    );
+    for item in by_completed["data"]["items"].as_array().unwrap() {
+        assert_eq!(item["status"], "ACTIVITY_STATUS_COMPLETED", "{item}");
+        assert!(item["votes"].is_array(), "{item}");
+    }
+
+    let by_type = run.ok(run.admin().args([
+        "activity",
+        "list",
+        "--type",
+        policy_type,
+        "--status",
+        "completed",
+    ]));
+    assert_eq!(ids(&by_type), [policy_activity.as_str()], "{by_type}");
+
+    let recent = run.ok(run.admin().args(["activity", "list", "--since", "1h"]));
+    let recent_ids = ids(&recent);
+    assert!(recent_ids.contains(&pending_activity.as_str()), "{recent}");
+    assert!(recent_ids.contains(&policy_activity.as_str()), "{recent}");
+    assert_eq!(recent["data"]["nextCursor"], Value::Null);
+    assert_eq!(
+        recent_ids,
+        ids(&run.ok(run.admin().args(["activity", "list"])))
+    );
+
+    let recent_pending = run.ok(run
+        .admin()
+        .args(["activity", "list", "--since", "1h", "--status", "pending"]));
+    assert_eq!(ids(&recent_pending), [pending_activity.as_str()]);
+    let recent_policies =
+        run.ok(run
+            .admin()
+            .args(["activity", "list", "--since", "1h", "--type", policy_type]));
+    assert_eq!(ids(&recent_policies), [policy_activity.as_str()]);
+
+    let capped = run.ok(run
+        .admin()
+        .args(["activity", "list", "--since", "1h", "--limit", "1"]));
+    assert_eq!(ids(&capped), [recent_ids[0]], "{capped}");
+    assert_eq!(capped["data"]["nextCursor"], recent_ids[0]);
+    let resumed = run.ok(run.admin().args([
+        "activity",
+        "list",
+        "--since",
+        "1h",
+        "--cursor",
+        recent_ids[0],
+    ]));
+    assert_eq!(ids(&resumed), recent_ids[1..], "{resumed}");
+}
+
+fn ids(record: &Value) -> Vec<&str> {
+    record["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect()
+}
+
 fn votes(record: &Value) -> Vec<(&str, &str)> {
     record["data"]["activity"]["votes"]
         .as_array()

@@ -11,6 +11,8 @@ Follow [authentication](./authentication.md) first.
 
 ```bash
 tk user list
+# Keep only the users carrying a tag, named by tag name or tag id.
+tk user list --tag agents
 tk user get USER_ID
 tk user create --input-json '{"users": [{
   "userName": "agent",
@@ -73,7 +75,15 @@ Updates use `policyEffect`, `policyCondition`, `policyConsensus`, and
 ## API keys
 
 ```bash
+# Exactly one owner selector: this user's keys, or every user's keys.
 tk api-key list --user-id USER_ID
+tk api-key list --all-users
+# One expiry mode at a time. Keys whose expiresAt is at most 7 days ahead, including already-expired keys.
+tk api-key list --user-id USER_ID --expiring-within 7d
+# Keys whose expiresAt has passed.
+tk api-key list --all-users --expired
+# Keys with no expiry.
+tk api-key list --user-id USER_ID --long-lived
 tk api-key register --input-json '{
   "userId": "USER_ID",
   "apiKeys": [{"apiKeyName": "ci", "publicKey": "02…", "curveType": "API_KEY_CURVE_P256"}]

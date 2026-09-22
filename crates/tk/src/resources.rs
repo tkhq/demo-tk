@@ -1,16 +1,18 @@
 use std::{
+    convert::Infallible,
     fs,
     io::{self, Read},
     path::PathBuf,
+    str::FromStr,
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Map, Value, from_slice, to_value};
 use turnkey_api_key_stamper::TurnkeyP256ApiKey;
 use turnkey_client::generated::{
-    external::data::v1::ApiKey,
+    external::data::v1::{ApiKey, Tag},
     immutable::{activity::v1 as intent, common::v1 as common},
     services::coordinator::public::v1 as query,
 };
@@ -19,13 +21,17 @@ use uuid::Uuid;
 use crate::{
     auth::{ResolvedAuth, build_turnkey_client},
     errors::{ActivityError, ActivityErrorKind, InvalidInput, Malformed, MissingResource},
-    operations::{OperationOutput, query as query_api, submit_activity},
+    operations::{OperationOutput, query as query_api, submit_activity, unix_now},
     sessions::{duration::ExpiresIn, public_key::CompressedPublicKey},
 };
 
 #[derive(Debug, Subcommand)]
 pub enum UserCommand {
-    List,
+    List {
+        /// Keep only users carrying this tag, given as a tag id or an exact tag name.
+        #[arg(long, value_name = "NAME_OR_ID")]
+        tag: Option<TagSelector>,
+    },
     Get {
         id: Uuid,
     },
@@ -78,12 +84,26 @@ pub enum PolicyCommand {
     },
 }
 
+#[derive(Debug, Clone)]
+pub enum TagSelector {
+    Id(Uuid),
+    Name(String),
+}
+
+impl FromStr for TagSelector {
+    type Err = Infallible;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Ok(text
+            .parse::<Uuid>()
+            .map_or_else(|_| Self::Name(text.to_owned()), Self::Id))
+    }
+}
+
 #[derive(Debug, Subcommand)]
 pub enum ApiKeyCommand {
-    List {
-        #[arg(long)]
-        user_id: Option<Uuid>,
-    },
+    /// List API keys for one user or for every user, optionally by expiry.
+    List(ApiKeyListArgs),
     /// Register public keys using `CreateApiKeysIntentV2` parameters.
     Register(BodyArgs),
     Delete {
@@ -100,6 +120,37 @@ pub enum ApiKeyCommand {
 pub struct BodyArgs {
     #[command(flatten)]
     body: BodySource,
+}
+
+#[derive(Debug, Args)]
+#[command(group(ArgGroup::new("owner").required(true).args(["user_id", "all_users"])))]
+#[command(group(ArgGroup::new("expiry").args(["expiring_within", "expired", "long_lived"])))]
+pub struct ApiKeyListArgs {
+    /// List the keys of this user.
+    #[arg(long)]
+    user_id: Option<Uuid>,
+    /// List the keys of every user in the organization, read from the users listing.
+    #[arg(long)]
+    all_users: bool,
+    /// Keep only keys whose expiry is at most this far ahead, such as 2h or 7d.
+    #[arg(long, value_name = "DURATION")]
+    expiring_within: Option<ExpiresIn>,
+    /// Keep only keys whose expiry has passed.
+    #[arg(long)]
+    expired: bool,
+    /// Keep only keys that never expire.
+    #[arg(long)]
+    long_lived: bool,
+}
+
+pub enum KeyOwner {
+    User(Uuid),
+    AllUsers,
+}
+
+pub enum ExpiryFilter {
+    ExpiresBy(u64),
+    LongLived,
 }
 
 #[derive(Debug, Args)]
@@ -189,13 +240,18 @@ pub enum PreparedResource {
 }
 
 pub enum Query {
-    Users,
+    Users {
+        tag: Option<TagSelector>,
+    },
     User(Uuid),
     Tags,
     Policies,
     Policy(Uuid),
     Evaluations(Uuid),
-    ApiKeys(Option<Uuid>),
+    ApiKeys {
+        owner: KeyOwner,
+        expiry: Option<ExpiryFilter>,
+    },
 }
 
 pub enum Mutation {
@@ -327,7 +383,7 @@ fn reject_dropped_fields(input: &Value, normalized: &Value, path: &str) -> Resul
 impl UserCommand {
     pub fn prepare(self) -> Result<PreparedResource> {
         Ok(match self {
-            UserCommand::List => PreparedResource::Query(Query::Users),
+            UserCommand::List { tag } => PreparedResource::Query(Query::Users { tag }),
             UserCommand::Get { id } => PreparedResource::Query(Query::User(id)),
             UserCommand::Create(CreateUserArgs {
                 body,
@@ -480,7 +536,29 @@ impl PolicyCommand {
 impl ApiKeyCommand {
     pub fn prepare(self) -> Result<PreparedResource> {
         Ok(match self {
-            ApiKeyCommand::List { user_id } => PreparedResource::Query(Query::ApiKeys(user_id)),
+            ApiKeyCommand::List(ApiKeyListArgs {
+                user_id,
+                all_users: _,
+                expiring_within,
+                expired,
+                long_lived,
+            }) => {
+                let owner = match user_id {
+                    Some(id) => KeyOwner::User(id),
+                    None => KeyOwner::AllUsers,
+                };
+                let expiry = match (expiring_within, expired, long_lived) {
+                    (None, false, true) => Some(ExpiryFilter::LongLived),
+                    (None, false, false) => None,
+                    (within, _, _) => {
+                        let now_ms = u64::try_from(unix_now()?.as_millis())
+                            .context("current time exceeds the Unix millisecond range")?;
+                        let ahead_ms = within.map_or(0, |within| within.seconds() * 1000);
+                        Some(ExpiryFilter::ExpiresBy(now_ms.saturating_add(ahead_ms)))
+                    }
+                };
+                PreparedResource::Query(Query::ApiKeys { owner, expiry })
+            }
             ApiKeyCommand::Register(body) => {
                 let params: intent::CreateApiKeysIntentV2 = body.parse()?;
                 if params.api_keys.is_empty() {
@@ -553,8 +631,18 @@ impl Mutation {
                 tag_names,
             } => {
                 if !tag_names.is_empty() {
-                    user.user_tags
-                        .extend(resolve_tag_names(&auth, tag_names).await?);
+                    let listed: query::ListUserTagsResponse = query_api(
+                        "/public/v1/query/list_user_tags",
+                        &query::ListUserTagsRequest {
+                            organization_id: auth.org_id.to_string(),
+                        },
+                        &auth,
+                    )
+                    .await?;
+                    for name in tag_names {
+                        user.user_tags
+                            .push(resolve_tag_name(&listed.user_tags, name)?.to_owned());
+                    }
                 }
                 (
                     "user.create",
@@ -640,51 +728,60 @@ impl Mutation {
     }
 }
 
-async fn resolve_tag_names(auth: &ResolvedAuth, names: Vec<String>) -> Result<Vec<String>> {
-    let listed: query::ListUserTagsResponse = query_api(
-        "/public/v1/query/list_user_tags",
-        &query::ListUserTagsRequest {
-            organization_id: auth.org_id.to_string(),
-        },
-        auth,
-    )
-    .await?;
-    names
-        .into_iter()
-        .map(|name| {
-            let matches: Vec<&str> = listed
-                .user_tags
-                .iter()
-                .filter(|tag| tag.tag_name == name)
-                .map(|tag| tag.tag_id.as_str())
-                .collect();
-            match matches.as_slice() {
-                [] => Err(MissingResource::new("user tag", name).into()),
-                [one] => Ok((*one).to_owned()),
-                many => Err(InvalidInput(format!(
-                    "{} tags are named {name}; pass --tag with one of: {}",
-                    many.len(),
-                    many.join(", ")
-                ))
-                .into()),
-            }
-        })
-        .collect()
+fn resolve_tag_name(tags: &[Tag], name: String) -> Result<&str> {
+    let matches: Vec<&str> = tags
+        .iter()
+        .filter(|tag| tag.tag_name == name)
+        .map(|tag| tag.tag_id.as_str())
+        .collect();
+    match matches.as_slice() {
+        [] => Err(MissingResource::new("user tag", name).into()),
+        [one] => Ok(one),
+        many => Err(InvalidInput(format!(
+            "{} tags are named {name}; pass --tag with one of: {}",
+            many.len(),
+            many.join(", ")
+        ))
+        .into()),
+    }
 }
 
 impl Query {
     async fn run(self, auth: ResolvedAuth) -> Result<OperationOutput> {
-        let client = build_turnkey_client(auth.stamper, &auth.api_base_url)?;
         let organization_id = auth.org_id.to_string();
+        let client = build_turnkey_client(auth.stamper, &auth.api_base_url)?;
         let (command, data) = match self {
-            Self::Users => (
-                "user.list",
-                to_value(
-                    client
-                        .get_users(query::GetUsersRequest { organization_id })
-                        .await?,
-                )?,
-            ),
+            Self::Users { tag } => {
+                let tag_id = match tag {
+                    Some(selector) => {
+                        let listed = client
+                            .list_user_tags(query::ListUserTagsRequest {
+                                organization_id: organization_id.clone(),
+                            })
+                            .await?;
+                        Some(match selector {
+                            TagSelector::Name(name) => {
+                                resolve_tag_name(&listed.user_tags, name)?.to_owned()
+                            }
+                            TagSelector::Id(id) => {
+                                let id = id.to_string();
+                                if !listed.user_tags.iter().any(|tag| tag.tag_id == id) {
+                                    return Err(MissingResource::new("user tag", id).into());
+                                }
+                                id
+                            }
+                        })
+                    }
+                    None => None,
+                };
+                let query::GetUsersResponse { mut users } = client
+                    .get_users(query::GetUsersRequest { organization_id })
+                    .await?;
+                if let Some(tag_id) = &tag_id {
+                    users.retain(|user| user.user_tags.contains(tag_id));
+                }
+                ("user.list", to_value(query::GetUsersResponse { users })?)
+            }
             Self::User(id) => {
                 let response = client
                     .get_user(query::GetUserRequest {
@@ -736,22 +833,48 @@ impl Query {
                         .await?,
                 )?,
             ),
-            Self::ApiKeys(user_id) => {
-                let query::GetApiKeysResponse { api_keys } = client
-                    .get_api_keys(query::GetApiKeysRequest {
-                        organization_id,
-                        user_id: user_id.map(|id| id.to_string()),
-                    })
-                    .await?;
-                let keys = api_keys
-                    .into_iter()
-                    .map(|key| {
+            Self::ApiKeys { owner, expiry } => {
+                let owned: Vec<(String, Vec<ApiKey>)> = match owner {
+                    KeyOwner::User(user_id) => {
+                        let user_id = user_id.to_string();
+                        let query::GetApiKeysResponse { api_keys } = client
+                            .get_api_keys(query::GetApiKeysRequest {
+                                organization_id,
+                                user_id: Some(user_id.clone()),
+                            })
+                            .await?;
+                        vec![(user_id, api_keys)]
+                    }
+                    KeyOwner::AllUsers => {
+                        let query::GetUsersResponse { users } = client
+                            .get_users(query::GetUsersRequest { organization_id })
+                            .await?;
+                        users
+                            .into_iter()
+                            .map(|user| (user.user_id, user.api_keys))
+                            .collect()
+                    }
+                };
+                let mut keys = Vec::new();
+                for (user_id, api_keys) in owned {
+                    for key in api_keys {
                         let expires_at = expires_at_unix_ms(&key)?;
+                        let keep = match expiry {
+                            None => true,
+                            Some(ExpiryFilter::ExpiresBy(deadline)) => {
+                                expires_at.is_some_and(|at| at <= deadline)
+                            }
+                            Some(ExpiryFilter::LongLived) => expires_at.is_none(),
+                        };
+                        if !keep {
+                            continue;
+                        }
                         let mut key = to_value(key)?;
                         key["expiresAt"] = expires_at.map(|ms| ms.to_string()).into();
-                        Ok(key)
-                    })
-                    .collect::<Result<Vec<_>>>()?;
+                        key["userId"] = user_id.as_str().into();
+                        keys.push(key);
+                    }
+                }
                 (
                     "api-key.list",
                     Value::Object(Map::from_iter([("apiKeys".to_owned(), Value::Array(keys))])),
@@ -823,6 +946,31 @@ mod tests {
             vec!["user", "delete"],
             vec!["policy", "delete"],
             vec!["policy", "list", "--cursor", "invented"],
+            vec!["api-key", "list", "--all-users", "--expiring-within", "2w"],
+            vec!["api-key", "list"],
+            vec!["api-key", "list", "--user-id", "not-a-uuid"],
+            vec![
+                "api-key",
+                "list",
+                "--user-id",
+                "8d4b1e7a-0c6d-4d1a-9d3e-6b0f1c2d3e4f",
+                "--all-users",
+            ],
+            vec![
+                "api-key",
+                "list",
+                "--all-users",
+                "--expired",
+                "--long-lived",
+            ],
+            vec![
+                "api-key",
+                "list",
+                "--all-users",
+                "--expiring-within",
+                "2h",
+                "--expired",
+            ],
             vec![
                 "policy",
                 "create",

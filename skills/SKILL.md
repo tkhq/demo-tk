@@ -9,7 +9,9 @@ description: Set up and operate Turnkey agent authorization with the tk CLI: roo
 P-256 API credentials, users and tags, policies, Secrets, expiring session
 keys, SSH keys served by an agent, and OpenPGP signing. An agent here is any
 principal that acts without a person watching: an LLM agent, a service, a
-cron job, a CI runner. These workflows set one up and operate it.
+cron job, a CI runner. These workflows set one up and operate it. The `tk`
+binary carries this package: `tk skills install --into DIR` writes it as
+`DIR/turnkey-tk`.
 
 Read [cli-convention.md](references/cli-convention.md) once per task. It
 defines the JSON record every command prints, how pending work is resumed,

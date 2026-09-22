@@ -9,6 +9,7 @@ use std::fs::File;
 use std::io::{self, IsTerminal, Read};
 use std::mem::take;
 use std::path::Path;
+use turnkey_client::generated::SecretMetadata;
 use turnkey_client::generated::immutable::models::v1::KeyValue;
 use turnkey_enclave_encrypt::QuorumPublicKey;
 use uuid::Uuid;
@@ -113,6 +114,39 @@ impl From<UniqueKeyValues> for BTreeMap<String, String> {
             .into_iter()
             .map(|KeyValue { key, value }| (key, value))
             .collect()
+    }
+}
+
+pub struct Selector {
+    properties: UniqueKeyValues,
+    name_prefix: Option<String>,
+}
+
+impl Selector {
+    pub(crate) fn new(properties: UniqueKeyValues, name_prefix: Option<String>) -> Self {
+        Self {
+            properties,
+            name_prefix,
+        }
+    }
+
+    pub(crate) fn matches(&self, secret: &SecretMetadata) -> bool {
+        let SecretMetadata {
+            secret_id: _,
+            name,
+            static_properties,
+            created_at_unix_ms: _,
+        } = secret;
+        let prefixed = self
+            .name_prefix
+            .as_deref()
+            .is_none_or(|prefix| name.as_deref().is_some_and(|name| name.starts_with(prefix)));
+        prefixed
+            && self.properties.0.iter().all(|KeyValue { key, value }| {
+                static_properties
+                    .iter()
+                    .any(|property| property.key == *key && property.value == *value)
+            })
     }
 }
 
@@ -235,6 +269,18 @@ mod tests {
             parse_key_value("env").unwrap_err(),
             "expected KEY=VALUE with a non-empty KEY"
         );
+    }
+
+    #[test]
+    fn selector_prefix_never_matches_an_unnamed_secret() {
+        let unnamed = SecretMetadata {
+            secret_id: Uuid::new_v4().to_string(),
+            name: None,
+            static_properties: Vec::new(),
+            created_at_unix_ms: 0,
+        };
+        assert!(Selector::new(UniqueKeyValues::empty(), None).matches(&unnamed));
+        assert!(!Selector::new(UniqueKeyValues::empty(), Some("svc/".into())).matches(&unnamed));
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use crate::run::{AGENT_TAG, HUMAN_TAG, Run, allow_once, tag_consensus};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::fs::{self, File};
 use std::time::{Duration, SystemTime};
 use uuid::Uuid;
@@ -452,6 +452,95 @@ DB_URL='postgres://u:p@h/db?x=1 y'
                 .args(["secret", "env", "--name-prefix", &run.name("absent/")]),
         );
     assert_eq!(nothing["code"], "invalid_input", "{nothing}");
+}
+
+#[test]
+#[ignore]
+fn secret_list_filters_by_property_and_name_prefix() {
+    let run = Run::new();
+    let svc = run.name("svc");
+    let other = run.name("other");
+    let api_token = format!("{svc}/API_TOKEN");
+    let db_url = format!("{svc}/DB_URL");
+    let api_token_id = run.import_secret_from_file(&api_token, "unilateral", "tok-1");
+    let db_url_id = run.import_secret_from_file(&db_url, "unilateral", "postgres://h/db");
+    let other_id = run.import_secret_from_file(&format!("{other}/TOKEN"), "approval", "tok-2");
+
+    let field = |record: &Value, field: &str| -> Vec<String> {
+        let mut values: Vec<String> = record["data"]["secrets"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry[field].as_str().unwrap().to_owned())
+            .collect();
+        values.sort();
+        values
+    };
+    let mut svc_names = vec![api_token, db_url];
+    svc_names.sort();
+    let mut svc_ids = vec![api_token_id, db_url_id];
+    svc_ids.sort();
+
+    let by_prefix =
+        run.ok(run
+            .admin()
+            .args(["secret", "list", "--name-prefix", &format!("{svc}/")]));
+    assert_eq!(by_prefix["command"], "secret.list");
+    assert_eq!(by_prefix["data"]["nextCursor"], json!(null));
+    assert_eq!(field(&by_prefix, "name"), svc_names, "{by_prefix}");
+    assert_eq!(field(&by_prefix, "secretId"), svc_ids, "{by_prefix}");
+
+    let both = run.ok(run.admin().args([
+        "secret",
+        "list",
+        "--property",
+        "consensus=unilateral",
+        "--name-prefix",
+        &format!("{svc}/"),
+    ]));
+    assert_eq!(field(&both, "name"), svc_names, "{both}");
+
+    let approval = run.ok(run
+        .admin()
+        .args(["secret", "list", "--property", "consensus=approval"]));
+    assert_eq!(field(&approval, "secretId"), [other_id], "{approval}");
+
+    let none = run.ok(run.admin().args([
+        "secret",
+        "list",
+        "--property",
+        "consensus=none",
+        "--name-prefix",
+        &format!("{svc}/"),
+    ]));
+    assert_eq!(none["data"], json!({"secrets": [], "nextCursor": null}));
+
+    let capped = run.ok(run.admin().args([
+        "secret",
+        "list",
+        "--limit",
+        "1",
+        "--name-prefix",
+        &format!("{svc}/"),
+    ]));
+    let listed = field(&capped, "secretId");
+    assert_eq!(listed.len(), 1, "{capped}");
+    assert!(svc_ids.contains(&listed[0]), "{capped}");
+    assert_eq!(capped["data"]["nextCursor"], listed[0], "{capped}");
+
+    let resumed = run.ok(run.admin().args([
+        "secret",
+        "list",
+        "--cursor",
+        &listed[0],
+        "--name-prefix",
+        &format!("{svc}/"),
+    ]));
+    assert_eq!(resumed["data"]["nextCursor"], json!(null), "{resumed}");
+    let mut walked = listed;
+    walked.extend(field(&resumed, "secretId"));
+    walked.sort();
+    assert_eq!(walked, svc_ids, "{resumed}");
 }
 
 #[test]
