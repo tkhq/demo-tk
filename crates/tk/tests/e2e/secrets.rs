@@ -154,13 +154,11 @@ fn an_export_denied_by_policy_writes_no_recovery_key() {
         &secret_id,
     );
 
-    let denied = run.err(
+    let denied = run.err_unauthorized(
         run.as_user(&unauthorized)
             .args(["secret", "export", "--name", &name]),
     );
     assert_eq!(denied["reason"], "command_error", "{denied}");
-    assert_eq!(denied["code"], "unauthorized", "{denied}");
-    assert_eq!(denied["httpStatus"], 403, "{denied}");
     assert!(denied.get("data").is_none(), "{denied}");
     assert!(
         !state.exists(),
@@ -275,10 +273,7 @@ fn secret_export_with_consensus_finishes_by_rerunning_the_command() {
     assert!(state.exists(), "the retry keeps its own recovery key");
 
     // The retry is a complete export in its own right: approved, it delivers.
-    run.ok(run
-        .as_user(&approver)
-        .args(["activity", "approve", &fresh_activity]));
-    run.wait(&fresh_activity);
+    run.approve_and_wait(&approver, &fresh_activity);
     let retried = run.ok(run
         .as_user(&submitter)
         .args(["secret", "export", "--name", &name]));
@@ -351,10 +346,7 @@ fn a_pending_export_belongs_to_the_credential_that_started_it() {
         second_activity
     );
 
-    run.ok(run
-        .as_user(&approver)
-        .args(["activity", "approve", &first_activity]));
-    run.wait(&first_activity);
+    run.approve_and_wait(&approver, &first_activity);
     let delivered = run.ok(run
         .as_user(&owner)
         .args(["secret", "export", "--name", &name]));
@@ -506,48 +498,20 @@ fn managing_secrets_env_and_rotation() {
     let human_tag = run.create_tag(HUMAN_TAG);
     let (agent_id, agent) = run.create_tagged_user("agent", AGENT_TAG);
     let (_, human) = run.create_tagged_user("human", HUMAN_TAG);
-    run.create_policy_from_flags(
-        &run.name("agents-export-unilateral"),
-        "allow",
-        &tag_consensus(&agent_tag),
-        "activity.type == 'ACTIVITY_TYPE_EXPORT_SECRETS' && secret.static_properties['consensus'] == 'unilateral'",
-    );
-    run.create_policy_from_flags(
-        &run.name("agents-export-with-approval"),
-        "allow",
-        &allow_once(&agent_tag, &human_tag),
-        "activity.type == 'ACTIVITY_TYPE_EXPORT_SECRETS' && secret.static_properties['consensus'] == 'approval'",
-    );
-    run.create_policy_from_flags(
-        &run.name("agents-no-credentials"),
-        "deny",
-        &tag_consensus(&agent_tag),
-        "activity.resource == 'CREDENTIAL'",
-    );
+    run.allow_agent_export(&tag_consensus(&agent_tag), "unilateral");
+    run.allow_agent_export(&allow_once(&agent_tag, &human_tag), "approval");
+    run.deny_agent_credentials(&agent_tag);
 
     let prefix = run.name("service");
-    let import = |var: &str, level: &str, value: &str| {
-        let file = run.home().join(format!("{var}.txt"));
-        fs::write(&file, value).unwrap();
-        let imported = run.submit(
-            run.admin()
-                .args([
-                    "secret",
-                    "import",
-                    &format!("{prefix}/{var}"),
-                    "--property",
-                    &format!("consensus={level}"),
-                    "--from-file",
-                ])
-                .arg(&file),
-            "secret.import",
-        );
-        assert_eq!(imported["data"]["name"], format!("{prefix}/{var}"));
-        imported["data"]["secretId"].as_str().unwrap().to_string()
-    };
-    let token_id = import("API_TOKEN", "unilateral", "tok-1");
-    import("DB_URL", "unilateral", "postgres://u:p@h/db");
-    let deploy_id = import("DEPLOY_KEY", "approval", "deploy-1");
+    let token_id =
+        run.import_secret_from_file(&format!("{prefix}/API_TOKEN"), "unilateral", "tok-1");
+    run.import_secret_from_file(
+        &format!("{prefix}/DB_URL"),
+        "unilateral",
+        "postgres://u:p@h/db",
+    );
+    let deploy_id =
+        run.import_secret_from_file(&format!("{prefix}/DEPLOY_KEY"), "approval", "deploy-1");
 
     let listed = run.ok(run
         .as_user(&agent)
@@ -586,8 +550,7 @@ fn managing_secrets_env_and_rotation() {
     let activity = pending[0]["activityId"].as_str().unwrap().to_string();
     assert!(gated.get("data").is_none(), "{gated}");
 
-    run.ok(run.as_user(&human).args(["activity", "approve", &activity]));
-    run.wait(&activity);
+    run.approve_and_wait(&human, &activity);
     let complete = run.ok(run.as_user(&agent).args(env_args));
     assert_eq!(
         complete["data"]["env"],
@@ -598,24 +561,7 @@ fn managing_secrets_env_and_rotation() {
         })
     );
 
-    let escape = run.err(
-        run.as_user(&agent).args([
-            "api-key",
-            "register",
-            "--input-json",
-            &json!({
-                "userId": agent_id,
-                "apiKeys": [{
-                    "apiKeyName": "escape",
-                    "publicKey": hex::encode(run.key().compressed_public_key()),
-                    "curveType": "API_KEY_CURVE_P256",
-                }],
-            })
-            .to_string(),
-        ]),
-    );
-    assert_eq!(escape["code"], "unauthorized", "{escape}");
-    assert_eq!(escape["httpStatus"], 403, "{escape}");
+    run.assert_api_key_register_denied(&mut run.as_user(&agent), &agent_id);
 
     let deleted = run.submit(
         run.admin()
@@ -623,7 +569,8 @@ fn managing_secrets_env_and_rotation() {
         "secret.delete",
     );
     assert_eq!(deleted["data"]["secretId"], token_id);
-    let rotated_id = import("API_TOKEN", "unilateral", "tok-2");
+    let rotated_id =
+        run.import_secret_from_file(&format!("{prefix}/API_TOKEN"), "unilateral", "tok-2");
     assert_ne!(rotated_id, token_id);
     let rotated = run.ok(run
         .as_user(&agent)

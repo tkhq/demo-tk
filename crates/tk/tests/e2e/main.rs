@@ -25,6 +25,7 @@ mod run;
 mod activities;
 mod api_keys;
 mod gpg;
+mod gpg_agent;
 mod identity;
 mod policies;
 mod request;

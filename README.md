@@ -20,7 +20,9 @@ bootstrapping my Turnkey organization at https://app.turnkey.com.
 ```
 
 The skills in [skills/](./skills/SKILL.md) cover bootstrapping an
-organization, managing identities, policies, activities, and secrets.
+organization, managing identities, policies, activities, and secrets,
+provisioning long-lived and session agents, SSH, Git signing, inspecting
+agents, and deploying tk beside an agent.
 
 ## Manual installation
 
@@ -40,6 +42,7 @@ curl --proto '=https' --tlsv1.2 -LsSf https://raw.githubusercontent.com/tkhq/tk/
 - [SSH](./docs/ssh-agent.md): registered keys and the SSH agent
 - [Git signing](./docs/git-signing.md)
 - [GPG signing](./docs/gpg-signing.md)
+- [Command reference](./docs/commands.md): every command and flag, generated from the parser
 
 ## Contact us
 

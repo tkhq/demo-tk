@@ -333,16 +333,18 @@ fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
-fn home() -> Result<PathBuf> {
-    env("HOME").map(PathBuf::from).context("HOME is required")
+pub(crate) fn config_dir() -> Option<PathBuf> {
+    env("HOME").map(|home| PathBuf::from(home).join(".config/turnkey"))
 }
 
 fn registry_path() -> Result<PathBuf> {
-    Ok(home()?.join(".config/turnkey/tk.config.toml"))
+    Ok(config_dir()
+        .context("HOME is required")?
+        .join("tk.config.toml"))
 }
 
 pub(crate) fn state_dir() -> Result<PathBuf> {
-    Ok(home()?.join(".config/turnkey/tk"))
+    Ok(config_dir().context("HOME is required")?.join("tk"))
 }
 
 async fn sweep_stale(dir: &Path, max_age: Duration) -> io::Result<usize> {

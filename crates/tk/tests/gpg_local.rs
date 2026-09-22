@@ -5,9 +5,12 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs;
-use std::io::Error;
+use std::io::{Error, Read, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::os::unix::net::UnixListener;
+use std::path::{Path, PathBuf};
+use std::process::Output;
+use std::thread;
 
 use assert_cmd::Command;
 use serde_json::{Value, json};
@@ -18,11 +21,12 @@ use wiremock::{
     matchers::{method, path},
 };
 
-const SCRUBBED: [&str; 9] = [
+const SCRUBBED: [&str; 10] = [
     "HOME",
     "TK_PROFILE",
     "TK_NON_INTERACTIVE",
     "TK_GPG_PROGRAM",
+    "TK_GPG_AGENT_SOCK",
     "TURNKEY_ORGANIZATION_ID",
     "TURNKEY_API_PUBLIC_KEY",
     "TURNKEY_API_PRIVATE_KEY",
@@ -63,6 +67,15 @@ const POINT: &str = concat!(
     "4fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5",
 );
 const FINGERPRINT: &str = "13FFC7DF20CD6ABFCAED58992D007ACDCD30CCA6";
+const OTHER_FINGERPRINT: &str = "FEDCBA9876543210FEDCBA9876543210FEDCBA98";
+const BROKER_SIGNATURE: &str = r#"-----BEGIN PGP SIGNATURE-----
+
+wjcEABMIAB0FgmVT8QEWIQQT/8ffIM1qv8rtWJktAHrNzTDMpgAKCRAtAHrNzTDMphISAAEBAAIC
+=0Ren
+-----END PGP SIGNATURE-----
+"#;
+
+const REQUEST_HEADER_LEN: usize = 12;
 
 /// The page size `tk gpg` asks the account listing for. A page this long is
 /// what makes the client ask for another one.
@@ -97,6 +110,12 @@ fn tk_with_bundle(home: &TempDir, org: &str) -> Command {
     cmd
 }
 
+fn tk_with_agent(home: &TempDir, socket: &Path) -> Command {
+    let mut cmd = tk(home);
+    cmd.env("TK_GPG_AGENT_SOCK", socket);
+    cmd
+}
+
 fn registry_with_keys(home: &TempDir, fingerprints: &[&str]) -> PathBuf {
     let dir = home.path().join(".config/turnkey");
     fs::create_dir_all(&dir).expect("the config dir should be creatable");
@@ -127,12 +146,167 @@ fn assert_shim_failure(build: impl FnOnce(&TempDir) -> (Command, String)) {
     let home = tempdir().expect("temp home should be creatable");
     let (mut cmd, expected) = build(&home);
     let output = cmd.output().expect("tk should run");
+    assert_shim_failed(output, &expected);
+}
 
+fn assert_shim_failed(output: Output, expected: &str) {
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert_eq!(output.stdout, b"", "the signature stream must stay clean");
     assert_eq!(
         String::from_utf8(output.stderr).expect("the shim reports the failure"),
         expected
+    );
+}
+
+fn sign_request(key: &str, payload: &[u8]) -> Vec<u8> {
+    let mut request = b"TKGP\x01\x01".to_vec();
+    request.extend_from_slice(&(key.len() as u16).to_be_bytes());
+    request.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    request.extend_from_slice(key.as_bytes());
+    request.extend_from_slice(payload);
+    request
+}
+
+fn broker_response(fingerprint: &str, created: u32, signature: &str) -> Vec<u8> {
+    let mut response = b"TKGP\x01\x00".to_vec();
+    response.extend_from_slice(&created.to_be_bytes());
+    response.extend_from_slice(&(signature.len() as u32).to_be_bytes());
+    response.extend_from_slice(fingerprint.as_bytes());
+    response.extend_from_slice(signature.as_bytes());
+    response
+}
+
+fn fake_agent() -> (TempDir, PathBuf, UnixListener) {
+    let home = tempdir().expect("temp home should be creatable");
+    let socket = home.path().join("agent.sock");
+    let listener = UnixListener::bind(&socket).expect("the fake agent should bind");
+    (home, socket, listener)
+}
+
+fn fake_agent_server(listener: UnixListener, response: Vec<u8>) -> thread::JoinHandle<Vec<u8>> {
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("the shim should connect");
+        let mut request = vec![0; REQUEST_HEADER_LEN];
+        stream
+            .read_exact(&mut request)
+            .expect("the request header should be readable");
+        let key_len = u16::from_be_bytes([request[6], request[7]]);
+        let payload_len = u32::from_be_bytes([request[8], request[9], request[10], request[11]]);
+        let mut body = vec![0; usize::from(key_len) + payload_len as usize];
+        stream
+            .read_exact(&mut body)
+            .expect("the request body should be readable");
+        request.extend(body);
+        stream
+            .write_all(&response)
+            .expect("the response should be writable");
+        request
+    })
+}
+
+#[test]
+fn the_git_shim_signs_through_the_agent_without_local_credentials() {
+    let (home, socket, listener) = fake_agent();
+    let payload = br#"tree 0123456789abcdef
+"#;
+    let response = broker_response(FINGERPRINT, 1_700_000_001, BROKER_SIGNATURE);
+    let server = fake_agent_server(listener, response);
+
+    let output = tk_with_agent(&home, &socket)
+        .args(["--status-fd=2", "-bsau", FINGERPRINT])
+        .write_stdin(payload)
+        .output()
+        .expect("tk should run");
+
+    let request = server.join().expect("the fake agent should finish");
+    assert_eq!(request, sign_request(FINGERPRINT, payload));
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(output.stdout, BROKER_SIGNATURE.as_bytes());
+    assert_eq!(
+        String::from_utf8(output.stderr).expect("status output should be UTF-8"),
+        format!(
+            r#"[GNUPG:] BEGIN_SIGNING
+[GNUPG:] SIG_CREATED D 19 8 00 1700000001 {FINGERPRINT}
+"#
+        )
+    );
+    assert!(!home.path().join(".config/turnkey/tk.config.toml").exists());
+}
+
+#[test]
+fn an_agent_signature_for_a_different_key_never_reaches_git_output() {
+    let (home, socket, listener) = fake_agent();
+    let response = broker_response(OTHER_FINGERPRINT, 1_700_000_001, BROKER_SIGNATURE);
+    let server = fake_agent_server(listener, response);
+
+    let output = tk_with_agent(&home, &socket)
+        .args(["--status-fd=2", "-bsau", FINGERPRINT])
+        .output()
+        .expect("tk should run");
+
+    let request = server.join().expect("the fake agent should finish");
+    assert_eq!(request, sign_request(FINGERPRINT, b""));
+    assert_shim_failed(
+        output,
+        r#"error: read the OpenPGP agent response: OpenPGP agent signature metadata does not match its response frame
+"#,
+    );
+}
+
+#[test]
+fn an_unavailable_agent_never_falls_back_to_local_credentials() {
+    let home = tempdir().expect("temp home should be creatable");
+    let socket = home.path().join("missing-agent.sock");
+    let output = tk_with_agent(&home, &socket)
+        .args(SIGN_ARGS)
+        .write_stdin("payload")
+        .output()
+        .expect("tk should run");
+
+    assert_shim_failed(
+        output,
+        &format!(
+            r#"error: connect to OpenPGP agent socket {}: No such file or directory (os error 2)
+"#,
+            socket.display()
+        ),
+    );
+}
+
+#[test]
+fn oversized_agent_input_is_rejected_without_signature_output() {
+    let (home, socket, _listener) = fake_agent();
+    let output = tk_with_agent(&home, &socket)
+        .args(SIGN_ARGS)
+        .write_stdin(vec![b'x'; 1024 * 1024 + 1])
+        .output()
+        .expect("tk should run");
+
+    assert_shim_failed(
+        output,
+        r#"error: write the OpenPGP agent request: payload is too large
+"#,
+    );
+}
+
+#[test]
+fn a_truncated_agent_response_never_reaches_git_output() {
+    let (home, socket, listener) = fake_agent();
+    let truncated_response = b"TKGP\x01\x00".to_vec();
+    let server = fake_agent_server(listener, truncated_response);
+
+    let output = tk_with_agent(&home, &socket)
+        .args(SIGN_ARGS)
+        .write_stdin("payload")
+        .output()
+        .expect("tk should run");
+
+    let request = server.join().expect("the fake agent should finish");
+    assert_eq!(request, sign_request("", b"payload"));
+    assert_shim_failed(
+        output,
+        r#"error: read the OpenPGP agent response: early eof
+"#,
     );
 }
 

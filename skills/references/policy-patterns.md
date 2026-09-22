@@ -73,6 +73,7 @@ tk --profile admin --message-format json policy create --name agents-export-with
 Without this DENY an agent holding a seven-day key could register itself a
 permanent one, because self-targeted credential changes default-allow.
 
+<!-- shared: agents-no-credentials -->
 <!-- example: policy-patterns.agents-no-credentials -->
 ```sh
 tk --profile admin --message-format json policy create --name agents-no-credentials --effect deny \
@@ -86,6 +87,7 @@ A provisioner may do one thing: register expiring keys on an explicit set of
 agent users. The target set is the one place an id list is unavoidable,
 because the target's tags are not policy-visible.
 
+<!-- shared: provisioners-mint-agent-keys -->
 <!-- example: policy-patterns.provisioners-mint-agent-keys -->
 ```sh
 tk --profile admin --message-format json policy create --name provisioners-mint-agent-keys --effect allow \
@@ -104,6 +106,7 @@ tk --profile admin --message-format json policy create --name provisioners-nothi
   --condition "activity.type != 'ACTIVITY_TYPE_CREATE_API_KEYS_V2'"
 ```
 
+<!-- shared: provisioners-no-self-keys -->
 <!-- example: policy-patterns.provisioners-no-self-keys -->
 ```sh
 tk --profile admin --message-format json policy create --name provisioners-no-self-keys --effect deny \
@@ -125,6 +128,7 @@ wallet account signed through `tk gpg`. Scope by the exact resource. These
 are allow-always by necessity: Git and SSH wait for a signature synchronously,
 so an approval-gated variant needs a different design.
 
+<!-- shared: agents-sign-ssh -->
 <!-- example: policy-patterns.agents-sign-ssh -->
 ```sh
 tk --profile admin --message-format json policy create --name agents-sign-ssh --effect allow \
@@ -132,10 +136,23 @@ tk --profile admin --message-format json policy create --name agents-sign-ssh --
   --condition "activity.type == 'ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2' && private_key.id == 'PRIVATE_KEY_ID'"
 ```
 
+<!-- shared: agents-sign-gpg -->
 <!-- example: policy-patterns.agents-sign-gpg -->
 ```sh
 tk --profile admin --message-format json policy create --name agents-sign-gpg --effect allow \
   --consensus "approvers.any(user, user.tags.contains('AGENT_TAG'))" \
+  --condition "activity.type == 'ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2' && wallet.id == 'WALLET_ID'"
+```
+
+A signing broker that serves the key over a socket to a credential-free
+application is its own principal: a `broker` tag with this ALLOW and the
+credential DENY above, no export ALLOW, and no `agent` ALLOW on its wallet.
+
+<!-- shared: brokers-sign-gpg -->
+<!-- example: policy-patterns.brokers-sign-gpg -->
+```sh
+tk --profile admin --message-format json policy create --name brokers-sign-gpg --effect allow \
+  --consensus "approvers.any(user, user.tags.contains('BROKER_TAG'))" \
   --condition "activity.type == 'ACTIVITY_TYPE_SIGN_RAW_PAYLOAD_V2' && wallet.id == 'WALLET_ID'"
 ```
 

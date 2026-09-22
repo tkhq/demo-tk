@@ -10,6 +10,7 @@ Follow [authentication](./authentication.md) first.
 tk wallet create --input-json '{"walletName": "gpg", "accounts": []}'
 
 # Create and register a signing key under that wallet, keeping its fingerprint.
+# Rerunning with a user ID the wallet already holds registers that key.
 FINGERPRINT=$(tk gpg keys create --wallet-id WALLET_ID --user-id "Your Name <you@example.com>" \
   --message-format json | jq -r .fingerprint)
 
@@ -43,3 +44,27 @@ export TK_PROFILE=agent
 # Name the GnuPG binary used for verification if gpg isn't on PATH.
 export TK_GPG_PROGRAM=/path/to/gpg
 ```
+
+## GPG agent
+
+```bash
+# Serve one registered key from the container that holds the Turnkey credential.
+tk gpg agent serve --key FINGERPRINT \
+  --socket /run/tk-gpg-agent/agent.sock --socket-mode 660
+
+# In the credential-free container, point tk at the mounted socket.
+export TK_GPG_AGENT_SOCK=/run/tk-gpg-agent/agent.sock
+
+# Verify locally with GnuPG.
+gpg --verify release.tar.gz.asc release.tar.gz
+```
+
+With `TK_GPG_AGENT_SOCK` set, a missing or unavailable agent fails
+signing with no local fallback; verification never reaches the agent, because
+GnuPG checks the signature against the imported public key.
+
+## Skills
+
+- [deploying-signing-broker](../skills/deploying-signing-broker/SKILL.md): isolate the signing credential and session provisioner in separate containers.
+- [signing-git-commits](../skills/signing-git-commits/SKILL.md): creating, registering, and using the key for commits as a non-root agent.
+- [sidecar-patterns](../skills/sidecar-patterns/SKILL.md): where the broker runs, restarts after renewal, and hands its socket to the agent.

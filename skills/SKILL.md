@@ -1,6 +1,6 @@
 ---
 name: turnkey-tk
-description: Set up and operate Turnkey agent authorization with the tk CLI: root and agent identities, tags, policies, approvals, and secrets. Use for any request about who may act on Turnkey and how an unattended agent authenticates; not for wallets, chain signing, or broadcasting.
+description: Set up and operate Turnkey agent authorization with the tk CLI: root and agent identities, tags, policies, approvals, secrets, expiring session keys, SSH, Git signing, inspection, and deployment beside an agent. Use for any request about who may act on Turnkey and how an unattended agent authenticates, signs, or renews its credential; not for wallets, chain signing, or broadcasting.
 ---
 
 # Turnkey `tk` workflows
@@ -25,11 +25,16 @@ request selects and the references that workflow names.
 | "write a policy", "why was this denied", "require approval for X", "update the consensus" | [managing-policies](managing-policies/SKILL.md) |
 | "approve this", "what is pending", "wait for the activity", "reject it", "who voted" | [monitoring-activities](monitoring-activities/SKILL.md) |
 | "store a secret", "give the agent its environment", "finish a pending export", "rotate a secret" | [managing-secrets](managing-secrets/SKILL.md) |
+| "provision an agent", "give the agent a permanent key", "fence what the agent can export", "two agents must not read each other's secrets" | [provisioning-agent-identity](provisioning-agent-identity/SKILL.md) |
+| "session keys", "expiring credential", "renew the agent's key", "set up a provisioner", "the session expired" | [provisioning-session-agent](provisioning-session-agent/SKILL.md) |
+| "git over SSH", "ssh with a Turnkey key", "start the ssh agent", "ssh stopped working after rotation" | [using-ssh](using-ssh/SKILL.md) |
+| "sign commits", "configure git signing", "gpg.program", "verify-commit fails" | [signing-git-commits](signing-git-commits/SKILL.md) |
+| "GPG signing broker container", "credential-free Git signing", "provisioner container", "mount the signing socket" | [deploying-signing-broker](deploying-signing-broker/SKILL.md) |
+| "what is pending", "which agents have keys", "when does this key expire", "who approved", "audit the agents" | [inspecting-agents](inspecting-agents/SKILL.md) |
+| "deploy the agent", "run tk in a container", "renewal loop", "sidecar", "where does the key live" | [sidecar-patterns](sidecar-patterns/SKILL.md) |
 
-Provisioning an agent user with its policies, session keys minted by a
-provisioner, SSH, Git signing, and deployment patterns are documented in
-[docs/](../docs/) until their workflows land here. Wallets, chain signing, and
-broadcasting belong to the wallet package, not this one.
+Identity provisioning here means a Turnkey user and its credentials; wallets,
+chain signing, and broadcasting belong to the wallet package, not this one.
 
 A continuation ("the export is pending", "renew the key", "the activity was
 rejected") loads the workflow that owns the step, not the bootstrap. Loading a
@@ -44,6 +49,7 @@ with the user's authorization.
 | [policy-language.md](references/policy-language.md) | writing or debugging a `condition` or `consensus` |
 | [policy-patterns.md](references/policy-patterns.md) | applying the tag- and property-based policy set |
 | [approval-models.md](references/approval-models.md) | choosing how much a human approves |
+| [commands.md](../docs/commands.md) | checking an exact flag; generated from the parser |
 
 ## Vocabulary
 

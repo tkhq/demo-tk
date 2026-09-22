@@ -73,6 +73,10 @@ sign, gpg, ssh):
 SSH agent:
   tk ssh agent start
   export SSH_AUTH_SOCK=~/.config/turnkey/ssh-agent.sock
+
+Skills:
+  Download https://github.com/tkhq/tk/tree/main/skills into your agent's skills
+  directory and start from its SKILL.md.
 "#;
 
 #[derive(Debug, Parser)]

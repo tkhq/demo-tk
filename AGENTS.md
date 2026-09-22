@@ -39,12 +39,18 @@ Default guidance for coding-agent runs in this repository.
   so it doesn't collide with `anyhow::Result`, and `std::fmt::Write` may need
   `as _` where `std::io::Write` is also in scope. Merge imports from the same
   module where practical.
-- Write a comment — `///`, `//!`, or `//` — only where `missing_docs` demands
-  one or where the code holds an invariant a reader cannot recover from it.
-  Reaching for a comment to explain *why* means reshaping the code so the
-  reason is the code. Clap field and variant docs are `--help` text and stay.
+- A comment exists in exactly three cases. A `///` or `//!` that the
+  `missing_docs` lint demands. A `///` on a Clap command, field, or variant,
+  which renders as `--help` text. A `//` stating an invariant a reader cannot
+  recover from the code in front of them: an ordering the types do not
+  enforce, a constraint imposed by an external protocol or API, or a platform
+  quirk the code works around. Every other comment is deleted: one that
+  restates the code, narrates the change, labels a block, hedges, or explains
+  a *why* the code could carry. Reaching for that last kind means reshaping
+  the code so the reason is the code. The `//` above an `#[allow(...)]` is an
+  invariant of the third kind and names the specific false positive.
 - A module's doc is a `//!` in its own root file, never a `///` on the `mod`.
-  Public docs are one line.
+  Public docs are one line and state the contract, not the mechanism.
 - In doc comments and module docs, describe responsibilities, contracts, and
   relationships without naming specific source files or inventorying current
   consumers. File paths and call-site lists go stale when code moves. When a
@@ -233,3 +239,42 @@ Default guidance for coding-agent runs in this repository.
   `<!-- example: <id> -->` line directly above it; `## Verified by` maps those
   ids to `module::test` names in the e2e suite. A block that must stay
   identical across files carries `<!-- shared: <id> -->`.
+
+## Docs
+
+- An area doc, `docs/<area>.md`, addresses someone running `tk`. It opens with
+  a title naming the area, one or two sentences saying what the commands do,
+  the line `Follow [authentication](./authentication.md) first.` when they need
+  a credential, and then its first fence or diagram. Repository process, such
+  as releasing, CI jobs, and the test suite, lives in `docs/releasing.md` or
+  this file, never in an area doc.
+- A section that shows commands opens with its fence, or with one sentence
+  ending in a colon that introduces the fence. Explain a command with a `#`
+  comment on the line above it inside the fence, written as a sentence. Prose
+  after the fence is one paragraph and covers only what the command line
+  cannot show: exit status and error code, what a record field means, what is
+  written or deleted and where, and what never happens. A paragraph that
+  sequences commands is a procedure and belongs in `skills/`.
+- State each fact once across `docs/`. Do not repeat in prose what a fence
+  comment already says. A behavior another doc owns, such as the pending
+  activity flow, gets one sentence and a relative link, `see
+  [activities](./activities.md)`, not a restatement.
+- Do not inventory flags or record fields. `docs/commands.md` is generated for
+  flags; a doc shows a flag only inside a command that demonstrates its
+  behavior, and names a record field only where the reader acts on it. Show
+  one command per behavior; when several subcommands take the same flags, show
+  one and say so in its comment rather than listing each.
+- Name statuses and error codes by their machine value in backticks, such as
+  `pending` and `api_error`, and subcommands by their bare name in backticks,
+  such as `wait` and `create`.
+- Placeholders the reader substitutes are `UPPER_SNAKE`, such as `WALLET_ID`,
+  `ACTIVITY_ID`, and `ORG_UUID`. A value whose shape matters keeps a literal
+  example instead, such as `you@example.com`, `0x…`, and `7d`. Profile names in
+  examples are `admin`, `agent`, `approver`, and `provisioner`. Shell fences in
+  an area doc are `bash`.
+- The `## Skills` footer is the last section of a doc at least one skill uses,
+  with one line per skill in the form
+  `- [name](../skills/name/SKILL.md): what that skill does with this doc's commands.`
+  Two docs never carry the same footer sentence.
+- `docs/commands.md` is generated; never edit it by hand. Change the command
+  and regenerate with `TK_UPDATE_COMMANDS_MD=1 cargo test -p tk commands_reference`.
