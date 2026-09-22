@@ -19,12 +19,18 @@ use uuid::Uuid;
 
 #[derive(Debug, Subcommand)]
 pub enum WalletCommand {
+    /// List wallets.
     List,
+    /// Fetch one wallet by ID.
     Get {
+        /// Wallet ID.
         id: Uuid,
     },
+    /// Create a wallet from a `CreateWalletIntent` parameters object.
     Create(BodyArgs),
+    /// Update a wallet from an `UpdateWalletIntent` parameters object.
     Update(BodyArgs),
+    /// Manage wallet accounts.
     Account {
         #[command(subcommand)]
         command: AccountCommand,
@@ -35,14 +41,17 @@ pub enum WalletCommand {
 pub enum AccountCommand {
     /// List accounts in one wallet, one page at a time.
     List {
+        /// Wallet holding the accounts.
         #[arg(long)]
         wallet_id: Uuid,
+        /// Page size.
         #[arg(long, default_value_t = 50, value_parser = clap::value_parser!(u32).range(1..=100))]
         limit: u32,
-        /// API after cursor (wallet account ID); pagination is explicitly caller-driven.
+        /// Wallet account ID to continue after.
         #[arg(long)]
         cursor: Option<String>,
     },
+    /// Create accounts from a `CreateWalletAccountsIntent` parameters object.
     Create(BodyArgs),
 }
 

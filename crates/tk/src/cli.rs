@@ -26,48 +26,19 @@ use tracing::debug;
 
 const LONG_ABOUT: &str = r#"CLI for Turnkey backed auth workflows.
 
-Interactive behavior:
-    By default, commands may prompt when stdin is a TTY. Use --non-interactive
-    or set TK_NON_INTERACTIVE=true to disable prompts and fail fast instead.
+Commands may prompt when stdin is a TTY. Pass --non-interactive or set
+TK_NON_INTERACTIVE=true to fail fast instead.
 
-Output format:
-    --message-format human (default) prints human-readable text. Use
-    --message-format json to emit machine-readable output instead: one JSON
-    object per line (newline-delimited JSON), each with a "reason" field
-    identifying the message, including errors. JSON mode implies
-    --non-interactive, so commands never prompt and fail fast on missing input.
+--message-format json prints one JSON record per line, each with a `reason`
+field; error records also carry a `code`. JSON output never prompts.
 
-    Errors emit reason "command_error" (or "missing_required_input") plus a
-    "code" classifying the failure, an optional numeric "httpStatus", optional
-    "details" for recovery (such as the last observed activity identity), and
-    a "message" carrying the full error chain. The "code" taxonomy is:
-        missing_required_input  a required value was absent (non-interactive)
-        usage_error             bad flags/args (argument parsing failed)
-        invalid_input           semantic validation failed in the command
-        unauthorized            HTTP 401/403
-        not_found               HTTP 404, or a resource that resolved to empty
-        api_error               other non-success HTTP status, or a failed,
-                                rejected, or unexpected activity
-        approval_required       the activity needs more approvals
-        network_error           connect/timeout/DNS: request never reached the
-                                server
-        network_uncertain       transport failure where delivery cannot be
-                                ruled out; reconcile before retrying a mutation
-        submission_unknown      a mutation was sent but its outcome could not
-                                be observed; inspect before resubmitting
-        wait_timeout            activity wait ran out of time; resume with the
-                                same ID
-        session_expiring        the profile's credential ends within the
-                                --warn-before window; request a new session
-        command_error           fallback for everything else
-    Exit codes: 0 success, 1 runtime error, 2 usage error."#;
+Record shapes and error codes: `tk skills show --name references/cli-convention`.
+Exit codes: 0 success, 1 runtime error, 2 usage error."#;
 
-const AFTER_HELP: &str = r#"API identity (login, whoami, request, activity, user, policy, api-key, wallet,
-sign, gpg, ssh):
-  Resolved from exactly one source: the TURNKEY_ORGANIZATION_ID,
-  TURNKEY_API_PUBLIC_KEY, TURNKEY_API_PRIVATE_KEY environment bundle; else the
-  profile named by --profile or TK_PROFILE (an explicit profile always wins);
-  else the registry's active profile.
+const AFTER_HELP: &str = r#"API identity:
+  Without --profile, resolved from exactly one source: the
+  TURNKEY_ORGANIZATION_ID, TURNKEY_API_PUBLIC_KEY, TURNKEY_API_PRIVATE_KEY
+  environment bundle; else the registry's active profile.
   The profile registry lives at ~/.config/turnkey/tk.config.toml.
   TURNKEY_API_BASE_URL overrides the API endpoint.
 
@@ -331,12 +302,12 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum Operation {
-    /// Inspect, approve, reject, and wait for activities.
+    /// Manage activities and their approvals.
     Activity {
         #[command(subcommand)]
         command: ActivityCommand,
     },
-    /// SSH related commands.
+    /// Manage SSH keys held in Turnkey and serve them to SSH and Git.
     Ssh {
         #[command(subcommand)]
         command: SshCommand,
@@ -368,29 +339,29 @@ enum Operation {
         #[command(subcommand)]
         command: SignCommand,
     },
-    /// List, import, and export Secrets.
+    /// Manage encrypted secrets.
     Secret {
         #[command(subcommand)]
         command: SecretCommand,
     },
-    /// Short-lived credentials for agent profiles.
+    /// Rotate short-lived credentials for agent profiles.
     Session {
         #[command(subcommand)]
         command: SessionCommand,
     },
-    /// Create PGP keys as wallet accounts, register them, export them, and sign with them.
+    /// Sign with PGP keys backed by wallet accounts.
     Gpg {
         #[command(subcommand)]
         command: GpgCommand,
     },
-    /// List, show, and install the turnkey-tk agent skills embedded in this binary.
+    /// Serve the embedded turnkey-tk agent skills.
     Skills {
         #[command(subcommand)]
         command: SkillsCommand,
     },
     /// Verify a saved profile with Turnkey and select it.
     Login(LoginArgs),
-    /// Verify the selected identity remotely.
+    /// Verify the selected identity with Turnkey.
     Whoami,
     /// Manage API authentication.
     Auth {
@@ -438,42 +409,9 @@ impl Operation {
     }
 }
 
-// Checks that help documents every error code.
 #[cfg(test)]
-#[allow(clippy::disallowed_types)]
 mod tests {
     use super::*;
-    use crate::errors::ErrorCode;
-    use std::collections::BTreeSet;
-    use strum::IntoEnumIterator;
-
-    #[test]
-    fn help_documents_every_error_code() {
-        let declared: BTreeSet<String> = ErrorCode::iter()
-            .map(|code| {
-                serde_json::to_value(code)
-                    .expect("every error code must serialize")
-                    .as_str()
-                    .expect("every error code must serialize as a JSON string")
-                    .to_string()
-            })
-            .collect();
-        let documented: BTreeSet<String> = LONG_ABOUT
-            .lines()
-            .filter_map(|line| {
-                let rest = line.strip_prefix("        ")?;
-                if rest.starts_with(' ') {
-                    return None;
-                }
-                let (token, _) = rest.split_once("  ")?;
-                token
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c == '_')
-                    .then(|| token.to_string())
-            })
-            .collect();
-        assert_eq!(documented, declared);
-    }
 
     #[test]
     fn json_output_request_is_detected_in_both_spellings() {

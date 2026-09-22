@@ -3,6 +3,8 @@
 Sign and send an exact request body to any Turnkey endpoint. The bytes are
 sent as given, with no rewriting and no retries.
 
+Follow [authentication](./authentication.md) first.
+
 ```bash
 BODY='{"organizationId": "ORG_UUID"}'
 tk request --path /public/v1/query/whoami --body "$BODY"

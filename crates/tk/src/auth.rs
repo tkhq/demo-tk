@@ -39,8 +39,9 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Args)]
 pub struct AuthOptions {
-    /// Named profile to use from the identity registry. An explicit profile
-    /// always wins over ambient TURNKEY_* environment credentials.
+    /// Named profile to use from the identity registry.
+    ///
+    /// An explicit profile always wins over the TURNKEY_* environment bundle.
     #[arg(long, global = true, env = "TK_PROFILE")]
     profile: Option<String>,
     /// Override the organization the command operates on.
@@ -73,7 +74,9 @@ pub enum AuthCommand {
     Status,
     /// Verify the selected identity with Turnkey.
     Whoami,
-    /// Clear the saved profile selection; keep credentials and remote access intact.
+    /// Clear the saved profile selection.
+    ///
+    /// Credential files and registered API keys are kept.
     Logout,
 }
 
@@ -90,8 +93,7 @@ pub struct LoginArgs {
 
 #[derive(Debug, Subcommand)]
 pub enum ProfileCommand {
-    /// Save a new profile without contacting Turnkey, generating a credential
-    /// when none is given.
+    /// Save a new profile without contacting Turnkey.
     Create(CreateArgs),
     #[command(flatten)]
     Saved(SavedProfileCommand),
@@ -102,18 +104,27 @@ pub enum SavedProfileCommand {
     /// List saved profiles and the active selection.
     List,
     /// Show one saved profile.
-    Show { name: String },
+    Show {
+        /// Saved profile to show.
+        name: String,
+    },
     /// Select a saved profile after checking its credential file.
-    Use { name: String },
-    /// Remove a profile entry; credential files are kept.
-    Delete { name: String },
-    /// Update the organization, API endpoint, or credential file of a saved
-    /// profile.
+    Use {
+        /// Saved profile to select.
+        name: String,
+    },
+    /// Remove a saved profile.
+    ///
+    /// Credential files are kept.
+    Delete {
+        /// Saved profile to remove.
+        name: String,
+    },
+    /// Update a saved profile.
     Set {
         /// Saved profile to update.
         name: String,
-        /// Existing P256 credential JSON file to use from now on; it is read
-        /// before the registry changes.
+        /// Existing P256 credential JSON file to use from now on.
         #[arg(long)]
         api_key_file: Option<PathBuf>,
     },
@@ -128,9 +139,8 @@ pub struct CreateArgs {
         value_parser = NonEmptyStringValueParser::new()
     )]
     name: String,
-    /// Existing P256 credential JSON file (public key, private key, curve).
-    /// Without it, a fresh credential is written under
-    /// ~/.config/turnkey/tk/api-keys/.
+    /// Existing P256 credential JSON file to use; without it, a fresh
+    /// credential is written under ~/.config/turnkey/tk/api-keys/.
     #[arg(long)]
     api_key_file: Option<PathBuf>,
 }

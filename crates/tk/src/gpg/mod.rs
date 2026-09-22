@@ -38,23 +38,31 @@ pub enum GpgCommand {
         #[command(subcommand)]
         command: KeysCommand,
     },
-    /// Write an armored detached signature for a file. With no file, tk signs stdin.
+    /// Write an armored detached signature for a file.
     Sign(SignArgs),
-    /// Serve registered `OpenPGP` keys over a Unix socket.
+    /// Serve registered PGP keys over a Unix socket.
     Agent(agent::Args),
 }
 
 #[derive(Debug, Subcommand)]
 pub enum KeysCommand {
-    /// Create a signing account for a user ID, or reuse the wallet's key with that user ID, and register it.
+    /// Create a PGP signing key for a user ID as wallet accounts and register it.
+    ///
+    /// A wallet never gets a second key for the same user ID; the existing
+    /// one is registered instead.
     Create(CreateArgs),
-    /// Register an existing key from a wallet so git and tk gpg sign can use it.
+    /// Register an existing PGP key from a wallet.
     Add(AddArgs),
-    /// Forget a registered key. The wallet accounts are kept.
+    /// Forget a registered key.
+    ///
+    /// The wallet accounts are kept.
     Remove(RemoveArgs),
-    /// List the registered keys, or the PGP keys in one wallet.
+    /// List the registered keys.
     List(ListArgs),
-    /// Print the armored public key block of a registered key. Signs the self certification with the key, so a policy that requires approval blocks it.
+    /// Print the armored public key block of a registered key.
+    ///
+    /// The self-certification is signed with the key, so a policy that
+    /// requires approval blocks the export.
     Export(KeyArgs),
 }
 
@@ -73,15 +81,16 @@ pub struct AddArgs {
     /// Wallet holding the key.
     #[arg(long)]
     wallet_id: Uuid,
-    /// Fingerprint or long key ID of the key. Needed when the wallet holds
-    /// more than one.
+    /// Fingerprint or long key ID of the key.
+    ///
+    /// Required when the wallet holds more than one PGP key.
     #[arg(long)]
     key: Option<SigningKeyName>,
 }
 
 #[derive(Debug, Args)]
 pub struct RemoveArgs {
-    /// Fingerprint or long key ID of the registered key.
+    /// Fingerprint or long key ID of the key.
     key: SigningKeyName,
 }
 
@@ -94,7 +103,7 @@ pub struct ListArgs {
 
 #[derive(Debug, Args)]
 pub struct KeyArgs {
-    /// Fingerprint or long key ID of a registered key.
+    /// Fingerprint or long key ID of the key.
     #[arg(long)]
     key: Option<SigningKeyName>,
 }
@@ -103,7 +112,7 @@ pub struct KeyArgs {
 pub struct SignArgs {
     #[command(flatten)]
     key: KeyArgs,
-    /// File to sign. With no file, tk reads stdin.
+    /// File to sign; with no file, tk reads stdin.
     file: Option<PathBuf>,
     /// Write the armored signature here instead of stdout.
     #[arg(long)]

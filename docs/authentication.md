@@ -41,9 +41,9 @@ credentials under `~/.config/turnkey/tk/api-keys/`.
 Skip the registry and pass the credential through the environment:
 
 ```bash
-export TURNKEY_ORGANIZATION_ID="<org-id>"
-export TURNKEY_API_PUBLIC_KEY="<api-public-key>"
-export TURNKEY_API_PRIVATE_KEY="<api-private-key>"
+export TURNKEY_ORGANIZATION_ID=ORG_UUID
+export TURNKEY_API_PUBLIC_KEY=API_PUBLIC_KEY
+export TURNKEY_API_PRIVATE_KEY=API_PRIVATE_KEY
 export TURNKEY_API_BASE_URL="https://api.turnkey.com" # optional
 tk whoami
 ```

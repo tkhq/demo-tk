@@ -2,6 +2,8 @@
 
 Every mutation is an activity. Inspect, vote on, and wait for them.
 
+Follow [authentication](./authentication.md) first.
+
 ```bash
 tk activity list --limit 50
 tk activity list --limit 50 --cursor ACTIVITY_ID

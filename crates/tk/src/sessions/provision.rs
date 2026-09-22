@@ -28,14 +28,14 @@ pub struct ProvisionArgs {
     /// User who will own the new expiring API key.
     #[arg(long)]
     user_id: Uuid,
-    /// Compressed P256 public key (hex) printed by tk session request.
+    /// Compressed P256 public key (hex) printed by `tk session request`.
     #[arg(long)]
     public_key: CompressedPublicKey,
     /// Lifetime of the key, for example 7d, 48h, 30m.
     #[arg(long, default_value = "7d")]
     expires_in: ExpiresIn,
-    /// API key label; defaults to session-EXPIRES_IN-UNIX_SECONDS, for example
-    /// session-7d-1789000000.
+    /// Label of the API key; defaults to `session-EXPIRES_IN-UNIX_SECONDS`, for
+    /// example session-7d-1789000000.
     #[arg(long)]
     label: Option<String>,
 }

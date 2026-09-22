@@ -14,8 +14,9 @@ use zeroize::{Zeroize, Zeroizing};
 #[derive(Debug, Args)]
 pub struct GenerateArgs {
     /// New credential JSON path; defaults to a file named by the public key
-    /// under ~/.config/turnkey/tk/api-keys/. Existing files are never
-    /// overwritten.
+    /// under ~/.config/turnkey/tk/api-keys/.
+    ///
+    /// Existing files are never overwritten.
     #[arg(long)]
     output: Option<PathBuf>,
 }

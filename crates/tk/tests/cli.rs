@@ -44,7 +44,7 @@ fn cli_help_lists_registry_ssh_commands() {
         .assert()
         .success()
         .stdout(predicate::str::contains("--key <KEY>"))
-        .stdout(predicate::str::contains("--socket <path>"))
+        .stdout(predicate::str::contains("--socket <PATH>"))
         .stdout(predicate::str::contains("--socket-mode <SOCKET_MODE>"))
         .stdout(predicate::str::contains("foreground"));
 }
