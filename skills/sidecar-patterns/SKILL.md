@@ -5,12 +5,11 @@ description: Run tk beside an unattended agent so the agent process holds only w
 
 # Sidecar patterns
 
-Result: a deployment where the agent reads its secrets once at startup, a
-separate renewal loop keeps its expiring credential fresh, SSH goes through
-a socket, git signs commits through a broker's socket, and an operator
-hears about an expired credential from something other than the agent. Every
-`tk` step below is a command another workflow already documents; this
-workflow fixes where each one runs and what state it keeps.
+Result: a deployment where the agent reads its secrets once at startup, a separate
+renewal loop keeps the agent's expiring credential fresh, SSH goes through a socket,
+git signs commits through a broker's socket, and an operator hears about an expired
+credential from something other than the agent. Every `tk` step in this workflow is a
+command another workflow already documents; this workflow fixes where each one runs and what state it keeps.
 
 ## Reference
 
@@ -22,16 +21,18 @@ workflow fixes where each one runs and what state it keeps.
 
 ## Rules
 
-- One OS user and one `HOME` per principal. The agent's profile and the
-  provisioner's profile never share a credential directory, a boundary (a
-  container, VM, sandbox, or OS user), or a process tree. Host root can still
-  read both; no such boundary is a secrecy boundary against the host.
-- The renewal loop is the single writer of the agent's profile. Its
-  agent-side half (status, request, activate) runs as the agent's OS user
-  on a timer outside the agent's own control loop; its provisioner-side half
-  (provision) runs as the provisioner. Both hold a lock while they run,
-  update their state file atomically, and persist the agent's user id so
-  renewal works after the current key has expired.
+- Separation means one boundary (a container, VM, sandbox, or OS user), one
+  `HOME`, one process tree, and one set of mounts per principal; the agent's
+  profile and the provisioner's profile never share a credential directory.
+  Separate OS users are the default. Under the shared-uid socket model the
+  application and broker share a numeric uid and nothing else, and the
+  application mounts the broker's runtime directory read-only. Host root can
+  still read every boundary; no boundary is a secrecy boundary against the host.
+- The renewal loop is the single writer of the agent's profile. Its agent-side
+  half (status, request, activate) runs as the agent's OS user on a timer outside
+  the agent's own control loop; its provisioner-side half (provision) runs as the
+  provisioner. Both hold a lock while they run, update their state file atomically,
+  and persist the agent's user id so renewal works after the current key has expired.
 - Secrets go from `tk secret env` into the authorized process's environment.
   No file the agent can read holds a plaintext value; no transcript does.
 - The public-key handoff from agent to provisioner is not secret but must
@@ -39,33 +40,30 @@ workflow fixes where each one runs and what state it keeps.
   organization, agent user id, and lifetime before it mints anything.
 - The SSH socket is signing authority. Bind it under the agent's `HOME`,
   mode-restricted to that OS user, and restart the daemon after every rotation.
-- The OpenPGP socket is signing authority too. The broker alone holds the
-  signing profile, serves one fingerprint, and restarts after its own
-  rotation; the agent's boundary gets the socket and the public key, never
-  the broker's profile or registry, and the agent's own profile has no
-  signing policy on that wallet.
+- The OpenPGP socket is signing authority too. The broker alone holds the signing
+  profile, serves one fingerprint, and restarts after its own rotation. The agent's
+  boundary gets the socket and the public key, never the broker's profile or
+  registry, and the agent's own profile has no signing policy on that wallet.
 - Alert on expiry from the loop, not from the agent: an expired agent cannot.
 - A deployment that stages no provider secrets by hand still holds Turnkey
   credential files. Treat the host as secret-bearing.
 
 ## Instructions
 
-Inputs: the agent profile (`agent`) and its persisted user id
-(`AGENT_USER_ID`), the provisioner profile (`provisioner`) on the sidecar,
-the scope prefix (`service/`), the chosen approval cell, and the key
-lifetime and renewal lead time. Prerequisites: the agent and provisioner
-exist with their policies
-([provisioning-session-agent](../provisioning-session-agent/SKILL.md)), and
-the secrets are imported ([managing-secrets](../managing-secrets/SKILL.md)).
+Inputs: the agent profile (`agent`) and its persisted user id (`AGENT_USER_ID`), the
+provisioner profile (`provisioner`) on the sidecar, the scope prefix (`service/`), the
+chosen approval cell, and the key lifetime and renewal lead time. Prerequisites: the
+agent and provisioner exist with their policies
+([provisioning-session-agent](../provisioning-session-agent/SKILL.md)), and the
+secrets are imported ([managing-secrets](../managing-secrets/SKILL.md)).
 
 1. **Lay out the principals.** Decide, and record, which OS user, `HOME`,
    and profile each of these runs as: the agent process, the renewal loop
    (its agent half as `agent`, its provisioner half as `provisioner`), the
-   SSH daemon (as `agent`), and the GPG broker (as `broker`). Install `tk`
-   inside the image or as a read-only host mount of the binary; check
-   with `tk --version` from each principal's shell before going further. A
-   missing binary at a bind-mount path becomes an empty directory, so check
-   the file type, not just the path.
+   SSH daemon (as `agent`), and the GPG broker (as `broker`). Install `tk` in
+   the image or as a read-only host mount and check `tk --version` from each
+   principal's shell; a missing binary at a bind-mount path becomes an empty
+   directory, so check the file type, not just the path.
 
 2. **Start the agent with its environment.** The agent's entrypoint runs,
    before the agent code starts:
@@ -82,10 +80,10 @@ the secrets are imported ([managing-secrets](../managing-secrets/SKILL.md)).
 
 3. **Run the renewal loop.** On a timer shorter than the lifetime minus the
    lead time, once per expiring principal: `agent` and `broker` each run it
-   as their own OS user with their own profile, state file, and lock. The
-   first, second, and fourth commands run as that principal with its `HOME`;
-   the third runs on the sidecar as the provisioner, reading the public key
-   and user id from the handoff:
+   as their own OS user with their own profile, state file, and lock. `status`,
+   `request`, and `activate` run as that principal with its `HOME`; `provision`
+   runs on the sidecar as the provisioner, reading the public key and user id
+   from the handoff:
 
    <!-- example: sidecar.renew -->
    ```sh
@@ -124,11 +122,11 @@ the secrets are imported ([managing-secrets](../managing-secrets/SKILL.md)).
    step 3 activates a new key. Registration is in [using-ssh](../using-ssh/SKILL.md).
 
 5. **Sign commits through the broker.** Run `gpg agent serve` as `broker` per
-   [deploying-signing-broker](../deploying-signing-broker/SKILL.md): one
-   `--key`, a `--socket-mode 660` socket in a runtime directory the agent
-   side mounts read-only, `TK_GPG_AGENT_SOCK` and the public key on the
-   agent side, and none of the broker's profile, registry, or credential
-   there. A missing socket fails signing closed.
+   [deploying-signing-broker](../deploying-signing-broker/SKILL.md). It serves one
+   `--key` on a socket in a runtime directory the agent side mounts read-only:
+   `--socket-mode 660` shared through the agent's supplemental group, or `600` under
+   the shared-uid model. The agent side gets `TK_GPG_AGENT_SOCK` and the public key,
+   and none of the broker's profile, registry, or credential. A missing socket fails signing closed.
 
 6. **Alert independently.** The loop, not the agent, raises an alert when
    `session status` reports `session_expiring` twice in a row, when a mint
@@ -136,15 +134,19 @@ the secrets are imported ([managing-secrets](../managing-secrets/SKILL.md)).
    `details.publicKey`, `details.expiresAt`, and the activity id. The
    alert path uses no Turnkey credential.
 
-7. **Gate the deployment.** Before the agent is left unattended, check by
-   hand: separate OS users and `HOME`s; the agent's `HOME` holds only its
-   own profile; the sidecar's holds only the provisioner's; the socket
-   directory is `0700` to the agent's user and the broker socket `0660` to
-   its group; the timer fires; a forced expiry (`--expires-in` shorter than
-   the tick) renews through the loop; the alert fires when the loop is
-   stopped; `git commit -S` on the agent side verifies with the broker
-   up and fails with it stopped; the process environment holds the secrets
-   and no file does.
+7. **Gate the deployment.** Before the agent is left unattended, check by hand:
+
+   | Check | Expect |
+   |---|---|
+   | separation | the model in force: separate OS users, or under the shared-uid model one uid for agent and broker with separate `HOME`s, process trees, and mounts |
+   | `HOME`s | the agent's holds only its own profile; the sidecar's holds only the provisioner's |
+   | SSH socket directory | `0700` to the agent's user |
+   | broker socket | its model: `0660` owned by the broker and the shared group, or `0600` owned by the shared uid |
+   | timer | fires |
+   | forced expiry (`--expires-in` shorter than the tick) | renews through the loop |
+   | loop stopped | the alert fires |
+   | `git commit -S` on the agent side | verifies with the broker up, fails with it stopped |
+   | secrets | in the process environment and in no file |
 
 8. **Hand off.** Report the principals table, the timer interval and lead
    time, the state file and lock paths, the socket path, the signing
@@ -152,12 +154,11 @@ the secrets are imported ([managing-secrets](../managing-secrets/SKILL.md)).
 
 ## Runtime examples
 
-These place steps, not requirements. Example: `systemd` timers run step 3 as
-one unit per renewed principal, `User=agent` and `User=broker`, for status,
-request, and activate, and one `User=provisioner` unit for provision. Example:
-a Docker Compose deployment gives the agent and the sidecar separate services
-and `HOME` volumes, sharing one only for the public handoff. Example: an LLM
-runtime hook runs step 2 as its secrets command.
+These place steps, not requirements. Example: `systemd` timers run step 3 as one unit
+per renewed principal, `User=agent` and `User=broker`, for status, request, and activate,
+and one `User=provisioner` unit for provision. Example: a Docker Compose deployment gives
+the agent and the sidecar separate services and `HOME` volumes, sharing one only for the
+public handoff. Example: an LLM runtime hook runs step 2 as its secrets command.
 
 ## Verified by
 
@@ -187,9 +188,8 @@ timers, mounts, or alert delivery.
 - `secret env` exits `1` with `approval_required` at boot: an
   approval-gated secret matched the prefix. Add `--property consensus=unilateral`
   or move that secret to an on-demand export.
-- Two ticks both requested keys: the loop passes `--replace` unconditionally;
-  without it the second `session request` fails `invalid_input` while one is
-  pending. Add a lock and drop the unconditional `--replace`.
+- Two ticks both requested keys: the loop passes `--replace` unconditionally.
+  Add a lock and drop `--replace`; without `--replace` the second `session request` fails `invalid_input` while one is pending.
 
 ## Related Skills
 

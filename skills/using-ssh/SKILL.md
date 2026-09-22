@@ -22,25 +22,30 @@ Inputs: the root profile (`admin`), the agent's profile (`agent`) and tag id
 ## Rules
 
 - Root creates the Turnkey private key once with `ssh keys create`, which
-  also registers it in root's own registry; the agent host registers the
+  also registers it in root's own registry. The agent host registers the
   same id with `ssh keys add`, which needs nothing but the id. The private
   key never leaves Turnkey and there is nothing to back up on the host.
 - The signing policy is allow-always, scoped by `private_key.id`
   (`agents-sign-ssh` in [policy-patterns.md](../references/policy-patterns.md)).
   SSH waits for the signature synchronously, so an approval-gated policy
   makes every connection fail, not wait.
-- Socket access is signing authority. The socket lives in the agent's own
-  home, is used by the agent's OS user alone, and is never shared or
-  forwarded to another user.
+- Socket access is signing authority. The socket lives in the principal's own
+  home and is never forwarded off the host; under the broker path it is
+  shared with the application alone, read-only, and nothing else crosses.
 - The daemon resolves its API credential once, at start. After the agent's
-  API key changes, stop and start it; a running daemon keeps stamping with
-  the old key until that key is revoked, then every signature fails.
+  API key changes, stop and start the daemon; a running daemon keeps signing
+  with the old key until that key is revoked, then every signature fails.
 - The registry is `~/.config/turnkey/tk.config.toml` under the `HOME` of the
   process that runs `ssh keys add` and `ssh agent start`. Pin `HOME` and
   `--profile` explicitly where the daemon runs; a service with a different
   home sees an empty registry.
 - Host-key verification stays on. `tk` replaces the client key, not the
   trust in the server.
+- When a signing broker holds signing for this deployment, do not create
+  `agents-sign-*` policies. Run this workflow as the broker principal instead:
+  the step 2 policy names `BROKER_TAG` in place of `AGENT_TAG`, step 4 runs
+  `tk ssh agent start --key SSH_FINGERPRINT` under the broker's `HOME`, and
+  the application receives only the socket, never the broker's profile.
 
 ## Instructions
 
@@ -130,7 +135,7 @@ Inputs: the root profile (`admin`), the agent's profile (`agent`) and tag id
    tk --profile agent --message-format json ssh agent start
    ```
 
-   `agent_stopped` then `agent_started`. Do this before the old key is
+   `agent_stopped` then `agent_started`. Restart before the old key is
    deleted; the old daemon signs until then and fails afterwards with no
    local symptom other than refused connections.
 
@@ -165,7 +170,7 @@ Inputs: the root profile (`admin`), the agent's profile (`agent`) and tag id
   scoped to a different `private_key.id` or a consensus that names the
   wrong tag. Do not start the daemon as root instead.
 - Signatures were refused right after the agent's API key changed: the
-  daemon still holds the old credential. Step 6.
+  daemon still holds the old credential. Run step 6.
 - `ssh keys add` exits `1` with `invalid_input` naming another curve: the
   id is an existing non-Ed25519 key. Create one with step 1.
 - The key is served but the server rejects it: the public key line is not

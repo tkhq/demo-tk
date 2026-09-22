@@ -107,18 +107,22 @@ runs on. There is no minting row here: the one key never expires.
    tk --profile agent --message-format json api-key list --user-id AGENT_USER_ID
    ```
 
-   Expected, in order: the unilateral export is `completed` with `data.out`;
-   the approval export is `pending` with `activity.id`, and stays pending
-   until a non-root `human-approver` votes, after which the rerun is
-   `completed`; the self-registration fails with `code: "unauthorized"` and
-   `httpStatus: 403`; the list shows exactly one key, its
-   `credential.publicKey` equal to `PUBLIC_KEY` and `expiresAt` `null`. Any
-   other outcome is a policy defect; do not proceed on it.
+   Expected, in order:
+
+   | Command | Expect |
+   |---|---|
+   | unilateral export | `completed` with `data.out` |
+   | approval export | `pending` with `activity.id`, and pending until a non-root `human-approver` votes |
+   | rerun after the approval | `completed` |
+   | self-registration | `code: "unauthorized"` and `httpStatus: 403` |
+   | key list | exactly one key, its `credential.publicKey` equal to `PUBLIC_KEY` and `expiresAt` `null` |
+
+   Any other outcome is a policy defect; do not proceed on it.
 
 6. **Isolate agents from each other**, when more than one exists. A shared
    `agent` tag gives every agent the same secrets. Give each boundary its
-   own tag and a `scope` property on its secrets, and write the export
-   policy per pair instead of the shared one:
+   own tag and a `scope` property on its secrets, and write one export
+   policy per tag-and-scope pair instead of the shared one:
 
    <!-- example: agent-identity.isolation -->
    ```sh
@@ -163,8 +167,11 @@ runs on. There is no minting row here: the one key never expires.
   approver is root, or the secret carries `consensus=unilateral`. Fix the
   property or the approver; root approval proves nothing.
 - The self-registration in step 5 returns `completed` or `pending`: the DENY
-  is missing or names the wrong tag. Delete the key it created with
-  `api-key delete` as root and create `agents-no-credentials`.
+  is missing or names the wrong tag. First create `agents-no-credentials` and
+  verify it by rerunning the self-registration. Only then list the agent's
+  keys with `tk --profile admin --message-format json api-key list --user-id AGENT_USER_ID`,
+  delete every unauthorized key with `api-key delete` as root, and rotate the
+  runtime credential. Deleting first leaves a window to register another key.
 - `secret env` fails with `approval_required`: the selection includes an
   `approval` secret. Startup paths add `--property consensus=unilateral`.
 - `secret env` fails with `unauthorized` 403: the prefix selected a secret

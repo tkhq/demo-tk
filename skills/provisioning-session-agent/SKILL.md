@@ -5,15 +5,14 @@ description: Provision or renew a non-root Turnkey agent's expiring API keys thr
 
 # Provisioning a session agent
 
-Result: a tagged non-root agent on expiring API keys, a tagged provisioner
-that may register keys on that agent and nothing else, one cell's policy set,
-and a renewal loop the agent host runs by itself. Pick the branch first:
-**first provisioning** runs steps 1 to 5; **renewal** runs step 5 only;
-**recovery** runs one branch of step 6. A renewal never repeats bootstrap,
-replaces a policy, or recreates the agent. Inputs: the root profile (`admin`),
-the `agent`, `provisioner`, and `human-approver` tags from bootstrapping, the
-cell chosen from [approval-models.md](../references/approval-models.md), the
-agent host, and the provisioner host.
+Result: a tagged non-root agent on expiring API keys, a tagged provisioner that
+may register keys on that agent and nothing else, one cell's policy set, and a
+renewal loop the agent host runs by itself. Pick the branch first: **first
+provisioning** runs steps 1 to 5; **renewal** runs step 5 only; **recovery** runs
+one branch of step 6. A renewal never repeats bootstrap, replaces a policy, or
+recreates the agent. Inputs: the root profile (`admin`), the `agent`,
+`provisioner`, and `human-approver` tags from bootstrapping, the cell chosen from
+[approval-models.md](../references/approval-models.md), the agent host, and the provisioner host.
 
 ## Reference
 
@@ -27,14 +26,14 @@ agent host, and the provisioner host.
 - Two principals, two credential stores: different users, different
   profiles, different homes. A provisioner that can read the agent's key
   file is the agent.
-- The agent generates every keypair. Only `data.publicKey` and
-  `data.userId` cross to the provisioner; not secret, but the handoff is
-  authenticated and integrity-checked, and the provisioner accepts a key
-  only for the organization, agent user id, and lifetime it expects.
-- Policy sees `activity.params.user_id` only: not the target's tags, not
-  `expirationSeconds`. The approver reads `data.userId`, `data.publicKey`,
-  and `data.expiresIn` from the `session provision` record; in the
-  unilateral-minting row the provisioner service pins both.
+- The agent generates every keypair. Only `data.publicKey` and `data.userId` cross to
+  the provisioner. Neither is secret, but the handoff is authenticated and integrity-checked,
+  and the provisioner accepts a key only for the organization, agent user id, and lifetime it expects.
+- Policy sees `activity.params.user_id` only: not the target's tags, not `expirationSeconds`.
+  The approver reads `data.userId`, `data.publicKey`, and `data.expiresIn` from the
+  `session provision` record; in the unilateral-minting row the provisioner service pins the
+  target user id and the lifetime itself. Every id in the mint ALLOW's `in [...]` list is resolved
+  with `user get` and shown before the policy is written; a root-quorum id there mints keys on root.
 - `session status` defaults to `--warn-before 48h`; pass a window shorter than the lifetime.
 - Deleting a local key file revokes nothing; `api-key delete` by root does.
 - Persist `AGENT_USER_ID`: after expiry `session request` reports `userId: null`.
@@ -72,10 +71,15 @@ agent host, and the provisioner host.
 
    Save its id as `PROVISIONER_USER_ID`. Apply the cell's set from
    [policy-patterns.md](../references/policy-patterns.md):
-   `provisioners-mint-agent-keys` pinned to `AGENT_USER_ID` (drop the
-   `HUMAN_APPROVER_TAG` clause in the unilateral-minting row),
-   `provisioners-nothing-else`, one `provisioners-no-self-keys` per
-   provisioner, `agents-no-credentials`, and the column's export policy.
+
+   | Policy | Shape |
+   |---|---|
+   | `provisioners-mint-agent-keys` | pinned to `AGENT_USER_ID`; drop the `HUMAN_APPROVER_TAG` clause in the unilateral-minting row |
+   | `provisioners-nothing-else` | as written |
+   | `provisioners-no-self-keys` | one per provisioner |
+   | `agents-no-credentials` | as written |
+   | the column's export policy | from the chosen cell |
+
    The two that carry ids:
 
    <!-- shared: provisioners-mint-agent-keys -->
@@ -94,8 +98,11 @@ agent host, and the provisioner host.
      --condition "activity.type == 'ACTIVITY_TYPE_CREATE_API_KEYS_V2' && activity.params.user_id == 'PROVISIONER_USER_ID'"
    ```
 
-   Adding an agent later edits the `in [...]` list; step 5 run by the real
-   users is the acceptance.
+   Adding an agent later edits the `in [...]` list. Before the edit, resolve every id in the
+   final list with `tk --profile admin --message-format json user get USER_ID`, confirm each is
+   the intended non-root user carrying `AGENT_TAG` (or `BROKER_TAG`), show the final target set,
+   and stop on any mismatch: a root-quorum user's id there lets the provisioner mint a key on root.
+   Step 5 run by the real users is the acceptance.
 
 4. **Log in as the agent.** Agent host; `data.identity.userId` must equal
    `AGENT_USER_ID`.
@@ -127,11 +134,10 @@ agent host, and the provisioner host.
    tk --profile provisioner --message-format json session provision --user-id AGENT_USER_ID --public-key PUBLIC_KEY --expires-in 7d
    ```
 
-   Human-minting rows: `status: "pending"`; the human checks `data.userId`,
-   `data.publicKey`, and `data.expiresIn`, then runs
-   `tk --profile approver --message-format json activity approve ACTIVITY_ID`;
-   the provisioner's rerun returns `completed` with `alreadyRegistered: true`.
-   Unilateral row: the first run completes with `data.apiKeyId`. Agent host:
+   Human-minting rows: `status: "pending"`; the human checks `data.userId`, `data.publicKey`,
+   and `data.expiresIn`, then runs `tk --profile approver --message-format json activity approve ACTIVITY_ID`;
+   the provisioner's rerun returns `completed` with `alreadyRegistered: true`. Unilateral
+   row: the first run completes with `data.apiKeyId`. Agent host:
 
    <!-- example: session.activate -->
    ```sh
@@ -139,24 +145,20 @@ agent host, and the provisioner host.
    tk --profile agent --message-format json whoami
    ```
 
-   `activate` verifies the new key with `whoami` before repointing the
-   profile and removes the previous file only if `tk` generated it
-   (`data.previousKeyFileRemoved`); the old key stays valid until it expires.
+   `activate` verifies the new key with `whoami` before repointing the profile and removes the
+   previous key file only if `tk` generated it (`data.previousKeyFileRemoved`); the old key stays valid until it expires.
 
 6. **Recover.** Pick the branch that matches the observed state.
-   - *Expired before renewal*: `whoami` fails `unauthorized`; `session
-     request` still succeeds but reports `userId: null`. Pass the persisted
-     `AGENT_USER_ID` to `session provision`. `activate` works as soon as the
-     key is registered, because it authenticates with the new key.
-   - *Rejected mint or stale request*: the agent's request stays pending
-     locally; after a rejection the provisioner's rerun finds no registered
-     key and submits a new activity for the same public key. Have the human
-     approve that one, or on the agent host run
-     `tk --message-format json session request --profile-name agent --replace`
-     to discard the keypair (its generated file is removed) and redo step 5.
-   - *Concurrent renewal*: one writer per profile. A second
-     `session request` while one is pending fails `invalid_input` naming
-     the pending public key; never `--replace` from a second process.
+   - *Expired before renewal*: `whoami` fails `unauthorized`; `session request` still succeeds
+     but reports `userId: null`. Pass the persisted `AGENT_USER_ID` to `session provision`.
+     `activate` works as soon as the key is registered, because `activate` authenticates with the new key.
+   - *Rejected mint or stale request*: the agent's request stays pending locally; after a
+     rejection the provisioner's rerun finds no registered key and submits a new activity for
+     the same public key. Have the human approve that activity, or on the agent host run
+     `tk --message-format json session request --profile-name agent --replace` to discard
+     the keypair (its generated file is removed) and redo step 5.
+   - *Concurrent renewal*: one writer per profile. A second `session request` while one is
+     pending fails `invalid_input` naming the pending public key; never `--replace` from a second process.
 
 7. **Hand off.** Report `AGENT_USER_ID`, `PROVISIONER_USER_ID`, the policy
    ids, `data.expiresAt`, any pending mint activity id, and the exact
@@ -188,9 +190,6 @@ agent host, and the provisioner host.
   provisioner for this target, or the self DENY fired. Inspect with
   `policy evaluations` when an activity id exists. Do not widen the
   condition to every user; do not use root.
-- `session provision` returns `pending`: expected in the human-minting
-  rows. Send `activity.id` plus the record's `userId`, `publicKey`, and
-  `expiresIn` to the approver; rerun after approval.
 
 ## Related Skills
 

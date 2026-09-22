@@ -1,6 +1,6 @@
 ---
 name: deploying-signing-broker
-description: Deploy a credential-free application beside a single-key tk GPG signing broker and a separate session provisioner, each in its own isolation boundary. Use when isolating OpenPGP Git signing so the application receives only a constrained Unix socket and public key, or when rotating the broker's expiring Turnkey credential; not for creating the signing key or choosing policies.
+description: Deploy a credential-free application beside a single-key, GPG-only tk signing broker and a separate session provisioner, each in its own isolation boundary. Use when isolating OpenPGP Git signing so the application receives only a constrained Unix socket and public key, or when rotating the broker's expiring Turnkey credential; not for creating the signing key or choosing policies.
 ---
 
 # Deploying a signing broker
@@ -8,6 +8,9 @@ description: Deploy a credential-free application beside a single-key tk GPG sig
 Result: three isolation boundaries with separate authority. The application requests
 signatures from one OpenPGP key through a Unix socket; the broker alone holds
 that key's profile; the provisioner renews the broker's key but cannot sign.
+This skill is GPG only. SSH through a broker runs [using-ssh](../using-ssh/SKILL.md)
+as the broker principal, with `BROKER_TAG` in place of `AGENT_TAG` in its signing
+policy.
 
 ## Reference
 
@@ -18,30 +21,31 @@ that key's profile; the provisioner renews the broker's key but cannot sign.
 
 ## Rules
 
-- Three principals, each in its own boundary (a container, VM, sandbox, or OS
-  user) with its own process tree: application, GPG broker, provisioner.
-  Never share one principal's `HOME` with another; publish no ports.
+- Three principals: application, GPG broker, provisioner. Separation means one
+  boundary (a container, VM, sandbox, or OS user), one `HOME`, one process tree,
+  and one set of mounts per principal. Separate OS users are the default; under
+  the shared-uid socket model the application and broker share a numeric uid and
+  nothing else, and the application mounts the runtime read-only. Publish no ports.
 - The broker is its own principal: tag `BROKER_TAG`, profile `broker`, one
   signing ALLOW scoped to `WALLET_ID`, one credential DENY, no export policy.
-- The application never receives the broker's profile, registry, or signing
-  credential. Its own profile, if it has one, has no signing policy on this
-  wallet. It gets the runtime and public key read-only, no provisioner state.
-- The broker serves one pinned fingerprint. Its socket grants signing
-  authority, so share it only with the application's supplemental group.
-- The provisioner gets neither the broker runtime nor broker `HOME`, only the
-  expected broker user id, generated public API key, and bounded lifetime.
+- The application gets the runtime and public key read-only and never the broker's
+  profile, registry, credential, or provisioner state; an application profile, if one
+  exists, has no signing policy on this wallet. The provisioner gets neither the broker
+  runtime nor the broker `HOME`, only the expected broker user id, the generated public API key, and the bounded lifetime.
+- The broker serves one pinned fingerprint. Its socket grants signing authority: `0660`
+  through the application's supplemental group, or `0600` when the application and broker run as one numeric uid.
 - Drop capabilities, use a read-only root filesystem, and keep writable state in explicit bind mounts.
 - Socket loss and broker failure fail closed: no fallback to an application credential or a second signing path.
 
 ## Instructions
 
-Inputs: the wallet (`WALLET_ID`) and fingerprint (`FINGERPRINT`) from
-[signing-git-commits](../signing-git-commits/SKILL.md) steps 1 and 3 (skip
-its agent policy), the broker tag (`BROKER_TAG`, created like the agent
-tag), the `broker` and `provisioner` profiles, the socket group id (`10000`
-below), and the session lifetime.
+Inputs: `WALLET_ID` and `FINGERPRINT` from
+[signing-git-commits](../signing-git-commits/SKILL.md) steps 1 and 3 (skip its
+agent policy), the broker tag (`BROKER_TAG`, created like the agent tag), the
+`broker` and `provisioner` profiles, the socket model (group `10000` in step 3,
+or a shared uid), and the session lifetime.
 
-1. **Authorize the broker tag.** Root. The pair below is its whole policy set:
+1. **Authorize the broker tag.** Root. These two policies are its whole GPG policy set:
 
    <!-- shared: brokers-sign-gpg -->
    <!-- example: signing-broker.policy-sign -->
@@ -59,27 +63,24 @@ below), and the session lifetime.
    ```
 
    Create the broker user and provision its expiring key with
-   [provisioning-session-agent](../provisioning-session-agent/SKILL.md)
-   steps 1, 2, 4, and 5, tag `BROKER_TAG`, profile `broker`; from step 3
-   take only `provisioners-mint-agent-keys` extended with `BROKER_USER_ID`
-   and `provisioners-no-self-keys`. Skip its export policy: the broker gets none.
+   [provisioning-session-agent](../provisioning-session-agent/SKILL.md) steps 1, 2, 4,
+   and 5, tag `BROKER_TAG`, profile `broker`. Keep all three provisioner policies from
+   its step 3 (`provisioners-mint-agent-keys` extended with `BROKER_USER_ID`,
+   `provisioners-nothing-else`, `provisioners-no-self-keys`); skip only its export policy: the broker gets none.
 
-2. **Lay out host state.** Create mode-`0700` homes for the application,
-   broker, and provisioner, owned by their uids. The application home never
-   holds the broker's profile, registry, or credential; any profile of its
-   own has no signing policy on the wallet. Create its writable worktree, a
-   mode-`0770` runtime directory owned by the broker uid and socket gid, and
-   a world-readable `/opt/tk-gpg-public` for the armored public key. Persist
+2. **Lay out host state.** Create mode-`0700` homes for the application, broker, and
+   provisioner, owned by their uids; the application's writable worktree; a runtime directory
+   owned by the broker uid (`0770` with the socket gid under the group model, `0700` under the
+   shared uid); and a world-readable `/opt/tk-gpg-public` for the armored public key. Persist
    the broker user id outside the application.
 
-3. **Define the boundaries.** Example: this Compose layout realizes the three
-   boundaries; a VM or sandbox per principal substitutes as long as the runtime
-   directory is the only shared mount. Pin the image by digest in production; the
-   application image needs `tk`, Git, and GnuPG. The `provisioner` service is the
-   broker image as uid `10001` with `TK_PROFILE: provisioner`, only
-   `/opt/tk-provisioner:/home/provisioner` mounted, and `command: [sleep, infinity]`.
-   Do not add `depends_on` as a readiness claim; gate application startup on the
-   socket being a Unix socket with the expected owner, group, and mode.
+3. **Define the boundaries.** Example: this Compose layout realizes the three boundaries
+   under the group model. A VM or sandbox per principal substitutes for it when the runtime
+   directory is the only shared mount. The application image needs `tk`, Git, and GnuPG. The
+   `provisioner` service is the broker image as uid `10001` with `TK_PROFILE: provisioner`,
+   only `/opt/tk-provisioner:/home/provisioner` mounted, and `command: [sleep, infinity]`.
+   `depends_on` is not readiness: gate application startup on the socket path being a Unix
+   socket with the model's owner, group, and mode.
 
    ```yaml
    services:
@@ -89,7 +90,6 @@ below), and the session lifetime.
        group_add: ["10000"]
        environment:
          HOME: /home/app
-         GNUPGHOME: /home/app/.gnupg
          TK_GPG_AGENT_SOCK: /run/tk-gpg-agent/agent.sock
        volumes:
          - /opt/tk-app-home:/home/app
@@ -112,7 +112,6 @@ below), and the session lifetime.
        read_only: true
        tmpfs: [/tmp]
        cap_drop: [ALL]
-       restart: unless-stopped
    ```
 
 4. **Register and publish the key.** As `broker`, once, before serving. The
@@ -124,7 +123,7 @@ below), and the session lifetime.
    tk --profile broker gpg keys export --key FINGERPRINT > /opt/tk-gpg-public/FINGERPRINT.asc
    ```
 
-5. **Start the broker.** The Compose command above is equivalent to:
+5. **Start the broker.** Supervise it in the foreground; the step 3 Compose command is equivalent to:
 
    <!-- example: signing-broker.serve -->
    ```sh
@@ -132,14 +131,18 @@ below), and the session lifetime.
      --socket /run/tk-gpg-agent/agent.sock --socket-mode 660 --non-interactive
    ```
 
-   Supervise it in the foreground. SIGTERM must reach `tk`; after shutdown,
-   require its owned socket to be gone before starting a replacement.
+   SIGTERM must reach `tk`; after shutdown, require its owned socket to be gone before a replacement starts.
 
-6. **Configure the application.** Import the mounted public key, stop unless
-   GnuPG lists exactly `FINGERPRINT`, then point Git at the local `tk`:
+6. **Configure the application.** Stage the mounted armor with `show-only`. Each check exits
+   before the import unless the staging holds exactly one `pub:` record, the `fpr:` directly after
+   that `pub:` is `FINGERPRINT`, and no `sec:` or `ssb:` record. Only then import and point Git at the local `tk`:
 
    <!-- example: signing-broker.client -->
    ```sh
+   gpg --with-colons --import-options show-only --import /opt/tk-gpg-public/FINGERPRINT.asc > "$HOME/staged-key.txt"
+   test "$(grep -c '^pub:' "$HOME/staged-key.txt")" = 1 || exit 1
+   grep -A1 '^pub:' "$HOME/staged-key.txt" | grep -qF 'fpr:::::::::FINGERPRINT:' || exit 1
+   if grep -qE '^(sec|ssb):' "$HOME/staged-key.txt"; then exit 1; fi
    gpg --import /opt/tk-gpg-public/FINGERPRINT.asc
    gpg --with-colons --list-keys FINGERPRINT | grep -qF "fpr:::::::::FINGERPRINT:"
    export TK_GPG_AGENT_SOCK=/run/tk-gpg-agent/agent.sock
@@ -154,21 +157,21 @@ below), and the session lifetime.
    Signing needs no `TK_PROFILE` here: `tk` talks only to the socket. Pin
    `TK_GPG_PROGRAM` to the system GnuPG path when `gpg` is not on `PATH`.
 
-7. **Rotate the broker session.** A host timer runs the state machine from
-   [provisioning-session-agent](../provisioning-session-agent/SKILL.md):
-   status, request, and activate execute in `gpg-broker`; provision executes
-   in `provisioner`, bound to `BROKER_USER_ID` and the configured lifetime.
-   After activation, restart `gpg-broker` so it builds a new API client.
+7. **Rotate the broker session.** A host timer runs step 5 of
+   [provisioning-session-agent](../provisioning-session-agent/SKILL.md) as a state machine: status,
+   request, and activate execute in `gpg-broker`; provision executes in `provisioner`, bound to
+   `BROKER_USER_ID` and the configured lifetime. After activation, restart `gpg-broker` so it builds a new API client.
 
-8. **Gate the deployment.** Inspect mounts without printing file contents:
-   the application has only the read-only runtime and public key; the broker
-   alone has its home and runtime writable; the provisioner alone has its
-   home. Require a mode-`0660` socket and a verified signed commit. Stop the
-   broker and require signing to fail; start it, rotate, restart, sign again.
+8. **Gate the deployment.** Verify the separation of the model in force: three uids under
+   the group model; under the shared uid, one uid for application and broker but separate
+   `HOME`s, process trees, and mounts. Inspect mounts, not file contents: the application has
+   only the read-only runtime and public key; the broker alone has its home and runtime
+   writable; the provisioner alone has its home. Require a verified signed commit and a socket
+   matching the model: `0660` owned by the broker uid and socket gid, or `0600` owned by the
+   shared uid. Stop the broker; signing must fail. Start it, rotate, restart, sign again.
 
-9. **Hand off.** Report image digests, uid/gid assignments, host mount paths,
-   fingerprint, broker user id, policy ids, lifetime and timer, socket
-   metadata, and gate results. Report no credential values or private material.
+9. **Hand off.** Report image digests, uid/gid assignments, host mount paths, fingerprint, broker
+   user id, policy ids, lifetime and timer, socket metadata, and gate results; no credential values or private material.
 
 ## Verified by
 
@@ -176,20 +179,17 @@ below), and the session lifetime.
 |---|---|
 | signing-broker.policy-sign, signing-broker.policy-deny, signing-broker.export, signing-broker.serve, signing-broker.client | gpg_agent::foreground_agent_signs_for_a_credential_free_git_client |
 
-Mounts, ownership, supervision, broker loss, and rotation are manual gates;
-the test proves a broker holding only the step 1 pair signs for a
-credential-free client, refuses an unserved key, cannot register a credential,
-and removes its socket on shutdown.
+Mounts, ownership, supervision, broker loss, and rotation are manual gates. The test
+proves that a broker holding only the two step 1 policies signs for a credential-free
+client, refuses an unserved key, cannot register a credential, and removes its socket.
 
 ## Troubleshooting
 
-- The application gets `permission denied`: its supplemental gid does not
-  match the runtime and socket group, or the directory lacks group execute.
-- Signing reports the agent is unavailable: the path is not a socket on both
-  sides, or the broker left the foreground.
+- The application gets `permission denied`: its gid does not match the runtime
+  and socket group, the runtime directory lacks group execute, or the two uids differ under the shared-uid model.
+- Signing reports the agent is unavailable: the path is not a socket on both sides, or the broker left the foreground.
 - `gpg keys export` or signing fails `unauthorized`: the broker user lacks
   `BROKER_TAG`, or the ALLOW names another wallet. Do not export as root.
-- Signing fails only after rotation: stale API client in the broker. Restart it.
 - `tk whoami` in the application resolves to the broker user, or it can sign
   or export with the broker's profile: the broker's credential crossed over.
 
